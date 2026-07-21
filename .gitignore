@@ -5,4 +5,5 @@ uploads/*
 !uploads/.gitkeep
 *.log
 .DS_Store
-.claude/settings.local.json
+.claude/
+run-frontend.bat
