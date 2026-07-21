@@ -36,7 +36,8 @@ sitesRouter.get("/:id/qr", requireAuth, requireRole("admin", "manager"), async (
   const site = db.prepare("SELECT * FROM sites WHERE id = ?").get(req.params.id);
   if (!site) return res.status(404).json({ error: "Not found" });
 
-  const checkInUrl = `${process.env.PUBLIC_BASE_URL}/checkin/${site.qr_token}`;
+  const baseUrl = process.env.PUBLIC_BASE_URL || process.env.RENDER_EXTERNAL_URL || "http://localhost:4000";
+  const checkInUrl = `${baseUrl}/checkin/${site.qr_token}`;
   const dataUrl = await qrPngDataUrl(checkInUrl);
   res.json({ checkInUrl, qrImage: dataUrl });
 });

@@ -8,7 +8,7 @@ export const checklistsRouter = Router();
 
 const upload = multer({
   storage: multer.diskStorage({
-    destination: "uploads/",
+    destination: process.env.UPLOADS_DIR || "uploads/",
     filename: (req, file, cb) => cb(null, `${Date.now()}-${file.originalname}`),
   }),
   limits: { fileSize: 10 * 1024 * 1024 },

@@ -2,6 +2,7 @@ import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import morgan from "morgan";
+import fs from "node:fs";
 import "./db.js";
 
 import { authRouter } from "./routes/auth.js";
@@ -11,11 +12,14 @@ import { checklistsRouter } from "./routes/checklists.js";
 import { deviationsRouter } from "./routes/deviations.js";
 import { reportsRouter } from "./routes/reports.js";
 
+const uploadsDir = process.env.UPLOADS_DIR || "uploads";
+if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
+
 const app = express();
 app.use(cors());
 app.use(express.json());
 app.use(morgan("dev"));
-app.use("/uploads", express.static("uploads"));
+app.use("/uploads", express.static(uploadsDir));
 
 app.get("/health", (req, res) => res.json({ ok: true }));
 
