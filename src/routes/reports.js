@@ -1,7 +1,11 @@
 import { Router } from "express";
 import PDFDocument from "pdfkit";
+import fs from "node:fs";
+import path from "node:path";
 import { db } from "../db.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
+
+const PHOTO_KIND_LABELS = { before: "Før", after: "Etter", general: "Generelt" };
 
 export const reportsRouter = Router();
 
@@ -20,6 +24,13 @@ reportsRouter.get("/sites/:id/pdf", requireAuth, requireRole("admin", "manager",
   const deviations = db
     .prepare("SELECT * FROM deviations WHERE site_id = ? ORDER BY created_at DESC LIMIT 20")
     .all(site.id);
+
+  const runIds = runs.map((r) => r.id);
+  const photos = runIds.length
+    ? db
+        .prepare(`SELECT * FROM photos WHERE run_id IN (${runIds.map(() => "?").join(",")}) ORDER BY created_at DESC`)
+        .all(...runIds)
+    : [];
 
   res.setHeader("Content-Type", "application/pdf");
   res.setHeader("Content-Disposition", `attachment; filename=rapport-${site.id}.pdf`);
@@ -46,6 +57,22 @@ reportsRouter.get("/sites/:id/pdf", requireAuth, requireRole("admin", "manager",
     doc.fontSize(10).text(`${d.created_at} — [${d.priority}] ${d.description} (${d.status})`);
   });
   if (deviations.length === 0) doc.fontSize(10).fillColor("gray").text("Ingen registrerte avvik.");
+
+  doc.moveDown();
+  doc.fillColor("black").fontSize(13).text("Bilder");
+  doc.moveDown(0.5);
+  const uploadsDir = process.env.UPLOADS_DIR || "uploads";
+  let embeddedAny = false;
+  photos.forEach((photo) => {
+    const absolutePath = path.join(uploadsDir, path.basename(photo.file_path));
+    if (!fs.existsSync(absolutePath)) return;
+    embeddedAny = true;
+    if (doc.y > doc.page.height - 250) doc.addPage();
+    doc.fontSize(9).fillColor("gray").text(`${photo.created_at} — ${PHOTO_KIND_LABELS[photo.kind] || photo.kind}`);
+    doc.image(absolutePath, { fit: [220, 220] });
+    doc.moveDown();
+  });
+  if (!embeddedAny) doc.fontSize(10).fillColor("gray").text("Ingen bilder tilgjengelig.");
 
   doc.end();
 });
