@@ -2,12 +2,18 @@ services:
   - type: web
     name: rentlogg-backend
     runtime: node
-    plan: free
+    plan: starter
     buildCommand: npm install
     startCommand: npm start
     healthCheckPath: /health
+    disk:
+      name: rentlogg-data
+      mountPath: /var/data
+      sizeGB: 1
     envVars:
       - key: JWT_SECRET
         generateValue: true
       - key: DB_FILE
-        value: ./data/rentlogg.db
+        value: /var/data/rentlogg.db
+      - key: UPLOADS_DIR
+        value: /var/data/uploads
