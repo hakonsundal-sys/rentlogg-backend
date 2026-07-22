@@ -10,12 +10,12 @@ clientsRouter.get("/", requireAuth, requireRole("admin", "manager"), (req, res) 
 });
 
 clientsRouter.post("/", requireAuth, requireRole("admin"), (req, res) => {
-  const { name, contact_email, contact_name, phone } = req.body;
+  const { name, contact_email, contact_name, phone, address } = req.body;
   if (!name) return res.status(400).json({ error: "name is required" });
   const info = db
-    .prepare("INSERT INTO clients (name, contact_email, contact_name, phone) VALUES (?, ?, ?, ?)")
-    .run(name, contact_email || null, contact_name || null, phone || null);
-  res.status(201).json({ id: info.lastInsertRowid, name, contact_email, contact_name, phone });
+    .prepare("INSERT INTO clients (name, contact_email, contact_name, phone, address) VALUES (?, ?, ?, ?, ?)")
+    .run(name, contact_email || null, contact_name || null, phone || null, address || null);
+  res.status(201).json({ id: info.lastInsertRowid, name, contact_email, contact_name, phone, address });
 });
 
 clientsRouter.get("/:id", requireAuth, requireRole("admin", "manager"), (req, res) => {
@@ -24,7 +24,7 @@ clientsRouter.get("/:id", requireAuth, requireRole("admin", "manager"), (req, re
   res.json(client);
 });
 
-const CLIENT_PATCH_FIELDS = ["name", "contact_email", "contact_name", "phone"];
+const CLIENT_PATCH_FIELDS = ["name", "contact_email", "contact_name", "phone", "address"];
 
 clientsRouter.patch("/:id", requireAuth, requireRole("admin"), (req, res) => {
   const fields = CLIENT_PATCH_FIELDS.filter((f) => f in req.body);

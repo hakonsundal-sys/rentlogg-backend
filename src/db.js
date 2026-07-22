@@ -23,6 +23,7 @@ function ensureColumn(table, column, ddl) {
 
 ensureColumn("clients", "contact_name", "contact_name TEXT");
 ensureColumn("clients", "phone", "phone TEXT");
+ensureColumn("clients", "address", "address TEXT");
 ensureColumn("sites", "room_count", "room_count INTEGER DEFAULT 0");
 ensureColumn("users", "avatar_url", "avatar_url TEXT");
 ensureColumn("users", "phone", "phone TEXT");
