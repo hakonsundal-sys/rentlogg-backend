@@ -54,6 +54,22 @@ function isValidRoomsShape(rooms) {
   );
 }
 
+// For large documents Claude sometimes stringifies its whole answer into the
+// `rooms` field instead of returning a native array — unwrap that case too.
+function coerceRoomsShape(raw) {
+  if (isValidRoomsShape(raw)) return raw;
+  if (typeof raw === "string") {
+    try {
+      const parsed = JSON.parse(raw);
+      const candidate = Array.isArray(parsed) ? parsed : parsed?.rooms;
+      if (isValidRoomsShape(candidate)) return candidate;
+    } catch {
+      // fall through
+    }
+  }
+  return null;
+}
+
 // --- Site-scoped: /sites/:siteId/rooms ---
 
 siteRoomsRouter.get("/", requireAuth, (req, res) => {
@@ -115,34 +131,48 @@ siteRoomsRouter.post("/import-pdf", requireAuth, requireRole("admin", "manager")
   }
   text = text.slice(0, MAX_EXTRACTED_TEXT_CHARS);
 
-  let message;
-  try {
-    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-    message = await anthropic.messages.create({
-      model: "claude-sonnet-5",
-      max_tokens: 4096,
-      tools: [SUBMIT_ROOMS_TOOL],
-      tool_choice: { type: "tool", name: "submit_rooms" },
-      messages: [
-        {
-          role: "user",
-          content:
-            "This is the text of a cleaning plan document for a commercial site (may be in Norwegian). " +
-            "Extract every room or area mentioned and the cleaning tasks for each. If a room has no " +
-            "explicit task list, use a single sensible general task. Call submit_rooms with the result.\n\n" +
-            text,
-        },
-      ],
-    });
-  } catch (err) {
-    console.error("Anthropic API error:", err);
-    return res.status(502).json({ error: "Kunne ikke kontakte AI-tjenesten. Prøv igjen senere." });
+  const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+  let rooms;
+  for (let attempt = 1; attempt <= 2 && !rooms; attempt++) {
+    let message;
+    try {
+      message = await anthropic.messages.create({
+        model: "claude-sonnet-5",
+        max_tokens: 4096,
+        tools: [SUBMIT_ROOMS_TOOL],
+        tool_choice: { type: "tool", name: "submit_rooms" },
+        messages: [
+          {
+            role: "user",
+            content:
+              "This is the text of a cleaning plan document for a commercial site (may be in Norwegian). " +
+              "Extract every room or area mentioned and the cleaning tasks for each. If a room has no " +
+              "explicit task list, use a single sensible general task. Call submit_rooms with the result.\n\n" +
+              text,
+          },
+        ],
+      });
+    } catch (err) {
+      console.error("Anthropic API error:", err);
+      return res.status(502).json({ error: "Kunne ikke kontakte AI-tjenesten. Prøv igjen senere." });
+    }
+
+    const toolUse = message.content.find((block) => block.type === "tool_use" && block.name === "submit_rooms");
+    const coerced = coerceRoomsShape(toolUse?.input?.rooms);
+    if (coerced) {
+      rooms = coerced;
+    } else {
+      console.error(
+        `Bad AI shape (attempt ${attempt}). stop_reason:`,
+        message.stop_reason,
+        "content:",
+        JSON.stringify(message.content).slice(0, 2000)
+      );
+    }
   }
 
-  const toolUse = message.content.find((block) => block.type === "tool_use" && block.name === "submit_rooms");
-  const rooms = toolUse?.input?.rooms;
-  if (!isValidRoomsShape(rooms)) {
-    return res.status(502).json({ error: "Kunne ikke tolke resultatet fra AI-analysen." });
+  if (!rooms) {
+    return res.status(502).json({ error: "Kunne ikke tolke resultatet fra AI-analysen. Prøv å laste opp PDF-en på nytt." });
   }
 
   res.json({ rooms });
