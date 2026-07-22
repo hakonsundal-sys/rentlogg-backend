@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { db } from "../db.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
+import { computeMonthlyReport } from "../services/schedule.js";
 
 const PHOTO_KIND_LABELS = { before: "Før", after: "Etter", general: "Generelt" };
 
@@ -75,4 +76,48 @@ reportsRouter.get("/sites/:id/pdf", requireAuth, requireRole("admin", "manager",
   if (!embeddedAny) doc.fontSize(10).fillColor("gray").text("Ingen bilder tilgjengelig.");
 
   doc.end();
+});
+
+function parseSummaryQuery(req) {
+  const month = req.query.month || new Date().toISOString().slice(0, 7);
+  const siteId = req.query.site_id ? Number(req.query.site_id) : undefined;
+  return { month, siteId };
+}
+
+reportsRouter.get("/summary", requireAuth, requireRole("admin", "manager"), (req, res) => {
+  res.json(computeMonthlyReport(parseSummaryQuery(req)));
+});
+
+function csvEscape(value) {
+  const str = String(value ?? "");
+  if (/[",\n]/.test(str)) return `"${str.replace(/"/g, '""')}"`;
+  return str;
+}
+
+const STATUS_LABELS = { completed: "Fullført", in_progress: "Pågår", missing: "Manglende" };
+
+reportsRouter.get("/summary.csv", requireAuth, requireRole("admin", "manager"), (req, res) => {
+  const { month, siteId } = parseSummaryQuery(req);
+  const { rows } = computeMonthlyReport({ month, siteId });
+
+  const header = ["Dato", "Lokasjon", "Planlagt", "Rom", "Oppgaver"];
+  const lines = [header.map(csvEscape).join(",")];
+  for (const row of rows) {
+    lines.push(
+      [
+        row.date,
+        row.site_name,
+        STATUS_LABELS[row.status] || row.status,
+        row.room_count,
+        `${row.tasksCompleted}/${row.tasksTotal}`,
+      ]
+        .map(csvEscape)
+        .join(",")
+    );
+  }
+
+  const csv = `﻿${lines.join("\r\n")}`;
+  res.setHeader("Content-Type", "text/csv; charset=utf-8");
+  res.setHeader("Content-Disposition", `attachment; filename=rapport-${month}.csv`);
+  res.send(csv);
 });

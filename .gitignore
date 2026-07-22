@@ -7,3 +7,4 @@ uploads/*
 .DS_Store
 .claude/
 run-frontend.bat
+run-backend.bat

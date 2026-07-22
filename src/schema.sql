@@ -3,6 +3,8 @@ CREATE TABLE IF NOT EXISTS clients (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL,
   contact_email TEXT,
+  contact_name TEXT,
+  phone TEXT,
   created_at TEXT DEFAULT (datetime('now'))
 );
 
@@ -14,6 +16,8 @@ CREATE TABLE IF NOT EXISTS users (
   password_hash TEXT NOT NULL,
   role TEXT NOT NULL CHECK (role IN ('admin', 'manager', 'cleaner', 'customer')),
   client_id INTEGER REFERENCES clients(id), -- set for 'customer' role users
+  avatar_url TEXT,
+  phone TEXT,
   created_at TEXT DEFAULT (datetime('now'))
 );
 
@@ -30,6 +34,7 @@ CREATE TABLE IF NOT EXISTS sites (
   gps_radius_meters INTEGER DEFAULT 150,
   last_cleaned_at TEXT,
   status TEXT NOT NULL DEFAULT 'overdue' CHECK (status IN ('ok', 'overdue', 'deviation')),
+  room_count INTEGER DEFAULT 0,
   created_at TEXT DEFAULT (datetime('now'))
 );
 
@@ -73,6 +78,7 @@ CREATE TABLE IF NOT EXISTS deviations (
   site_id INTEGER NOT NULL REFERENCES sites(id),
   run_id INTEGER REFERENCES checklist_runs(id),
   reported_by INTEGER NOT NULL REFERENCES users(id),
+  title TEXT,
   description TEXT NOT NULL,
   priority TEXT NOT NULL DEFAULT 'medium' CHECK (priority IN ('low', 'medium', 'high')),
   status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'in_progress', 'resolved')),
@@ -90,6 +96,32 @@ CREATE TABLE IF NOT EXISTS photos (
   created_at TEXT DEFAULT (datetime('now'))
 );
 
+-- Site schedules: recurring weekday cleaning plan per site (no cron — matched against
+-- actual checklist_runs at request time to compute "planned" vs "missing")
+CREATE TABLE IF NOT EXISTS site_schedules (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  site_id INTEGER NOT NULL REFERENCES sites(id),
+  weekday INTEGER NOT NULL CHECK (weekday BETWEEN 0 AND 6),
+  assigned_cleaner_id INTEGER REFERENCES users(id),
+  created_at TEXT DEFAULT (datetime('now')),
+  UNIQUE(site_id, weekday)
+);
+
+-- Invitations: 14-day expiring links used to onboard new users without an admin-set password
+CREATE TABLE IF NOT EXISTS invitations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  email TEXT NOT NULL,
+  role TEXT NOT NULL CHECK (role IN ('admin', 'manager', 'cleaner', 'customer')),
+  client_id INTEGER REFERENCES clients(id),
+  token TEXT UNIQUE NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'used', 'revoked')),
+  invited_by INTEGER NOT NULL REFERENCES users(id),
+  created_at TEXT DEFAULT (datetime('now')),
+  expires_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_sites_client ON sites(client_id);
 CREATE INDEX IF NOT EXISTS idx_runs_site ON checklist_runs(site_id);
 CREATE INDEX IF NOT EXISTS idx_deviations_site ON deviations(site_id);
+CREATE INDEX IF NOT EXISTS idx_schedules_site ON site_schedules(site_id);
+CREATE INDEX IF NOT EXISTS idx_invitations_token ON invitations(token);

@@ -11,9 +11,12 @@ import { sitesRouter } from "./routes/sites.js";
 import { checklistsRouter } from "./routes/checklists.js";
 import { deviationsRouter } from "./routes/deviations.js";
 import { reportsRouter } from "./routes/reports.js";
+import { dashboardRouter } from "./routes/dashboard.js";
+import { invitationsRouter } from "./routes/invitations.js";
 
 const uploadsDir = process.env.UPLOADS_DIR || "uploads";
 if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
+if (!fs.existsSync(`${uploadsDir}/avatars`)) fs.mkdirSync(`${uploadsDir}/avatars`, { recursive: true });
 
 const app = express();
 app.use(cors());
@@ -29,6 +32,8 @@ app.use("/sites", sitesRouter);
 app.use("/checklists", checklistsRouter);
 app.use("/deviations", deviationsRouter);
 app.use("/reports", reportsRouter);
+app.use("/dashboard", dashboardRouter);
+app.use("/invitations", invitationsRouter);
 
 app.use((err, req, res, next) => {
   console.error(err);

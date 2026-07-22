@@ -35,6 +35,34 @@ checklistsRouter.post("/templates", requireAuth, requireRole("admin", "manager")
 
 // --- Runs (an in-progress or completed cleaning visit) ---
 
+checklistsRouter.get("/runs", requireAuth, requireRole("admin", "manager"), (req, res) => {
+  const { site_id, from, to } = req.query;
+  const conditions = [];
+  const params = [];
+  if (site_id) {
+    conditions.push("r.site_id = ?");
+    params.push(site_id);
+  }
+  if (from) {
+    conditions.push("date(r.started_at) >= ?");
+    params.push(from);
+  }
+  if (to) {
+    conditions.push("date(r.started_at) <= ?");
+    params.push(to);
+  }
+  const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+  const rows = db
+    .prepare(
+      `SELECT r.*, s.name AS site_name FROM checklist_runs r
+       JOIN sites s ON s.id = r.site_id
+       ${where}
+       ORDER BY r.started_at DESC`
+    )
+    .all(...params);
+  res.json(rows);
+});
+
 checklistsRouter.get("/runs/:id", requireAuth, (req, res) => {
   const run = db.prepare("SELECT * FROM checklist_runs WHERE id = ?").get(req.params.id);
   if (!run) return res.status(404).json({ error: "Not found" });
