@@ -120,8 +120,55 @@ CREATE TABLE IF NOT EXISTS invitations (
   expires_at TEXT NOT NULL
 );
 
+-- Rooms: per-room breakdown of a site's cleaning plan (opt-in; sites with no rooms keep
+-- using the flat checklist_templates/checklist_runs model unchanged)
+CREATE TABLE IF NOT EXISTS rooms (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  site_id INTEGER NOT NULL REFERENCES sites(id),
+  name TEXT NOT NULL,
+  sort_order INTEGER DEFAULT 0,
+  interval_days INTEGER, -- NULL = weekday mode (room_schedules); set = "every N days" mode
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS room_checklist_items (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  room_id INTEGER NOT NULL REFERENCES rooms(id),
+  label TEXT NOT NULL,
+  sort_order INTEGER DEFAULT 0,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS room_schedules (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  room_id INTEGER NOT NULL REFERENCES rooms(id),
+  weekday INTEGER NOT NULL CHECK (weekday BETWEEN 0 AND 6),
+  assigned_cleaner_id INTEGER REFERENCES users(id),
+  created_at TEXT DEFAULT (datetime('now')),
+  UNIQUE(room_id, weekday)
+);
+
+CREATE TABLE IF NOT EXISTS room_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  room_id INTEGER NOT NULL REFERENCES rooms(id),
+  cleaner_id INTEGER REFERENCES users(id),
+  started_at TEXT DEFAULT (datetime('now')),
+  completed_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS room_run_items (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  room_run_id INTEGER NOT NULL REFERENCES room_runs(id),
+  label TEXT NOT NULL,
+  done INTEGER DEFAULT 0,
+  sort_order INTEGER DEFAULT 0
+);
+
 CREATE INDEX IF NOT EXISTS idx_sites_client ON sites(client_id);
 CREATE INDEX IF NOT EXISTS idx_runs_site ON checklist_runs(site_id);
 CREATE INDEX IF NOT EXISTS idx_deviations_site ON deviations(site_id);
 CREATE INDEX IF NOT EXISTS idx_schedules_site ON site_schedules(site_id);
 CREATE INDEX IF NOT EXISTS idx_invitations_token ON invitations(token);
+CREATE INDEX IF NOT EXISTS idx_rooms_site ON rooms(site_id);
+CREATE INDEX IF NOT EXISTS idx_room_schedules_room ON room_schedules(room_id);
+CREATE INDEX IF NOT EXISTS idx_room_runs_room ON room_runs(room_id);

@@ -65,6 +65,25 @@ sitesRouter.delete("/:id", requireAuth, requireRole("admin", "manager"), (req, r
     db.prepare("DELETE FROM deviations WHERE site_id = ?").run(siteId);
     db.prepare("DELETE FROM checklist_runs WHERE site_id = ?").run(siteId);
     db.prepare("DELETE FROM site_schedules WHERE site_id = ?").run(siteId);
+
+    const roomIds = db.prepare("SELECT id FROM rooms WHERE site_id = ?").all(siteId).map((r) => r.id);
+    if (roomIds.length) {
+      const roomPlaceholders = roomIds.map(() => "?").join(",");
+      const roomRunIds = db
+        .prepare(`SELECT id FROM room_runs WHERE room_id IN (${roomPlaceholders})`)
+        .all(...roomIds)
+        .map((r) => r.id);
+      if (roomRunIds.length) {
+        const runPlaceholders = roomRunIds.map(() => "?").join(",");
+        db.prepare(`DELETE FROM photos WHERE room_run_id IN (${runPlaceholders})`).run(...roomRunIds);
+        db.prepare(`DELETE FROM room_run_items WHERE room_run_id IN (${runPlaceholders})`).run(...roomRunIds);
+      }
+      db.prepare(`DELETE FROM room_runs WHERE room_id IN (${roomPlaceholders})`).run(...roomIds);
+      db.prepare(`DELETE FROM room_schedules WHERE room_id IN (${roomPlaceholders})`).run(...roomIds);
+      db.prepare(`DELETE FROM room_checklist_items WHERE room_id IN (${roomPlaceholders})`).run(...roomIds);
+    }
+    db.prepare("DELETE FROM rooms WHERE site_id = ?").run(siteId);
+
     db.prepare("DELETE FROM sites WHERE id = ?").run(siteId);
   });
 

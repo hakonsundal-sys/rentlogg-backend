@@ -27,3 +27,4 @@ ensureColumn("sites", "room_count", "room_count INTEGER DEFAULT 0");
 ensureColumn("users", "avatar_url", "avatar_url TEXT");
 ensureColumn("users", "phone", "phone TEXT");
 ensureColumn("deviations", "title", "title TEXT");
+ensureColumn("photos", "room_run_id", "room_run_id INTEGER REFERENCES room_runs(id)");

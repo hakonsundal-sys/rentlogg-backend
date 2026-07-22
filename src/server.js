@@ -13,6 +13,7 @@ import { deviationsRouter } from "./routes/deviations.js";
 import { reportsRouter } from "./routes/reports.js";
 import { dashboardRouter } from "./routes/dashboard.js";
 import { invitationsRouter } from "./routes/invitations.js";
+import { siteRoomsRouter, roomsRouter } from "./routes/rooms.js";
 
 const uploadsDir = process.env.UPLOADS_DIR || "uploads";
 if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
@@ -34,6 +35,8 @@ app.use("/deviations", deviationsRouter);
 app.use("/reports", reportsRouter);
 app.use("/dashboard", dashboardRouter);
 app.use("/invitations", invitationsRouter);
+app.use("/sites/:siteId/rooms", siteRoomsRouter);
+app.use("/rooms", roomsRouter);
 
 app.use((err, req, res, next) => {
   console.error(err);
