@@ -1,6 +1,8 @@
 import { Router } from "express";
 import multer from "multer";
 import path from "node:path";
+import Anthropic from "@anthropic-ai/sdk";
+import { PDFParse } from "pdf-parse";
 import { db } from "../db.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 import { todayInOslo } from "../services/schedule.js";
@@ -16,6 +18,41 @@ const upload = multer({
   }),
   limits: { fileSize: 10 * 1024 * 1024 },
 });
+
+const pdfUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
+
+const MAX_EXTRACTED_TEXT_CHARS = 15000;
+
+const SUBMIT_ROOMS_TOOL = {
+  name: "submit_rooms",
+  description: "Submit the rooms and cleaning tasks extracted from a cleaning plan document.",
+  input_schema: {
+    type: "object",
+    properties: {
+      rooms: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            name: { type: "string", description: "Room or area name, e.g. 'Kjøkken' or 'Gulv ekspedisjon'" },
+            tasks: { type: "array", items: { type: "string" }, description: "Cleaning tasks for this room" },
+          },
+          required: ["name", "tasks"],
+        },
+      },
+    },
+    required: ["rooms"],
+  },
+};
+
+function isValidRoomsShape(rooms) {
+  return (
+    Array.isArray(rooms) &&
+    rooms.every(
+      (r) => r && typeof r.name === "string" && Array.isArray(r.tasks) && r.tasks.every((t) => typeof t === "string")
+    )
+  );
+}
 
 // --- Site-scoped: /sites/:siteId/rooms ---
 
@@ -51,6 +88,89 @@ siteRoomsRouter.post("/complete-all-due", requireAuth, requireRole("cleaner"), (
   });
 
   res.json({ completedCount: completeAll(dueIncomplete) });
+});
+
+// --- AI PDF import: proposes rooms/tasks without persisting them ---
+
+siteRoomsRouter.post("/import-pdf", requireAuth, requireRole("admin", "manager"), pdfUpload.single("pdf"), async (req, res) => {
+  if (!process.env.ANTHROPIC_API_KEY) {
+    return res.status(503).json({ error: "AI-import er ikke konfigurert ennå." });
+  }
+  if (!req.file) return res.status(400).json({ error: "No file uploaded (field name must be 'pdf')" });
+
+  let text;
+  try {
+    const parser = new PDFParse({ data: req.file.buffer });
+    const result = await parser.getText();
+    await parser.destroy();
+    text = (result.text || "").trim();
+  } catch {
+    return res.status(422).json({ error: "Kunne ikke lese PDF-en. Sjekk at filen ikke er skadet." });
+  }
+
+  if (text.length < 20) {
+    return res.status(422).json({
+      error: "Fant ingen lesbar tekst i PDF-en. Prøv en tekstbasert PDF, eller legg til rom manuelt.",
+    });
+  }
+  text = text.slice(0, MAX_EXTRACTED_TEXT_CHARS);
+
+  let message;
+  try {
+    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+    message = await anthropic.messages.create({
+      model: "claude-sonnet-5",
+      max_tokens: 4096,
+      tools: [SUBMIT_ROOMS_TOOL],
+      tool_choice: { type: "tool", name: "submit_rooms" },
+      messages: [
+        {
+          role: "user",
+          content:
+            "This is the text of a cleaning plan document for a commercial site (may be in Norwegian). " +
+            "Extract every room or area mentioned and the cleaning tasks for each. If a room has no " +
+            "explicit task list, use a single sensible general task. Call submit_rooms with the result.\n\n" +
+            text,
+        },
+      ],
+    });
+  } catch (err) {
+    console.error("Anthropic API error:", err);
+    return res.status(502).json({ error: "Kunne ikke kontakte AI-tjenesten. Prøv igjen senere." });
+  }
+
+  const toolUse = message.content.find((block) => block.type === "tool_use" && block.name === "submit_rooms");
+  const rooms = toolUse?.input?.rooms;
+  if (!isValidRoomsShape(rooms)) {
+    return res.status(502).json({ error: "Kunne ikke tolke resultatet fra AI-analysen." });
+  }
+
+  res.json({ rooms });
+});
+
+siteRoomsRouter.post("/import-confirm", requireAuth, requireRole("admin", "manager"), (req, res) => {
+  const { rooms } = req.body;
+  if (!isValidRoomsShape(rooms)) return res.status(400).json({ error: "rooms[] with name/tasks[] is required" });
+
+  const siteId = req.params.siteId;
+  const insertRoom = db.prepare("INSERT INTO rooms (site_id, name, sort_order) VALUES (?, ?, ?)");
+  const insertItem = db.prepare("INSERT INTO room_checklist_items (room_id, label, sort_order) VALUES (?, ?, ?)");
+
+  const importAll = db.transaction((roomsToImport) => {
+    let nextSort = db.prepare("SELECT COALESCE(MAX(sort_order), -1) + 1 AS n FROM rooms WHERE site_id = ?").get(siteId).n;
+    const created = [];
+    for (const room of roomsToImport) {
+      if (!room.name.trim()) continue;
+      const info = insertRoom.run(siteId, room.name, nextSort++);
+      room.tasks.forEach((label, i) => {
+        if (label.trim()) insertItem.run(info.lastInsertRowid, label, i);
+      });
+      created.push(db.prepare("SELECT * FROM rooms WHERE id = ?").get(info.lastInsertRowid));
+    }
+    return created;
+  });
+
+  res.status(201).json({ rooms: importAll(rooms) });
 });
 
 // --- Room-scoped: /rooms/:id ---
