@@ -25,7 +25,7 @@ const MAX_EXTRACTED_TEXT_CHARS = 15000;
 
 const SUBMIT_ROOMS_TOOL = {
   name: "submit_rooms",
-  description: "Submit the rooms and cleaning tasks extracted from a cleaning plan document.",
+  description: "Submit the rooms, cleaning tasks, and cleaning frequency extracted from a cleaning plan document.",
   input_schema: {
     type: "object",
     properties: {
@@ -36,6 +36,30 @@ const SUBMIT_ROOMS_TOOL = {
           properties: {
             name: { type: "string", description: "Room or area name, e.g. 'Kjøkken' or 'Gulv ekspedisjon'" },
             tasks: { type: "array", items: { type: "string" }, description: "Cleaning tasks for this room" },
+            schedule: {
+              type: "object",
+              description:
+                "Best-guess cleaning frequency for this room, inferred from its task text (e.g. '5 ganger per uke " +
+                "(mandag-fredag)', '1 gang per måned'). Set exactly one of weekdays or interval_days — never both. " +
+                "Omit this whole object if no frequency is mentioned anywhere for the room.",
+              properties: {
+                weekdays: {
+                  type: "array",
+                  items: { type: "integer", minimum: 0, maximum: 6 },
+                  description:
+                    "0=søndag..6=lørdag. Only set when specific weekdays are explicitly named, e.g. " +
+                    "'mandag-fredag' -> [1,2,3,4,5], 'mandag og fredag' -> [1,5]. Leave unset otherwise.",
+                },
+                interval_days: {
+                  type: "integer",
+                  description:
+                    "Use when a frequency is given without naming specific weekdays. Convert to an approximate " +
+                    "day count: '1 gang per uke' -> 7, '2 ganger per uke' -> 4, '3 ganger per uke' -> 2, " +
+                    "'1 gang per måned' -> 30, '2 ganger per måned' -> 15, '1 gang per år' -> 365, " +
+                    "'2 ganger per år' -> 180, 'ved behov' -> omit entirely (no reliable frequency).",
+                },
+              },
+            },
           },
           required: ["name", "tasks"],
         },
@@ -52,6 +76,21 @@ function isValidRoomsShape(rooms) {
       (r) => r && typeof r.name === "string" && Array.isArray(r.tasks) && r.tasks.every((t) => typeof t === "string")
     )
   );
+}
+
+// Normalizes an AI- or admin-supplied `schedule` into exactly one of weekday-mode or
+// interval-mode (weekdays take priority if both are somehow present), or null if neither
+// is usable — mirrors the mutual-exclusivity rule already enforced on rooms.interval_days.
+function sanitizeSchedule(schedule) {
+  if (!schedule || typeof schedule !== "object") return null;
+  if (Array.isArray(schedule.weekdays)) {
+    const weekdays = [...new Set(schedule.weekdays.filter((w) => Number.isInteger(w) && w >= 0 && w <= 6))];
+    if (weekdays.length > 0) return { weekdays, interval_days: null };
+  }
+  if (Number.isInteger(schedule.interval_days) && schedule.interval_days > 0) {
+    return { weekdays: null, interval_days: schedule.interval_days };
+  }
+  return null;
 }
 
 // For large documents Claude sometimes stringifies its whole answer into the
@@ -147,7 +186,9 @@ siteRoomsRouter.post("/import-pdf", requireAuth, requireRole("admin", "manager")
             content:
               "This is the text of a cleaning plan document for a commercial site (may be in Norwegian). " +
               "Extract every room or area mentioned and the cleaning tasks for each. If a room has no " +
-              "explicit task list, use a single sensible general task. Call submit_rooms with the result.\n\n" +
+              "explicit task list, use a single sensible general task. For each room, also infer its cleaning " +
+              "schedule from the frequency wording in its task text (e.g. '5 ganger per uke (mandag-fredag)', " +
+              "'1 gang per måned') per the schedule field's rules. Call submit_rooms with the result.\n\n" +
               text,
           },
         ],
@@ -175,7 +216,7 @@ siteRoomsRouter.post("/import-pdf", requireAuth, requireRole("admin", "manager")
     return res.status(502).json({ error: "Kunne ikke tolke resultatet fra AI-analysen. Prøv å laste opp PDF-en på nytt." });
   }
 
-  res.json({ rooms });
+  res.json({ rooms: rooms.map((r) => ({ ...r, schedule: sanitizeSchedule(r.schedule) })) });
 });
 
 siteRoomsRouter.post("/import-confirm", requireAuth, requireRole("admin", "manager"), (req, res) => {
@@ -183,18 +224,23 @@ siteRoomsRouter.post("/import-confirm", requireAuth, requireRole("admin", "manag
   if (!isValidRoomsShape(rooms)) return res.status(400).json({ error: "rooms[] with name/tasks[] is required" });
 
   const siteId = req.params.siteId;
-  const insertRoom = db.prepare("INSERT INTO rooms (site_id, name, sort_order) VALUES (?, ?, ?)");
+  const insertRoom = db.prepare("INSERT INTO rooms (site_id, name, sort_order, interval_days) VALUES (?, ?, ?, ?)");
   const insertItem = db.prepare("INSERT INTO room_checklist_items (room_id, label, sort_order) VALUES (?, ?, ?)");
+  const insertWeekday = db.prepare("INSERT INTO room_schedules (room_id, weekday) VALUES (?, ?)");
 
   const importAll = db.transaction((roomsToImport) => {
     let nextSort = db.prepare("SELECT COALESCE(MAX(sort_order), -1) + 1 AS n FROM rooms WHERE site_id = ?").get(siteId).n;
     const created = [];
     for (const room of roomsToImport) {
       if (!room.name.trim()) continue;
-      const info = insertRoom.run(siteId, room.name, nextSort++);
+      const schedule = sanitizeSchedule(room.schedule);
+      const info = insertRoom.run(siteId, room.name, nextSort++, schedule?.interval_days ?? null);
       room.tasks.forEach((label, i) => {
         if (label.trim()) insertItem.run(info.lastInsertRowid, label, i);
       });
+      if (schedule?.weekdays) {
+        schedule.weekdays.forEach((weekday) => insertWeekday.run(info.lastInsertRowid, weekday));
+      }
       created.push(db.prepare("SELECT * FROM rooms WHERE id = ?").get(info.lastInsertRowid));
     }
     return created;
