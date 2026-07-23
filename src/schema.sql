@@ -128,8 +128,11 @@ CREATE TABLE IF NOT EXISTS rooms (
   site_id INTEGER NOT NULL REFERENCES sites(id),
   name TEXT NOT NULL,
   sort_order INTEGER DEFAULT 0,
-  interval_days INTEGER, -- NULL = weekday mode (room_schedules); set = "every N days" mode
+  interval_days INTEGER, -- set = "every N days" mode
+  monthly_weekday INTEGER, -- 0=søndag..6=lørdag; set = "Nth weekday of month" mode
+  monthly_occurrence INTEGER, -- 1..4 = first..fourth, -1 = last; goes with monthly_weekday
   created_at TEXT DEFAULT (datetime('now'))
+  -- exactly one of: room_schedules rows (weekday mode), interval_days, or the monthly_* pair — enforced in routes, not the DB
 );
 
 CREATE TABLE IF NOT EXISTS room_checklist_items (

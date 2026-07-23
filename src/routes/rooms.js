@@ -40,23 +40,39 @@ const SUBMIT_ROOMS_TOOL = {
               type: "object",
               description:
                 "Best-guess cleaning frequency for this room, inferred from its task text (e.g. '5 ganger per uke " +
-                "(mandag-fredag)', '1 gang per måned'). Set exactly one of weekdays or interval_days — never both. " +
-                "Omit this whole object if no frequency is mentioned anywhere for the room.",
+                "(mandag-fredag)', 'første mandag i måneden', '1 gang per måned'). Set exactly one of weekdays, " +
+                "monthly, or interval_days — never more than one. Omit this whole object if no frequency is " +
+                "mentioned anywhere for the room.",
               properties: {
                 weekdays: {
                   type: "array",
                   items: { type: "integer", minimum: 0, maximum: 6 },
                   description:
-                    "0=søndag..6=lørdag. Only set when specific weekdays are explicitly named, e.g. " +
+                    "0=søndag..6=lørdag. Only set when the task repeats weekly on specific named weekdays, e.g. " +
                     "'mandag-fredag' -> [1,2,3,4,5], 'mandag og fredag' -> [1,5]. Leave unset otherwise.",
+                },
+                monthly: {
+                  type: "object",
+                  description:
+                    "Use when the task happens once a month on a specific weekday occurrence, e.g. 'første mandag " +
+                    "i måneden' -> {weekday: 1, occurrence: 1}, 'siste fredag i måneden' -> {weekday: 5, " +
+                    "occurrence: -1}, 'andre tirsdag hver måned' -> {weekday: 2, occurrence: 2}.",
+                  properties: {
+                    weekday: { type: "integer", minimum: 0, maximum: 6, description: "0=søndag..6=lørdag" },
+                    occurrence: {
+                      type: "integer",
+                      description: "1=første, 2=andre, 3=tredje, 4=fjerde, -1=siste",
+                    },
+                  },
                 },
                 interval_days: {
                   type: "integer",
                   description:
-                    "Use when a frequency is given without naming specific weekdays. Convert to an approximate " +
-                    "day count: '1 gang per uke' -> 7, '2 ganger per uke' -> 4, '3 ganger per uke' -> 2, " +
-                    "'1 gang per måned' -> 30, '2 ganger per måned' -> 15, '1 gang per år' -> 365, " +
-                    "'2 ganger per år' -> 180, 'ved behov' -> omit entirely (no reliable frequency).",
+                    "Use when a frequency is given without naming specific weekdays or a monthly weekday " +
+                    "occurrence. Convert to an approximate day count: '1 gang per uke' -> 7, '2 ganger per uke' " +
+                    "-> 4, '3 ganger per uke' -> 2, '1 gang per måned' -> 30, '2 ganger per måned' -> 15, " +
+                    "'1 gang per år' -> 365, '2 ganger per år' -> 180, 'ved behov' -> omit entirely (no reliable " +
+                    "frequency).",
                 },
               },
             },
@@ -78,17 +94,25 @@ function isValidRoomsShape(rooms) {
   );
 }
 
-// Normalizes an AI- or admin-supplied `schedule` into exactly one of weekday-mode or
-// interval-mode (weekdays take priority if both are somehow present), or null if neither
-// is usable — mirrors the mutual-exclusivity rule already enforced on rooms.interval_days.
+// Normalizes an AI- or admin-supplied `schedule` into exactly one of weekday-mode, monthly-
+// mode, or interval-mode (checked in that priority order if more than one is somehow
+// present), or null if none is usable — mirrors the three-way mutual exclusivity enforced
+// on rooms.interval_days / monthly_weekday+monthly_occurrence / room_schedules rows.
 function sanitizeSchedule(schedule) {
   if (!schedule || typeof schedule !== "object") return null;
   if (Array.isArray(schedule.weekdays)) {
     const weekdays = [...new Set(schedule.weekdays.filter((w) => Number.isInteger(w) && w >= 0 && w <= 6))];
-    if (weekdays.length > 0) return { weekdays, interval_days: null };
+    if (weekdays.length > 0) return { weekdays, monthly: null, interval_days: null };
+  }
+  if (schedule.monthly && typeof schedule.monthly === "object") {
+    const { weekday, occurrence } = schedule.monthly;
+    const validOccurrence = Number.isInteger(occurrence) && (occurrence === -1 || (occurrence >= 1 && occurrence <= 4));
+    if (Number.isInteger(weekday) && weekday >= 0 && weekday <= 6 && validOccurrence) {
+      return { weekdays: null, monthly: { weekday, occurrence }, interval_days: null };
+    }
   }
   if (Number.isInteger(schedule.interval_days) && schedule.interval_days > 0) {
-    return { weekdays: null, interval_days: schedule.interval_days };
+    return { weekdays: null, monthly: null, interval_days: schedule.interval_days };
   }
   return null;
 }
@@ -188,7 +212,8 @@ siteRoomsRouter.post("/import-pdf", requireAuth, requireRole("admin", "manager")
               "Extract every room or area mentioned and the cleaning tasks for each. If a room has no " +
               "explicit task list, use a single sensible general task. For each room, also infer its cleaning " +
               "schedule from the frequency wording in its task text (e.g. '5 ganger per uke (mandag-fredag)', " +
-              "'1 gang per måned') per the schedule field's rules. Call submit_rooms with the result.\n\n" +
+              "'første mandag i måneden', '1 gang per måned') per the schedule field's rules. Call submit_rooms " +
+              "with the result.\n\n" +
               text,
           },
         ],
@@ -224,7 +249,9 @@ siteRoomsRouter.post("/import-confirm", requireAuth, requireRole("admin", "manag
   if (!isValidRoomsShape(rooms)) return res.status(400).json({ error: "rooms[] with name/tasks[] is required" });
 
   const siteId = req.params.siteId;
-  const insertRoom = db.prepare("INSERT INTO rooms (site_id, name, sort_order, interval_days) VALUES (?, ?, ?, ?)");
+  const insertRoom = db.prepare(
+    "INSERT INTO rooms (site_id, name, sort_order, interval_days, monthly_weekday, monthly_occurrence) VALUES (?, ?, ?, ?, ?, ?)"
+  );
   const insertItem = db.prepare("INSERT INTO room_checklist_items (room_id, label, sort_order) VALUES (?, ?, ?)");
   const insertWeekday = db.prepare("INSERT INTO room_schedules (room_id, weekday) VALUES (?, ?)");
 
@@ -234,7 +261,12 @@ siteRoomsRouter.post("/import-confirm", requireAuth, requireRole("admin", "manag
     for (const room of roomsToImport) {
       if (!room.name.trim()) continue;
       const schedule = sanitizeSchedule(room.schedule);
-      const info = insertRoom.run(siteId, room.name, nextSort++, schedule?.interval_days ?? null);
+      const info = insertRoom.run(
+        siteId, room.name, nextSort++,
+        schedule?.interval_days ?? null,
+        schedule?.monthly?.weekday ?? null,
+        schedule?.monthly?.occurrence ?? null
+      );
       room.tasks.forEach((label, i) => {
         if (label.trim()) insertItem.run(info.lastInsertRowid, label, i);
       });
@@ -251,7 +283,7 @@ siteRoomsRouter.post("/import-confirm", requireAuth, requireRole("admin", "manag
 
 // --- Room-scoped: /rooms/:id ---
 
-const ROOM_PATCH_FIELDS = ["name", "interval_days"];
+const ROOM_PATCH_FIELDS = ["name", "interval_days", "monthly_weekday", "monthly_occurrence"];
 
 roomsRouter.patch("/:id", requireAuth, requireRole("admin", "manager"), (req, res) => {
   const fields = ROOM_PATCH_FIELDS.filter((f) => f in req.body);
@@ -261,8 +293,15 @@ roomsRouter.patch("/:id", requireAuth, requireRole("admin", "manager"), (req, re
     const setClause = fields.map((f) => `${f} = ?`).join(", ");
     const values = fields.map((f) => req.body[f]);
     db.prepare(`UPDATE rooms SET ${setClause} WHERE id = ?`).run(...values, req.params.id);
+
+    // Three schedule modes (room_schedules rows / interval_days / monthly_*) are mutually
+    // exclusive — switching into one clears the other two in the same transaction.
     if ("interval_days" in req.body && req.body.interval_days != null) {
       db.prepare("DELETE FROM room_schedules WHERE room_id = ?").run(req.params.id);
+      db.prepare("UPDATE rooms SET monthly_weekday = NULL, monthly_occurrence = NULL WHERE id = ?").run(req.params.id);
+    } else if ("monthly_weekday" in req.body && req.body.monthly_weekday != null) {
+      db.prepare("DELETE FROM room_schedules WHERE room_id = ?").run(req.params.id);
+      db.prepare("UPDATE rooms SET interval_days = NULL WHERE id = ?").run(req.params.id);
     }
   });
   updateRoom();
@@ -336,7 +375,7 @@ roomsRouter.post("/:id/schedule", requireAuth, requireRole("admin", "manager"), 
   }
 
   const upsert = db.transaction(() => {
-    db.prepare("UPDATE rooms SET interval_days = NULL WHERE id = ?").run(req.params.id);
+    db.prepare("UPDATE rooms SET interval_days = NULL, monthly_weekday = NULL, monthly_occurrence = NULL WHERE id = ?").run(req.params.id);
     db.prepare(
       `INSERT INTO room_schedules (room_id, weekday, assigned_cleaner_id) VALUES (?, ?, ?)
        ON CONFLICT(room_id, weekday) DO UPDATE SET assigned_cleaner_id = excluded.assigned_cleaner_id`

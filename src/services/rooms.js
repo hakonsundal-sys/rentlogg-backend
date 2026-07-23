@@ -13,6 +13,29 @@ function daysBetween(fromDateStr, toDateStr) {
   return Math.round((new Date(`${toDateStr}T00:00:00Z`) - new Date(`${fromDateStr}T00:00:00Z`)) / 86400000);
 }
 
+// Calendar date (1..31) of the Nth occurrence of `weekday` in year/month (0-indexed month),
+// or null if that occurrence doesn't exist (e.g. a "5th Monday" in a short month).
+// occurrence: 1..4 for first..fourth, -1 for "last". Recomputed fresh each call — this is
+// what avoids the drift a fixed "every 30 days" interval would accumulate across months.
+function nthWeekdayOfMonth(year, month, weekday, occurrence) {
+  const daysInMonth = new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
+  if (occurrence === -1) {
+    for (let d = daysInMonth; d >= 1; d--) {
+      if (new Date(Date.UTC(year, month, d)).getUTCDay() === weekday) return d;
+    }
+    return null;
+  }
+  let firstMatch = null;
+  for (let d = 1; d <= 7; d++) {
+    if (new Date(Date.UTC(year, month, d)).getUTCDay() === weekday) {
+      firstMatch = d;
+      break;
+    }
+  }
+  const target = firstMatch + (occurrence - 1) * 7;
+  return target <= daysInMonth ? target : null;
+}
+
 // Room runs are stored in UTC; pre-filter to a +/-1 day UTC window, then resolve the exact
 // Oslo calendar day in JS — same approach as schedule.js's site-run lookup.
 const candidateRoomRunsStmt = db.prepare(
@@ -41,6 +64,9 @@ const lastCompletedRoomRunStmt = db.prepare(
 // Interval mode: due if never cleaned, or if it's been >= interval_days since the last
 // completion (computed from the real last completed_at, not a fixed anchor — so changing
 // interval_days later needs no migration, it just re-evaluates against real history).
+// Monthly mode: due only on the Nth occurrence of a specific weekday in the current
+// calendar month (e.g. "first Monday") — computed fresh per month, so it never drifts the
+// way a fixed "every 30 days" interval would across 28/30/31-day months.
 // Weekday mode: today's Oslo weekday matches a room_schedules row.
 // No schedule configured at all: never "due" (but still open-able ad hoc).
 export function isRoomDueOn(room, dateStr) {
@@ -49,6 +75,11 @@ export function isRoomDueOn(room, dateStr) {
     if (!last) return true;
     const lastOsloDay = toOsloDateStr(last.completed_at);
     return daysBetween(lastOsloDay, dateStr) >= room.interval_days;
+  }
+  if (room.monthly_weekday != null && room.monthly_occurrence != null) {
+    const [year, month, day] = dateStr.split("-").map(Number);
+    const targetDay = nthWeekdayOfMonth(year, month - 1, room.monthly_weekday, room.monthly_occurrence);
+    return targetDay === day;
   }
   const weekdays = new Set(roomScheduleWeekdaysStmt.all(room.id).map((r) => r.weekday));
   if (weekdays.size === 0) return false;

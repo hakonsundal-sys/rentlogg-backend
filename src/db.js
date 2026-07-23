@@ -29,3 +29,5 @@ ensureColumn("users", "avatar_url", "avatar_url TEXT");
 ensureColumn("users", "phone", "phone TEXT");
 ensureColumn("deviations", "title", "title TEXT");
 ensureColumn("photos", "room_run_id", "room_run_id INTEGER REFERENCES room_runs(id)");
+ensureColumn("rooms", "monthly_weekday", "monthly_weekday INTEGER");
+ensureColumn("rooms", "monthly_occurrence", "monthly_occurrence INTEGER");
