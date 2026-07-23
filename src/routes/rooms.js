@@ -6,7 +6,7 @@ import { PDFParse } from "pdf-parse";
 import { db } from "../db.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 import { todayInOslo } from "../services/schedule.js";
-import { getRoomsForSite, findOrCreateTodayRoomRun } from "../services/rooms.js";
+import { getRoomsForSite, findOrCreateTodayRoomRun, findRoomRunForDate } from "../services/rooms.js";
 
 export const siteRoomsRouter = Router({ mergeParams: true });
 export const roomsRouter = Router();
@@ -408,6 +408,22 @@ roomsRouter.post("/:id/checkin", requireAuth, requireRole("cleaner"), (req, res)
   const items = db.prepare("SELECT * FROM room_run_items WHERE room_run_id = ? ORDER BY sort_order").all(run.id);
   const photos = db.prepare("SELECT * FROM photos WHERE room_run_id = ?").all(run.id);
   res.json({ ...run, items, photos });
+});
+
+// Undo for a just-completed room — powers the cleaner-facing "Angre" affordance for both a
+// single room's "Fullfør rom" and the bulk "Huk av alle dagens oppgaver" action. `resetItems`
+// additionally un-checks every item, since only the bulk action force-checks them all; a
+// single "Fullfør rom" click never touches item state, so undoing it must leave the
+// cleaner's own checkmarks alone.
+roomsRouter.post("/:id/reopen", requireAuth, requireRole("cleaner"), (req, res) => {
+  const run = findRoomRunForDate(req.params.id, todayInOslo());
+  if (!run) return res.status(404).json({ error: "Ingen fullført besøk å angre i dag" });
+
+  db.prepare("UPDATE room_runs SET completed_at = NULL WHERE id = ?").run(run.id);
+  if (req.body?.resetItems) {
+    db.prepare("UPDATE room_run_items SET done = 0 WHERE room_run_id = ?").run(run.id);
+  }
+  res.json({ ok: true });
 });
 
 roomsRouter.patch("/runs/:runId/items/:itemId", requireAuth, requireRole("cleaner"), (req, res) => {
