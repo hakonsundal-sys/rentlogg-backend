@@ -139,8 +139,13 @@ sitesRouter.get("/:id/qr", requireAuth, requireRole("admin", "manager"), async (
 
   const baseUrl = process.env.PUBLIC_BASE_URL || process.env.RENDER_EXTERNAL_URL || "http://localhost:4000";
   const checkInUrl = `${baseUrl}/checkin/${site.qr_token}`;
-  const dataUrl = await qrPngDataUrl(checkInUrl);
-  res.json({ checkInUrl, qrImage: dataUrl });
+  try {
+    const dataUrl = await qrPngDataUrl(checkInUrl);
+    res.json({ checkInUrl, qrImage: dataUrl });
+  } catch (err) {
+    console.error("QR generation error:", err);
+    res.status(500).json({ error: "Kunne ikke generere QR-kode." });
+  }
 });
 
 // Called when a cleaner scans the QR code. Creates a checklist run pre-filled
