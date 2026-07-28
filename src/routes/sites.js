@@ -2,6 +2,7 @@ import { Router } from "express";
 import { db } from "../db.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 import { newQrToken, qrPngDataUrl } from "../utils/qrcode.js";
+import { findRunForSiteDate, todayInOslo } from "../services/schedule.js";
 
 export const sitesRouter = Router();
 
@@ -148,8 +149,11 @@ sitesRouter.get("/:id/qr", requireAuth, requireRole("admin", "manager"), async (
   }
 });
 
-// Called when a cleaner scans the QR code. Creates a checklist run pre-filled
-// from the site's template, and does a basic GPS distance check if coordinates are provided.
+// Called when a cleaner scans the QR code. Reuses today's run for this site if one already
+// exists (whether completed or not — mirrors findOrCreateTodayRoomRun's behavior for rooms),
+// so re-scanning the same site later the same day never creates a second checklist. Only a
+// genuinely new day creates a new run, pre-filled from the site's template. Also does a basic
+// GPS distance check if coordinates are provided.
 sitesRouter.post("/checkin/:qrToken", requireAuth, requireRole("cleaner"), (req, res) => {
   const site = db.prepare("SELECT * FROM sites WHERE qr_token = ?").get(req.params.qrToken);
   if (!site) return res.status(404).json({ error: "Unknown QR code" });
@@ -158,6 +162,11 @@ sitesRouter.post("/checkin/:qrToken", requireAuth, requireRole("cleaner"), (req,
   let gps_verified = 0;
   if (latitude != null && longitude != null && site.latitude != null && site.longitude != null) {
     gps_verified = haversineMeters(latitude, longitude, site.latitude, site.longitude) <= site.gps_radius_meters ? 1 : 0;
+  }
+
+  const existing = findRunForSiteDate(site.id, todayInOslo());
+  if (existing) {
+    return res.json({ runId: existing.id, site, gps_verified: !!existing.gps_verified });
   }
 
   const runInfo = db

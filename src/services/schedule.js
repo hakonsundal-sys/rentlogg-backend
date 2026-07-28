@@ -28,7 +28,7 @@ function formatDate(year, month, day) {
 // Runs are stored in UTC; pre-filter to a +/-1 day UTC window (cheap, index-friendly), then
 // resolve the exact Oslo calendar day in JS to avoid UTC/Oslo boundary mismatches.
 const candidateRunsStmt = db.prepare(
-  `SELECT id, started_at, completed_at FROM checklist_runs
+  `SELECT id, started_at, completed_at, gps_verified FROM checklist_runs
    WHERE site_id = ? AND date(started_at) BETWEEN date(?, '-1 day') AND date(?, '+1 day')
    ORDER BY started_at DESC`
 );
@@ -38,7 +38,7 @@ const runItemCountsStmt = db.prepare(
    FROM checklist_run_items WHERE run_id = ?`
 );
 
-function findRunForSiteDate(siteId, dateStr) {
+export function findRunForSiteDate(siteId, dateStr) {
   const candidates = candidateRunsStmt.all(siteId, dateStr, dateStr);
   return candidates.find((r) => toOsloDateStr(r.started_at) === dateStr) || null;
 }
