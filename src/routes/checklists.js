@@ -82,7 +82,7 @@ checklistsRouter.post("/runs/:id/complete", requireAuth, requireRole("cleaner"),
   if (!run) return res.status(404).json({ error: "Not found" });
 
   const initials = (req.body?.initials || "").trim();
-  if (!initials) return res.status(400).json({ error: "Initialer er påkrevd for å fullføre besøket." });
+  if (!initials) return res.status(400).json({ error: "Navn er påkrevd for å fullføre besøket." });
 
   db.prepare("UPDATE checklist_runs SET completed_at = datetime('now'), signed_initials = ? WHERE id = ?").run(initials, run.id);
 

@@ -153,7 +153,7 @@ siteRoomsRouter.post("/", requireAuth, requireRole("admin", "manager"), (req, re
 
 siteRoomsRouter.post("/complete-all-due", requireAuth, requireRole("cleaner"), (req, res) => {
   const initials = (req.body?.initials || "").trim();
-  if (!initials) return res.status(400).json({ error: "Initialer er påkrevd for å fullføre oppgavene." });
+  if (!initials) return res.status(400).json({ error: "Navn er påkrevd for å fullføre oppgavene." });
 
   const today = todayInOslo();
   const dueIncomplete = getRoomsForSite(req.params.siteId, today).filter((r) => r.dueToday && r.status !== "completed");
@@ -440,7 +440,7 @@ roomsRouter.post("/runs/:runId/complete", requireAuth, requireRole("cleaner"), (
   if (!run) return res.status(404).json({ error: "Not found" });
 
   const initials = (req.body?.initials || "").trim();
-  if (!initials) return res.status(400).json({ error: "Initialer er påkrevd for å fullføre rommet." });
+  if (!initials) return res.status(400).json({ error: "Navn er påkrevd for å fullføre rommet." });
 
   db.prepare("UPDATE room_runs SET completed_at = datetime('now'), signed_initials = ? WHERE id = ?").run(initials, run.id);
   res.json({ ok: true });
