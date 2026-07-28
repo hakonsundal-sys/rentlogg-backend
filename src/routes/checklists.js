@@ -115,3 +115,24 @@ checklistsRouter.post("/runs/:id/photos", requireAuth, requireRole("cleaner"), u
     .run(req.params.id, path.join("uploads", req.file.filename), kind);
   res.status(201).json({ id: info.lastInsertRowid, file_path: req.file.filename });
 });
+
+// For cleaning up genuine duplicates (e.g. from the repeated-checkin bug fixed alongside this
+// endpoint) — refuses to delete a run that has deviations attached rather than silently
+// orphaning them, since those represent real reports that shouldn't quietly disappear.
+checklistsRouter.delete("/runs/:id", requireAuth, requireRole("admin", "manager"), (req, res) => {
+  const run = db.prepare("SELECT * FROM checklist_runs WHERE id = ?").get(req.params.id);
+  if (!run) return res.status(404).json({ error: "Not found" });
+
+  const deviationCount = db.prepare("SELECT COUNT(*) AS n FROM deviations WHERE run_id = ?").get(req.params.id).n;
+  if (deviationCount > 0) {
+    return res.status(409).json({
+      error: `${deviationCount} avvik er knyttet til dette besøket. Fjern eller flytt dem først.`,
+    });
+  }
+
+  db.prepare("DELETE FROM photos WHERE run_id = ?").run(req.params.id);
+  db.prepare("DELETE FROM checklist_run_items WHERE run_id = ?").run(req.params.id);
+  db.prepare("DELETE FROM checklist_runs WHERE id = ?").run(req.params.id);
+
+  res.json({ ok: true });
+});
