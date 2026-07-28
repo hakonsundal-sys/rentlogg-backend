@@ -1,22 +1,56 @@
 import { Router } from "express";
+import multer from "multer";
+import path from "node:path";
 import { db } from "../db.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 
 export const deviationsRouter = Router();
 
+const upload = multer({
+  storage: multer.diskStorage({
+    destination: process.env.UPLOADS_DIR || "uploads/",
+    filename: (req, file, cb) => cb(null, `${Date.now()}-${file.originalname}`),
+  }),
+  limits: { fileSize: 10 * 1024 * 1024 },
+});
+
+// Attaches each deviation's photos and the checklist run it was reported during (same
+// site name + date a cleaner or admin would see for that visit elsewhere in the app).
+function withPhotosAndRun(rows) {
+  const ids = rows.map((d) => d.id);
+  const photosByDeviation = {};
+  if (ids.length) {
+    const placeholders = ids.map(() => "?").join(",");
+    db.prepare(`SELECT * FROM photos WHERE deviation_id IN (${placeholders})`)
+      .all(...ids)
+      .forEach((p) => {
+        (photosByDeviation[p.deviation_id] ??= []).push(p);
+      });
+  }
+  return rows.map((d) => ({ ...d, photos: photosByDeviation[d.id] || [] }));
+}
+
 deviationsRouter.get("/", requireAuth, (req, res) => {
   if (req.user.role === "customer") {
     const rows = db
       .prepare(
-        `SELECT d.* FROM deviations d
+        `SELECT d.*, r.started_at AS run_started_at FROM deviations d
          JOIN sites s ON s.id = d.site_id
+         LEFT JOIN checklist_runs r ON r.id = d.run_id
          WHERE s.client_id = ?
          ORDER BY d.created_at DESC`
       )
       .all(req.user.client_id);
-    return res.json(rows);
+    return res.json(withPhotosAndRun(rows));
   }
-  res.json(db.prepare("SELECT * FROM deviations ORDER BY created_at DESC").all());
+  const rows = db
+    .prepare(
+      `SELECT d.*, r.started_at AS run_started_at FROM deviations d
+       LEFT JOIN checklist_runs r ON r.id = d.run_id
+       ORDER BY d.created_at DESC`
+    )
+    .all();
+  res.json(withPhotosAndRun(rows));
 });
 
 deviationsRouter.post("/", requireAuth, requireRole("cleaner", "manager"), (req, res) => {
@@ -30,6 +64,14 @@ deviationsRouter.post("/", requireAuth, requireRole("cleaner", "manager"), (req,
   db.prepare("UPDATE sites SET status = 'deviation' WHERE id = ?").run(site_id);
 
   res.status(201).json({ id: info.lastInsertRowid });
+});
+
+deviationsRouter.post("/:id/photos", requireAuth, requireRole("cleaner", "manager"), upload.single("photo"), (req, res) => {
+  if (!req.file) return res.status(400).json({ error: "No file uploaded (field name must be 'photo')" });
+  const info = db
+    .prepare("INSERT INTO photos (deviation_id, file_path, kind) VALUES (?, ?, 'general')")
+    .run(req.params.id, path.join("uploads", req.file.filename));
+  res.status(201).json({ id: info.lastInsertRowid, file_path: req.file.filename });
 });
 
 // Sets a site back to 'ok' once it has no more open/in_progress deviations (matches existing behavior).
