@@ -47,7 +47,8 @@ reportsRouter.get("/sites/:id/pdf", requireAuth, requireRole("admin", "manager",
   doc.moveDown(0.5);
   runs.forEach((run) => {
     const status = run.completed_at ? "Fullført" : "Pågår";
-    doc.fontSize(10).text(`${run.started_at} — ${status}${run.gps_verified ? " — posisjon bekreftet" : ""}`);
+    const signed = run.signed_initials ? ` — signert ${run.signed_initials}` : "";
+    doc.fontSize(10).text(`${run.started_at} — ${status}${run.gps_verified ? " — posisjon bekreftet" : ""}${signed}`);
   });
   if (runs.length === 0) doc.fontSize(10).fillColor("gray").text("Ingen registrerte oppdrag ennå.");
 

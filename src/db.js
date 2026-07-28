@@ -31,3 +31,5 @@ ensureColumn("deviations", "title", "title TEXT");
 ensureColumn("photos", "room_run_id", "room_run_id INTEGER REFERENCES room_runs(id)");
 ensureColumn("rooms", "monthly_weekday", "monthly_weekday INTEGER");
 ensureColumn("rooms", "monthly_occurrence", "monthly_occurrence INTEGER");
+ensureColumn("checklist_runs", "signed_initials", "signed_initials TEXT");
+ensureColumn("room_runs", "signed_initials", "signed_initials TEXT");

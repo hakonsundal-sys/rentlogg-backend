@@ -152,6 +152,9 @@ siteRoomsRouter.post("/", requireAuth, requireRole("admin", "manager"), (req, re
 });
 
 siteRoomsRouter.post("/complete-all-due", requireAuth, requireRole("cleaner"), (req, res) => {
+  const initials = (req.body?.initials || "").trim();
+  if (!initials) return res.status(400).json({ error: "Initialer er påkrevd for å fullføre oppgavene." });
+
   const today = todayInOslo();
   const dueIncomplete = getRoomsForSite(req.params.siteId, today).filter((r) => r.dueToday && r.status !== "completed");
 
@@ -160,7 +163,7 @@ siteRoomsRouter.post("/complete-all-due", requireAuth, requireRole("cleaner"), (
     for (const room of rooms) {
       const run = findOrCreateTodayRoomRun(room.id, req.user.id);
       db.prepare("UPDATE room_run_items SET done = 1 WHERE room_run_id = ?").run(run.id);
-      db.prepare("UPDATE room_runs SET completed_at = datetime('now') WHERE id = ?").run(run.id);
+      db.prepare("UPDATE room_runs SET completed_at = datetime('now'), signed_initials = ? WHERE id = ?").run(initials, run.id);
       completedCount++;
     }
     return completedCount;
@@ -419,7 +422,7 @@ roomsRouter.post("/:id/reopen", requireAuth, requireRole("cleaner"), (req, res) 
   const run = findRoomRunForDate(req.params.id, todayInOslo());
   if (!run) return res.status(404).json({ error: "Ingen fullført besøk å angre i dag" });
 
-  db.prepare("UPDATE room_runs SET completed_at = NULL WHERE id = ?").run(run.id);
+  db.prepare("UPDATE room_runs SET completed_at = NULL, signed_initials = NULL WHERE id = ?").run(run.id);
   if (req.body?.resetItems) {
     db.prepare("UPDATE room_run_items SET done = 0 WHERE room_run_id = ?").run(run.id);
   }
@@ -436,7 +439,10 @@ roomsRouter.post("/runs/:runId/complete", requireAuth, requireRole("cleaner"), (
   const run = db.prepare("SELECT * FROM room_runs WHERE id = ?").get(req.params.runId);
   if (!run) return res.status(404).json({ error: "Not found" });
 
-  db.prepare("UPDATE room_runs SET completed_at = datetime('now') WHERE id = ?").run(run.id);
+  const initials = (req.body?.initials || "").trim();
+  if (!initials) return res.status(400).json({ error: "Initialer er påkrevd for å fullføre rommet." });
+
+  db.prepare("UPDATE room_runs SET completed_at = datetime('now'), signed_initials = ? WHERE id = ?").run(initials, run.id);
   res.json({ ok: true });
 });
 

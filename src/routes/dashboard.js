@@ -50,6 +50,7 @@ dashboardRouter.get("/summary", requireAuth, requireRole("admin", "manager"), (r
       cleanerName: r.cleaner_name,
       status: r.completed_at ? "completed" : "in_progress",
       startedAt: r.started_at,
+      signedInitials: r.signed_initials || null,
     }));
 
   const plannedToday = getSitesScheduledOn(today)

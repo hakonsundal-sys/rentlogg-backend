@@ -81,7 +81,10 @@ checklistsRouter.post("/runs/:id/complete", requireAuth, requireRole("cleaner"),
   const run = db.prepare("SELECT * FROM checklist_runs WHERE id = ?").get(req.params.id);
   if (!run) return res.status(404).json({ error: "Not found" });
 
-  db.prepare("UPDATE checklist_runs SET completed_at = datetime('now') WHERE id = ?").run(run.id);
+  const initials = (req.body?.initials || "").trim();
+  if (!initials) return res.status(400).json({ error: "Initialer er påkrevd for å fullføre besøket." });
+
+  db.prepare("UPDATE checklist_runs SET completed_at = datetime('now'), signed_initials = ? WHERE id = ?").run(initials, run.id);
 
   const hasOpenDeviation = db
     .prepare("SELECT id FROM deviations WHERE site_id = ? AND status != 'resolved'")

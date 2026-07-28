@@ -39,7 +39,7 @@ function nthWeekdayOfMonth(year, month, weekday, occurrence) {
 // Room runs are stored in UTC; pre-filter to a +/-1 day UTC window, then resolve the exact
 // Oslo calendar day in JS — same approach as schedule.js's site-run lookup.
 const candidateRoomRunsStmt = db.prepare(
-  `SELECT id, started_at, completed_at, cleaner_id FROM room_runs
+  `SELECT id, started_at, completed_at, cleaner_id, signed_initials FROM room_runs
    WHERE room_id = ? AND date(started_at) BETWEEN date(?, '-1 day') AND date(?, '+1 day')
    ORDER BY started_at DESC`
 );
@@ -100,6 +100,7 @@ export function getRoomsForSite(siteId, dateStr) {
     status: getRoomStatusForDate(room.id, dateStr),
     lastCleanedAt: lastCleanedStmt.get(room.id)?.completed_at || null,
     itemCount: itemCountStmt.get(room.id).n,
+    signedInitials: findRoomRunForDate(room.id, dateStr)?.signed_initials || null,
   }));
 }
 
