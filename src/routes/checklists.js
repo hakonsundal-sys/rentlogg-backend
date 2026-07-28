@@ -54,8 +54,9 @@ checklistsRouter.get("/runs", requireAuth, requireRole("admin", "manager"), (req
   const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
   const rows = db
     .prepare(
-      `SELECT r.*, s.name AS site_name FROM checklist_runs r
+      `SELECT r.*, s.name AS site_name, u.name AS cleaner_name FROM checklist_runs r
        JOIN sites s ON s.id = r.site_id
+       JOIN users u ON u.id = r.cleaner_id
        ${where}
        ORDER BY r.started_at DESC`
     )
@@ -64,7 +65,15 @@ checklistsRouter.get("/runs", requireAuth, requireRole("admin", "manager"), (req
 });
 
 checklistsRouter.get("/runs/:id", requireAuth, (req, res) => {
-  const run = db.prepare("SELECT * FROM checklist_runs WHERE id = ?").get(req.params.id);
+  const run = db
+    .prepare(
+      `SELECT r.*, s.name AS site_name, s.address AS site_address, u.name AS cleaner_name
+       FROM checklist_runs r
+       JOIN sites s ON s.id = r.site_id
+       JOIN users u ON u.id = r.cleaner_id
+       WHERE r.id = ?`
+    )
+    .get(req.params.id);
   if (!run) return res.status(404).json({ error: "Not found" });
   const items = db.prepare("SELECT * FROM checklist_run_items WHERE run_id = ? ORDER BY sort_order").all(run.id);
   const photos = db.prepare("SELECT * FROM photos WHERE run_id = ?").all(run.id);
