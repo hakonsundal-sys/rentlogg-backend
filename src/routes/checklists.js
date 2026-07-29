@@ -86,6 +86,7 @@ checklistsRouter.get("/runs/:id", requireAuth, (req, res) => {
   const siteRooms = db.prepare("SELECT id, name FROM rooms WHERE site_id = ? ORDER BY sort_order, id").all(run.site_id);
   const dateStr = toOsloDateStr(run.started_at);
   const roomRunItemsStmt = db.prepare("SELECT * FROM room_run_items WHERE room_run_id = ? ORDER BY sort_order");
+  const roomRunPhotosStmt = db.prepare("SELECT * FROM photos WHERE room_run_id = ?");
   const rooms = siteRooms.map((room) => {
     const roomRun = findRoomRunForDate(room.id, dateStr);
     return {
@@ -93,6 +94,7 @@ checklistsRouter.get("/runs/:id", requireAuth, (req, res) => {
       name: room.name,
       completed_at: roomRun?.completed_at || null,
       items: roomRun ? roomRunItemsStmt.all(roomRun.id) : [],
+      photos: roomRun ? roomRunPhotosStmt.all(roomRun.id) : [],
     };
   });
 
