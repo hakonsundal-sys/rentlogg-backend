@@ -3,6 +3,8 @@ import multer from "multer";
 import path from "node:path";
 import { db } from "../db.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
+import { toOsloDateStr } from "../services/schedule.js";
+import { findRoomRunForDate } from "../services/rooms.js";
 
 export const checklistsRouter = Router();
 
@@ -77,7 +79,24 @@ checklistsRouter.get("/runs/:id", requireAuth, (req, res) => {
   if (!run) return res.status(404).json({ error: "Not found" });
   const items = db.prepare("SELECT * FROM checklist_run_items WHERE run_id = ? ORDER BY sort_order").all(run.id);
   const photos = db.prepare("SELECT * FROM photos WHERE run_id = ?").all(run.id);
-  res.json({ ...run, items, photos });
+
+  // Room-enabled sites don't populate checklist_run_items (their tasks live per-room), so the
+  // flat "Sjekkliste" section above is empty for them. Attach each room's status/items for the
+  // same Oslo calendar day as this run, so the detail view still shows what was actually done.
+  const siteRooms = db.prepare("SELECT id, name FROM rooms WHERE site_id = ? ORDER BY sort_order, id").all(run.site_id);
+  const dateStr = toOsloDateStr(run.started_at);
+  const roomRunItemsStmt = db.prepare("SELECT * FROM room_run_items WHERE room_run_id = ? ORDER BY sort_order");
+  const rooms = siteRooms.map((room) => {
+    const roomRun = findRoomRunForDate(room.id, dateStr);
+    return {
+      id: room.id,
+      name: room.name,
+      completed_at: roomRun?.completed_at || null,
+      items: roomRun ? roomRunItemsStmt.all(roomRun.id) : [],
+    };
+  });
+
+  res.json({ ...run, items, photos, rooms });
 });
 
 checklistsRouter.patch("/runs/:id/items/:itemId", requireAuth, requireRole("cleaner"), (req, res) => {
