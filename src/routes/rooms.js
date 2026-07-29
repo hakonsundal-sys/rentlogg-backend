@@ -461,9 +461,23 @@ roomsRouter.post("/:id/reopen", requireAuth, requireRole("cleaner"), (req, res) 
   res.json({ ok: true });
 });
 
-roomsRouter.patch("/runs/:runId/items/:itemId", requireAuth, requireRole("cleaner"), (req, res) => {
-  const { done } = req.body;
+// Only stamps when the room was already completed — i.e. this is a genuine retroactive edit,
+// not just normal live progress during an in-progress visit (which never sends `initials`).
+// Deliberately leaves completed_at/signed_initials untouched: that stays the cleaner's original,
+// honest record of what they confirmed on the day; this is a separate, additive "changed
+// afterward" trail so nobody can silently rewrite a signed-off visit.
+function stampRoomRunEdit(runId, initials) {
+  if (!initials || !initials.trim()) return;
+  const run = db.prepare("SELECT completed_at FROM room_runs WHERE id = ?").get(runId);
+  if (run?.completed_at) {
+    db.prepare("UPDATE room_runs SET edited_at = datetime('now'), edited_by_initials = ? WHERE id = ?").run(initials.trim(), runId);
+  }
+}
+
+roomsRouter.patch("/runs/:runId/items/:itemId", requireAuth, requireRole("cleaner", "admin", "manager"), (req, res) => {
+  const { done, initials } = req.body;
   db.prepare("UPDATE room_run_items SET done = ? WHERE id = ? AND room_run_id = ?").run(done ? 1 : 0, req.params.itemId, req.params.runId);
+  stampRoomRunEdit(req.params.runId, initials);
   res.json({ ok: true });
 });
 
@@ -478,16 +492,17 @@ roomsRouter.post("/runs/:runId/complete", requireAuth, requireRole("cleaner"), (
   res.json({ ok: true });
 });
 
-roomsRouter.post("/runs/:runId/photos", requireAuth, requireRole("cleaner"), upload.single("photo"), (req, res) => {
+roomsRouter.post("/runs/:runId/photos", requireAuth, requireRole("cleaner", "admin", "manager"), upload.single("photo"), (req, res) => {
   if (!req.file) return res.status(400).json({ error: "No file uploaded (field name must be 'photo')" });
   const kind = req.body.kind || "general";
   const info = db
     .prepare("INSERT INTO photos (room_run_id, file_path, kind) VALUES (?, ?, ?)")
     .run(req.params.runId, path.join("uploads", req.file.filename), kind);
+  stampRoomRunEdit(req.params.runId, req.body.initials);
   res.status(201).json({ id: info.lastInsertRowid, file_path: req.file.filename });
 });
 
-roomsRouter.delete("/runs/:runId/photos/:photoId", requireAuth, requireRole("cleaner"), (req, res) => {
+roomsRouter.delete("/runs/:runId/photos/:photoId", requireAuth, requireRole("cleaner", "admin", "manager"), (req, res) => {
   const photo = db.prepare("SELECT * FROM photos WHERE id = ? AND room_run_id = ?").get(req.params.photoId, req.params.runId);
   if (!photo) return res.status(404).json({ error: "Not found" });
 
@@ -495,6 +510,7 @@ roomsRouter.delete("/runs/:runId/photos/:photoId", requireAuth, requireRole("cle
   const absolutePath = path.join(uploadsDir, path.basename(photo.file_path));
   fs.rmSync(absolutePath, { force: true });
   db.prepare("DELETE FROM photos WHERE id = ?").run(photo.id);
+  stampRoomRunEdit(req.params.runId, req.body?.initials);
 
   res.json({ ok: true });
 });

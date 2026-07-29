@@ -1,6 +1,7 @@
 import { Router } from "express";
 import multer from "multer";
 import path from "node:path";
+import fs from "node:fs";
 import { db } from "../db.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 import { toOsloDateStr } from "../services/schedule.js";
@@ -157,7 +158,11 @@ checklistsRouter.get("/runs/:id", requireAuth, (req, res) => {
     return {
       id: room.id,
       name: room.name,
+      roomRunId: roomRun?.id || null,
       completed_at: roomRun?.completed_at || null,
+      signed_initials: roomRun?.signed_initials || null,
+      edited_at: roomRun?.edited_at || null,
+      edited_by_initials: roomRun?.edited_by_initials || null,
       items: roomRun ? roomRunItemsStmt.all(roomRun.id) : [],
       photos: roomRun ? roomRunPhotosStmt.all(roomRun.id) : [],
     };
@@ -184,9 +189,21 @@ checklistsRouter.get("/runs/:id/photos.zip", requireAuth, requireRole("admin", "
   streamPhotosZip(res, photos, `bilder-besok-${run.id}.zip`);
 });
 
-checklistsRouter.patch("/runs/:id/items/:itemId", requireAuth, requireRole("cleaner"), (req, res) => {
-  const { done } = req.body;
+// Same reasoning as rooms.js's stampRoomRunEdit — only marks a run as edited when it was
+// already completed (a genuine retroactive change), and never touches completed_at/
+// signed_initials, so the original signed record of the day stays intact.
+function stampChecklistRunEdit(runId, initials) {
+  if (!initials || !initials.trim()) return;
+  const run = db.prepare("SELECT completed_at FROM checklist_runs WHERE id = ?").get(runId);
+  if (run?.completed_at) {
+    db.prepare("UPDATE checklist_runs SET edited_at = datetime('now'), edited_by_initials = ? WHERE id = ?").run(initials.trim(), runId);
+  }
+}
+
+checklistsRouter.patch("/runs/:id/items/:itemId", requireAuth, requireRole("cleaner", "admin", "manager"), (req, res) => {
+  const { done, initials } = req.body;
   db.prepare("UPDATE checklist_run_items SET done = ? WHERE id = ? AND run_id = ?").run(done ? 1 : 0, req.params.itemId, req.params.id);
+  stampChecklistRunEdit(req.params.id, initials);
   res.json({ ok: true });
 });
 
@@ -211,13 +228,27 @@ checklistsRouter.post("/runs/:id/complete", requireAuth, requireRole("cleaner"),
   res.json({ ok: true });
 });
 
-checklistsRouter.post("/runs/:id/photos", requireAuth, requireRole("cleaner"), upload.single("photo"), (req, res) => {
+checklistsRouter.post("/runs/:id/photos", requireAuth, requireRole("cleaner", "admin", "manager"), upload.single("photo"), (req, res) => {
   if (!req.file) return res.status(400).json({ error: "No file uploaded (field name must be 'photo')" });
   const kind = req.body.kind || "general";
   const info = db
     .prepare("INSERT INTO photos (run_id, file_path, kind) VALUES (?, ?, ?)")
     .run(req.params.id, path.join("uploads", req.file.filename), kind);
+  stampChecklistRunEdit(req.params.id, req.body.initials);
   res.status(201).json({ id: info.lastInsertRowid, file_path: req.file.filename });
+});
+
+checklistsRouter.delete("/runs/:id/photos/:photoId", requireAuth, requireRole("cleaner", "admin", "manager"), (req, res) => {
+  const photo = db.prepare("SELECT * FROM photos WHERE id = ? AND run_id = ?").get(req.params.photoId, req.params.id);
+  if (!photo) return res.status(404).json({ error: "Not found" });
+
+  const uploadsDir = process.env.UPLOADS_DIR || "uploads";
+  const absolutePath = path.join(uploadsDir, path.basename(photo.file_path));
+  fs.rmSync(absolutePath, { force: true });
+  db.prepare("DELETE FROM photos WHERE id = ?").run(photo.id);
+  stampChecklistRunEdit(req.params.id, req.body?.initials);
+
+  res.json({ ok: true });
 });
 
 // For cleaning up genuine duplicates (e.g. from the repeated-checkin bug fixed alongside this
