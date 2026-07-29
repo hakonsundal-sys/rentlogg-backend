@@ -34,32 +34,69 @@ deviationsRouter.get("/", requireAuth, (req, res) => {
   if (req.user.role === "customer") {
     const rows = db
       .prepare(
-        `SELECT d.*, r.started_at AS run_started_at FROM deviations d
+        `SELECT d.*, r.started_at AS run_started_at, rm.name AS room_name FROM deviations d
          JOIN sites s ON s.id = d.site_id
          LEFT JOIN checklist_runs r ON r.id = d.run_id
+         LEFT JOIN rooms rm ON rm.id = d.room_id
          WHERE s.client_id = ?
          ORDER BY d.created_at DESC`
       )
       .all(req.user.client_id);
     return res.json(withPhotosAndRun(rows));
   }
+  if (req.user.role === "cleaner") {
+    const rows = db
+      .prepare(
+        `SELECT d.*, r.started_at AS run_started_at, rm.name AS room_name FROM deviations d
+         JOIN checklist_runs r ON r.id = d.run_id
+         LEFT JOIN rooms rm ON rm.id = d.room_id
+         WHERE r.cleaner_id = ?
+         ORDER BY d.created_at DESC`
+      )
+      .all(req.user.id);
+    return res.json(withPhotosAndRun(rows));
+  }
   const rows = db
     .prepare(
-      `SELECT d.*, r.started_at AS run_started_at FROM deviations d
+      `SELECT d.*, r.started_at AS run_started_at, rm.name AS room_name FROM deviations d
        LEFT JOIN checklist_runs r ON r.id = d.run_id
+       LEFT JOIN rooms rm ON rm.id = d.room_id
        ORDER BY d.created_at DESC`
     )
     .all();
   res.json(withPhotosAndRun(rows));
 });
 
-deviationsRouter.post("/", requireAuth, requireRole("cleaner", "manager"), (req, res) => {
-  const { site_id, run_id, title, description, priority } = req.body;
+deviationsRouter.post("/", requireAuth, requireRole("cleaner", "manager", "customer"), (req, res) => {
+  const { site_id, run_id, room_id, room_task_label, title, description, priority, initials } = req.body;
   if (!site_id || !description) return res.status(400).json({ error: "site_id and description are required" });
+  if (!initials || !initials.trim()) return res.status(400).json({ error: "Initialer/navn er påkrevd" });
+
+  const site = db.prepare("SELECT * FROM sites WHERE id = ?").get(site_id);
+  if (!site) return res.status(404).json({ error: "Not found" });
+  if (req.user.role === "customer" && site.client_id !== req.user.client_id) {
+    return res.status(403).json({ error: "Not allowed" });
+  }
+
+  // Cleaners report during their active visit and already know its run_id; customers report
+  // against a room/task at any time with no notion of "the current visit," so when run_id isn't
+  // given we attach the deviation to the site's most recent visit — this is what lets the
+  // cleaner's past-checklists view group it under the right day without the customer needing to
+  // know what a "run" is.
+  let resolvedRunId = run_id || null;
+  if (!resolvedRunId) {
+    const latestRun = db
+      .prepare("SELECT id FROM checklist_runs WHERE site_id = ? ORDER BY started_at DESC LIMIT 1")
+      .get(site_id);
+    resolvedRunId = latestRun?.id || null;
+  }
 
   const info = db
-    .prepare("INSERT INTO deviations (site_id, run_id, reported_by, title, description, priority) VALUES (?, ?, ?, ?, ?, ?)")
-    .run(site_id, run_id || null, req.user.id, title || null, description, priority || "medium");
+    .prepare(
+      `INSERT INTO deviations (site_id, run_id, room_id, room_task_label, reported_by, reported_by_initials, title, description, priority)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+    .run(site_id, resolvedRunId, room_id || null, room_task_label || null, req.user.id, initials.trim(), title || null, description, priority || "medium");
 
   db.prepare("UPDATE sites SET status = 'deviation' WHERE id = ?").run(site_id);
 
@@ -102,6 +139,44 @@ deviationsRouter.patch("/:id", requireAuth, requireRole("admin", "manager"), (re
       "UPDATE deviations SET status = ?, resolved_at = CASE WHEN ? = 'resolved' THEN datetime('now') ELSE resolved_at END WHERE id = ?"
     ).run(status, status, req.params.id);
     recomputeSiteStatus(deviation.site_id);
+  }
+
+  res.json(db.prepare("SELECT * FROM deviations WHERE id = ?").get(req.params.id));
+});
+
+const REPLY_ACTIONS = ["resolve", "assign_manager", "assign_customer"];
+
+// Lets a cleaner (or manager) respond to an avvik reported against their own visit: always a
+// written reply + a typed signature, then a routing decision — close it themselves, or hand it
+// off to a manager or back to the customer.
+deviationsRouter.patch("/:id/reply", requireAuth, requireRole("cleaner", "manager"), (req, res) => {
+  const deviation = db.prepare("SELECT * FROM deviations WHERE id = ?").get(req.params.id);
+  if (!deviation) return res.status(404).json({ error: "Not found" });
+
+  const { reply_text, initials, action } = req.body;
+  if (!reply_text || !reply_text.trim()) return res.status(400).json({ error: "Svar er påkrevd" });
+  if (!initials || !initials.trim()) return res.status(400).json({ error: "Initialer/navn er påkrevd" });
+  if (!REPLY_ACTIONS.includes(action)) return res.status(400).json({ error: "Invalid action" });
+
+  if (req.user.role === "cleaner") {
+    const run = deviation.run_id ? db.prepare("SELECT cleaner_id FROM checklist_runs WHERE id = ?").get(deviation.run_id) : null;
+    if (!run || run.cleaner_id !== req.user.id) return res.status(403).json({ error: "Not allowed" });
+  }
+
+  db.prepare(
+    "UPDATE deviations SET reply_text = ?, replied_by_initials = ?, replied_at = datetime('now') WHERE id = ?"
+  ).run(reply_text.trim(), initials.trim(), req.params.id);
+
+  if (action === "resolve") {
+    db.prepare(
+      "UPDATE deviations SET status = 'resolved', resolved_at = datetime('now'), assigned_to = NULL WHERE id = ?"
+    ).run(req.params.id);
+    recomputeSiteStatus(deviation.site_id);
+  } else {
+    const assignedTo = action === "assign_manager" ? "manager" : "customer";
+    db.prepare(
+      "UPDATE deviations SET assigned_to = ?, status = CASE WHEN status = 'open' THEN 'in_progress' ELSE status END WHERE id = ?"
+    ).run(assignedTo, req.params.id);
   }
 
   res.json(db.prepare("SELECT * FROM deviations WHERE id = ?").get(req.params.id));

@@ -1,6 +1,7 @@
 import { Router } from "express";
 import multer from "multer";
 import path from "node:path";
+import fs from "node:fs";
 import Anthropic from "@anthropic-ai/sdk";
 import { PDFParse } from "pdf-parse";
 import { db } from "../db.js";
@@ -157,6 +158,12 @@ siteRoomsRouter.delete("/", requireAuth, requireRole("admin", "manager"), (req, 
   const roomIds = db.prepare("SELECT id FROM rooms WHERE site_id = ?").all(req.params.siteId).map((r) => r.id);
 
   const deleteAll = db.transaction((ids) => {
+    if (ids.length) {
+      // Deviations outlive the room they were filed against — unlink rather than delete, so
+      // the avvik and its reply history stay intact even after the room definition is gone.
+      const roomPlaceholders = ids.map(() => "?").join(",");
+      db.prepare(`UPDATE deviations SET room_id = NULL WHERE room_id IN (${roomPlaceholders})`).run(...ids);
+    }
     for (const roomId of ids) {
       const runIds = db.prepare("SELECT id FROM room_runs WHERE room_id = ?").all(roomId).map((r) => r.id);
       if (runIds.length) {
@@ -341,6 +348,7 @@ roomsRouter.delete("/:id", requireAuth, requireRole("admin", "manager"), (req, r
   if (!room) return res.status(404).json({ error: "Not found" });
 
   const deleteCascade = db.transaction((roomId) => {
+    db.prepare("UPDATE deviations SET room_id = NULL WHERE room_id = ?").run(roomId);
     const runIds = db.prepare("SELECT id FROM room_runs WHERE room_id = ?").all(roomId).map((r) => r.id);
     if (runIds.length) {
       const placeholders = runIds.map(() => "?").join(",");
@@ -477,4 +485,16 @@ roomsRouter.post("/runs/:runId/photos", requireAuth, requireRole("cleaner"), upl
     .prepare("INSERT INTO photos (room_run_id, file_path, kind) VALUES (?, ?, ?)")
     .run(req.params.runId, path.join("uploads", req.file.filename), kind);
   res.status(201).json({ id: info.lastInsertRowid, file_path: req.file.filename });
+});
+
+roomsRouter.delete("/runs/:runId/photos/:photoId", requireAuth, requireRole("cleaner"), (req, res) => {
+  const photo = db.prepare("SELECT * FROM photos WHERE id = ? AND room_run_id = ?").get(req.params.photoId, req.params.runId);
+  if (!photo) return res.status(404).json({ error: "Not found" });
+
+  const uploadsDir = process.env.UPLOADS_DIR || "uploads";
+  const absolutePath = path.join(uploadsDir, path.basename(photo.file_path));
+  fs.rmSync(absolutePath, { force: true });
+  db.prepare("DELETE FROM photos WHERE id = ?").run(photo.id);
+
+  res.json({ ok: true });
 });

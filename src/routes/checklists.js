@@ -38,6 +38,26 @@ checklistsRouter.post("/templates", requireAuth, requireRole("admin", "manager")
 
 // --- Runs (an in-progress or completed cleaning visit) ---
 
+// The cleaner's own past visits, enriched with avvik counts so the "Tidligere" list can show
+// a "2 avvik" badge per row without a second fetch — needsResponseCount is what tells a
+// cleaner they still have something to reply to from a given day.
+checklistsRouter.get("/my-runs", requireAuth, requireRole("cleaner"), (req, res) => {
+  const rows = db
+    .prepare(
+      `SELECT r.*, s.name AS site_name,
+         (SELECT COUNT(*) FROM deviations d WHERE d.run_id = r.id) AS deviation_count,
+         (SELECT COUNT(*) FROM deviations d WHERE d.run_id = r.id
+            AND d.reply_text IS NULL AND d.status != 'resolved') AS needs_response_count
+       FROM checklist_runs r
+       JOIN sites s ON s.id = r.site_id
+       WHERE r.cleaner_id = ?
+       ORDER BY r.started_at DESC
+       LIMIT 60`
+    )
+    .all(req.user.id);
+  res.json(rows);
+});
+
 checklistsRouter.get("/runs", requireAuth, requireRole("admin", "manager"), (req, res) => {
   const { site_id, from, to } = req.query;
   const conditions = [];
@@ -78,6 +98,9 @@ checklistsRouter.get("/runs/:id", requireAuth, (req, res) => {
     )
     .get(req.params.id);
   if (!run) return res.status(404).json({ error: "Not found" });
+  if (req.user.role === "cleaner" && run.cleaner_id !== req.user.id) {
+    return res.status(403).json({ error: "Not allowed" });
+  }
   const items = db.prepare("SELECT * FROM checklist_run_items WHERE run_id = ? ORDER BY sort_order").all(run.id);
   const photos = db.prepare("SELECT * FROM photos WHERE run_id = ?").all(run.id);
 
@@ -99,7 +122,15 @@ checklistsRouter.get("/runs/:id", requireAuth, (req, res) => {
     };
   });
 
-  res.json({ ...run, items, photos, rooms });
+  const deviations = db
+    .prepare(
+      `SELECT d.*, rm.name AS room_name FROM deviations d
+       LEFT JOIN rooms rm ON rm.id = d.room_id
+       WHERE d.run_id = ? ORDER BY d.created_at DESC`
+    )
+    .all(run.id);
+
+  res.json({ ...run, items, photos, rooms, deviations });
 });
 
 checklistsRouter.get("/runs/:id/photos.zip", requireAuth, requireRole("admin", "manager"), (req, res) => {
