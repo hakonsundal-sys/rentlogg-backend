@@ -151,6 +151,30 @@ siteRoomsRouter.post("/", requireAuth, requireRole("admin", "manager"), (req, re
   res.status(201).json(db.prepare("SELECT * FROM rooms WHERE id = ?").get(info.lastInsertRowid));
 });
 
+// Bulk version of the single-room delete below — same cascade, wrapped in one transaction
+// so a crash partway through can't leave some rooms deleted and others half-cleaned-up.
+siteRoomsRouter.delete("/", requireAuth, requireRole("admin", "manager"), (req, res) => {
+  const roomIds = db.prepare("SELECT id FROM rooms WHERE site_id = ?").all(req.params.siteId).map((r) => r.id);
+
+  const deleteAll = db.transaction((ids) => {
+    for (const roomId of ids) {
+      const runIds = db.prepare("SELECT id FROM room_runs WHERE room_id = ?").all(roomId).map((r) => r.id);
+      if (runIds.length) {
+        const placeholders = runIds.map(() => "?").join(",");
+        db.prepare(`DELETE FROM photos WHERE room_run_id IN (${placeholders})`).run(...runIds);
+        db.prepare(`DELETE FROM room_run_items WHERE room_run_id IN (${placeholders})`).run(...runIds);
+      }
+      db.prepare("DELETE FROM room_runs WHERE room_id = ?").run(roomId);
+      db.prepare("DELETE FROM room_schedules WHERE room_id = ?").run(roomId);
+      db.prepare("DELETE FROM room_checklist_items WHERE room_id = ?").run(roomId);
+      db.prepare("DELETE FROM rooms WHERE id = ?").run(roomId);
+    }
+  });
+
+  deleteAll(roomIds);
+  res.json({ ok: true, deletedCount: roomIds.length });
+});
+
 siteRoomsRouter.post("/complete-all-due", requireAuth, requireRole("cleaner"), (req, res) => {
   const initials = (req.body?.initials || "").trim();
   if (!initials) return res.status(400).json({ error: "Navn er påkrevd for å fullføre oppgavene." });
