@@ -40,3 +40,5 @@ ensureColumn("deviations", "reply_text", "reply_text TEXT");
 ensureColumn("deviations", "replied_by_initials", "replied_by_initials TEXT");
 ensureColumn("deviations", "replied_at", "replied_at TEXT");
 ensureColumn("deviations", "assigned_to", "assigned_to TEXT");
+ensureColumn("deviations", "customer_approved_at", "customer_approved_at TEXT");
+ensureColumn("deviations", "customer_approved_by_initials", "customer_approved_by_initials TEXT");

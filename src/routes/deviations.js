@@ -182,6 +182,30 @@ deviationsRouter.patch("/:id/reply", requireAuth, requireRole("cleaner", "manage
   res.json(db.prepare("SELECT * FROM deviations WHERE id = ?").get(req.params.id));
 });
 
+// Lets the customer put an active, signed confirmation on a resolved avvik ("yes, this is
+// fixed") instead of just passively seeing it disappear — stronger documentation for both
+// sides than a status flip nobody outside the cleaner/admin ever explicitly agreed to.
+deviationsRouter.patch("/:id/approve", requireAuth, requireRole("customer"), (req, res) => {
+  const deviation = db.prepare("SELECT * FROM deviations WHERE id = ?").get(req.params.id);
+  if (!deviation) return res.status(404).json({ error: "Not found" });
+
+  const site = db.prepare("SELECT client_id FROM sites WHERE id = ?").get(deviation.site_id);
+  if (!site || site.client_id !== req.user.client_id) return res.status(403).json({ error: "Not allowed" });
+
+  if (deviation.status !== "resolved") {
+    return res.status(400).json({ error: "Avviket er ikke løst ennå." });
+  }
+
+  const { initials } = req.body;
+  if (!initials || !initials.trim()) return res.status(400).json({ error: "Initialer/navn er påkrevd" });
+
+  db.prepare(
+    "UPDATE deviations SET customer_approved_at = datetime('now'), customer_approved_by_initials = ? WHERE id = ?"
+  ).run(initials.trim(), req.params.id);
+
+  res.json(db.prepare("SELECT * FROM deviations WHERE id = ?").get(req.params.id));
+});
+
 deviationsRouter.delete("/:id", requireAuth, requireRole("admin", "manager"), (req, res) => {
   const deviation = db.prepare("SELECT * FROM deviations WHERE id = ?").get(req.params.id);
   if (!deviation) return res.status(404).json({ error: "Not found" });
