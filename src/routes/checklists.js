@@ -5,6 +5,7 @@ import { db } from "../db.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 import { toOsloDateStr } from "../services/schedule.js";
 import { findRoomRunForDate } from "../services/rooms.js";
+import { gatherReportPhotos, streamPhotosZip } from "../services/photos.js";
 
 export const checklistsRouter = Router();
 
@@ -99,6 +100,16 @@ checklistsRouter.get("/runs/:id", requireAuth, (req, res) => {
   });
 
   res.json({ ...run, items, photos, rooms });
+});
+
+checklistsRouter.get("/runs/:id/photos.zip", requireAuth, requireRole("admin", "manager"), (req, res) => {
+  const run = db.prepare("SELECT * FROM checklist_runs WHERE id = ?").get(req.params.id);
+  if (!run) return res.status(404).json({ error: "Not found" });
+
+  const photos = gatherReportPhotos([run]);
+  if (photos.length === 0) return res.status(404).json({ error: "Ingen bilder funnet for dette besøket." });
+
+  streamPhotosZip(res, photos, `bilder-besok-${run.id}.zip`);
 });
 
 checklistsRouter.patch("/runs/:id/items/:itemId", requireAuth, requireRole("cleaner"), (req, res) => {

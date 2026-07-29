@@ -5,6 +5,7 @@ import path from "node:path";
 import { db } from "../db.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 import { computeMonthlyReport } from "../services/schedule.js";
+import { gatherReportPhotos, streamPhotosZip } from "../services/photos.js";
 
 const PHOTO_KIND_LABELS = { before: "Før", after: "Etter", general: "Generelt" };
 
@@ -26,12 +27,7 @@ reportsRouter.get("/sites/:id/pdf", requireAuth, requireRole("admin", "manager",
     .prepare("SELECT * FROM deviations WHERE site_id = ? ORDER BY created_at DESC LIMIT 20")
     .all(site.id);
 
-  const runIds = runs.map((r) => r.id);
-  const photos = runIds.length
-    ? db
-        .prepare(`SELECT * FROM photos WHERE run_id IN (${runIds.map(() => "?").join(",")}) ORDER BY created_at DESC`)
-        .all(...runIds)
-    : [];
+  const photos = gatherReportPhotos(runs).sort((a, b) => b.created_at.localeCompare(a.created_at));
 
   res.setHeader("Content-Type", "application/pdf");
   res.setHeader("Content-Disposition", `attachment; filename=rapport-${site.id}.pdf`);
@@ -77,6 +73,23 @@ reportsRouter.get("/sites/:id/pdf", requireAuth, requireRole("admin", "manager",
   if (!embeddedAny) doc.fontSize(10).fillColor("gray").text("Ingen bilder tilgjengelig.");
 
   doc.end();
+});
+
+reportsRouter.get("/sites/:id/photos.zip", requireAuth, requireRole("admin", "manager", "customer"), (req, res) => {
+  const site = db.prepare("SELECT * FROM sites WHERE id = ?").get(req.params.id);
+  if (!site) return res.status(404).json({ error: "Not found" });
+
+  if (req.user.role === "customer" && site.client_id !== req.user.client_id) {
+    return res.status(403).json({ error: "Not allowed" });
+  }
+
+  const runs = db
+    .prepare("SELECT * FROM checklist_runs WHERE site_id = ? ORDER BY started_at DESC LIMIT 20")
+    .all(site.id);
+  const photos = gatherReportPhotos(runs);
+  if (photos.length === 0) return res.status(404).json({ error: "Ingen bilder tilgjengelig." });
+
+  streamPhotosZip(res, photos, `bilder-${site.id}.zip`);
 });
 
 function parseSummaryQuery(req) {
