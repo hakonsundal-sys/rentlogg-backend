@@ -58,6 +58,43 @@ checklistsRouter.get("/my-runs", requireAuth, requireRole("cleaner"), (req, res)
   res.json(rows);
 });
 
+// Paginated visit history for one site — powers the customer's "Se historikk" timeline (and
+// works for admin/manager too), so browsing isn't capped at the PDF report's last-20 window.
+// Cursor-paginated by id (not date) since inserts happen in chronological order, so an id
+// cursor is simpler and immune to same-timestamp ties that a date cursor could skip or repeat.
+checklistsRouter.get("/site-runs/:siteId", requireAuth, requireRole("admin", "manager", "customer"), (req, res) => {
+  const site = db.prepare("SELECT * FROM sites WHERE id = ?").get(req.params.siteId);
+  if (!site) return res.status(404).json({ error: "Not found" });
+  if (req.user.role === "customer" && site.client_id !== req.user.client_id) {
+    return res.status(403).json({ error: "Not allowed" });
+  }
+
+  const limit = Math.min(Number(req.query.limit) || 20, 50);
+  const before = req.query.before ? Number(req.query.before) : null;
+
+  const rows = before
+    ? db
+        .prepare(
+          `SELECT r.*, u.name AS cleaner_name,
+             (SELECT COUNT(*) FROM deviations d WHERE d.run_id = r.id) AS deviation_count
+           FROM checklist_runs r JOIN users u ON u.id = r.cleaner_id
+           WHERE r.site_id = ? AND r.id < ?
+           ORDER BY r.id DESC LIMIT ?`
+        )
+        .all(req.params.siteId, before, limit)
+    : db
+        .prepare(
+          `SELECT r.*, u.name AS cleaner_name,
+             (SELECT COUNT(*) FROM deviations d WHERE d.run_id = r.id) AS deviation_count
+           FROM checklist_runs r JOIN users u ON u.id = r.cleaner_id
+           WHERE r.site_id = ?
+           ORDER BY r.id DESC LIMIT ?`
+        )
+        .all(req.params.siteId, limit);
+
+  res.json({ runs: rows, hasMore: rows.length === limit });
+});
+
 checklistsRouter.get("/runs", requireAuth, requireRole("admin", "manager"), (req, res) => {
   const { site_id, from, to } = req.query;
   const conditions = [];
@@ -100,6 +137,10 @@ checklistsRouter.get("/runs/:id", requireAuth, (req, res) => {
   if (!run) return res.status(404).json({ error: "Not found" });
   if (req.user.role === "cleaner" && run.cleaner_id !== req.user.id) {
     return res.status(403).json({ error: "Not allowed" });
+  }
+  if (req.user.role === "customer") {
+    const site = db.prepare("SELECT client_id FROM sites WHERE id = ?").get(run.site_id);
+    if (!site || site.client_id !== req.user.client_id) return res.status(403).json({ error: "Not allowed" });
   }
   const items = db.prepare("SELECT * FROM checklist_run_items WHERE run_id = ? ORDER BY sort_order").all(run.id);
   const photos = db.prepare("SELECT * FROM photos WHERE run_id = ?").all(run.id);
