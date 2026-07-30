@@ -481,6 +481,17 @@ roomsRouter.patch("/runs/:runId/items/:itemId", requireAuth, requireRole("cleane
   res.json({ ok: true });
 });
 
+// Lets a cleaner clear a whole room's remaining tasks in one tap — for a routine room they
+// already know is fine, ticking every item individually is pure friction.
+roomsRouter.post("/runs/:runId/items/complete-all", requireAuth, requireRole("cleaner", "admin", "manager"), (req, res) => {
+  const run = db.prepare("SELECT id FROM room_runs WHERE id = ?").get(req.params.runId);
+  if (!run) return res.status(404).json({ error: "Not found" });
+
+  db.prepare("UPDATE room_run_items SET done = 1 WHERE room_run_id = ?").run(req.params.runId);
+  stampRoomRunEdit(req.params.runId, req.body?.initials);
+  res.json({ ok: true });
+});
+
 roomsRouter.post("/runs/:runId/complete", requireAuth, requireRole("cleaner"), (req, res) => {
   const run = db.prepare("SELECT * FROM room_runs WHERE id = ?").get(req.params.runId);
   if (!run) return res.status(404).json({ error: "Not found" });
