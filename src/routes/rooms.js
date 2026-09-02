@@ -492,7 +492,7 @@ roomsRouter.post("/runs/:runId/items/complete-all", requireAuth, requireRole("cl
   res.json({ ok: true });
 });
 
-roomsRouter.post("/runs/:runId/complete", requireAuth, requireRole("cleaner"), (req, res) => {
+roomsRouter.post("/runs/:runId/complete", requireAuth, requireRole("cleaner", "admin", "manager"), (req, res) => {
   const run = db.prepare("SELECT * FROM room_runs WHERE id = ?").get(req.params.runId);
   if (!run) return res.status(404).json({ error: "Not found" });
 

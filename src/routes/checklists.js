@@ -159,7 +159,7 @@ checklistsRouter.patch("/runs/:id/items/:itemId", requireAuth, requireRole("clea
   res.json({ ok: true });
 });
 
-checklistsRouter.post("/runs/:id/complete", requireAuth, requireRole("cleaner"), (req, res) => {
+checklistsRouter.post("/runs/:id/complete", requireAuth, requireRole("cleaner", "admin", "manager"), (req, res) => {
   const run = db.prepare("SELECT * FROM checklist_runs WHERE id = ?").get(req.params.id);
   if (!run) return res.status(404).json({ error: "Not found" });
 
