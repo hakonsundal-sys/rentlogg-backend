@@ -6,6 +6,8 @@ import { db } from "../db.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 import { computeMonthlyReport } from "../services/schedule.js";
 import { gatherReportPhotos, streamPhotosZip } from "../services/photos.js";
+import { getRunDetail, canAccessRun } from "../services/runDetail.js";
+import { buildReportHtml, buildReportPdf } from "../services/runReport.js";
 
 const PHOTO_KIND_LABELS = { before: "Før", after: "Etter", general: "Generelt" };
 
@@ -90,6 +92,29 @@ reportsRouter.get("/sites/:id/photos.zip", requireAuth, requireRole("admin", "ma
   if (photos.length === 0) return res.status(404).json({ error: "Ingen bilder tilgjengelig." });
 
   streamPhotosZip(res, photos, `bilder-${site.id}.zip`);
+});
+
+// Landax-style single-visit inspection report — numbered room sections with checked-off tasks
+// and photos, distinct from the rolling multi-visit summary above. Ready to view/copy as an
+// email body (buildReportHtml) or download as a PDF; both share the same detail-gathering and
+// access-scoping as GET /checklists/runs/:id via runDetail.js.
+reportsRouter.get("/runs/:id/html", requireAuth, (req, res) => {
+  const detail = getRunDetail(req.params.id);
+  if (!detail) return res.status(404).json({ error: "Not found" });
+  if (!canAccessRun(detail, req.user)) return res.status(403).json({ error: "Not allowed" });
+
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
+  res.send(buildReportHtml(detail));
+});
+
+reportsRouter.get("/runs/:id/pdf", requireAuth, (req, res) => {
+  const detail = getRunDetail(req.params.id);
+  if (!detail) return res.status(404).json({ error: "Not found" });
+  if (!canAccessRun(detail, req.user)) return res.status(403).json({ error: "Not allowed" });
+
+  res.setHeader("Content-Type", "application/pdf");
+  res.setHeader("Content-Disposition", `attachment; filename=rapport-besok-${detail.id}.pdf`);
+  buildReportPdf(detail, res);
 });
 
 function parseSummaryQuery(req) {

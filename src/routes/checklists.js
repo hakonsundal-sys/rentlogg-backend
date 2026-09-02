@@ -4,9 +4,8 @@ import path from "node:path";
 import fs from "node:fs";
 import { db } from "../db.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
-import { toOsloDateStr } from "../services/schedule.js";
-import { findRoomRunForDate } from "../services/rooms.js";
 import { gatherReportPhotos, streamPhotosZip } from "../services/photos.js";
+import { getRunDetail, canAccessRun } from "../services/runDetail.js";
 
 export const checklistsRouter = Router();
 
@@ -126,57 +125,10 @@ checklistsRouter.get("/runs", requireAuth, requireRole("admin", "manager"), (req
 });
 
 checklistsRouter.get("/runs/:id", requireAuth, (req, res) => {
-  const run = db
-    .prepare(
-      `SELECT r.*, s.name AS site_name, s.address AS site_address, u.name AS cleaner_name
-       FROM checklist_runs r
-       JOIN sites s ON s.id = r.site_id
-       JOIN users u ON u.id = r.cleaner_id
-       WHERE r.id = ?`
-    )
-    .get(req.params.id);
-  if (!run) return res.status(404).json({ error: "Not found" });
-  if (req.user.role === "cleaner" && run.cleaner_id !== req.user.id) {
-    return res.status(403).json({ error: "Not allowed" });
-  }
-  if (req.user.role === "customer") {
-    const site = db.prepare("SELECT client_id FROM sites WHERE id = ?").get(run.site_id);
-    if (!site || site.client_id !== req.user.client_id) return res.status(403).json({ error: "Not allowed" });
-  }
-  const items = db.prepare("SELECT * FROM checklist_run_items WHERE run_id = ? ORDER BY sort_order").all(run.id);
-  const photos = db.prepare("SELECT * FROM photos WHERE run_id = ?").all(run.id);
-
-  // Room-enabled sites don't populate checklist_run_items (their tasks live per-room), so the
-  // flat "Sjekkliste" section above is empty for them. Attach each room's status/items for the
-  // same Oslo calendar day as this run, so the detail view still shows what was actually done.
-  const siteRooms = db.prepare("SELECT id, name FROM rooms WHERE site_id = ? ORDER BY sort_order, id").all(run.site_id);
-  const dateStr = toOsloDateStr(run.started_at);
-  const roomRunItemsStmt = db.prepare("SELECT * FROM room_run_items WHERE room_run_id = ? ORDER BY sort_order");
-  const roomRunPhotosStmt = db.prepare("SELECT * FROM photos WHERE room_run_id = ?");
-  const rooms = siteRooms.map((room) => {
-    const roomRun = findRoomRunForDate(room.id, dateStr);
-    return {
-      id: room.id,
-      name: room.name,
-      roomRunId: roomRun?.id || null,
-      completed_at: roomRun?.completed_at || null,
-      signed_initials: roomRun?.signed_initials || null,
-      edited_at: roomRun?.edited_at || null,
-      edited_by_initials: roomRun?.edited_by_initials || null,
-      items: roomRun ? roomRunItemsStmt.all(roomRun.id) : [],
-      photos: roomRun ? roomRunPhotosStmt.all(roomRun.id) : [],
-    };
-  });
-
-  const deviations = db
-    .prepare(
-      `SELECT d.*, rm.name AS room_name FROM deviations d
-       LEFT JOIN rooms rm ON rm.id = d.room_id
-       WHERE d.run_id = ? ORDER BY d.created_at DESC`
-    )
-    .all(run.id);
-
-  res.json({ ...run, items, photos, rooms, deviations });
+  const detail = getRunDetail(req.params.id);
+  if (!detail) return res.status(404).json({ error: "Not found" });
+  if (!canAccessRun(detail, req.user)) return res.status(403).json({ error: "Not allowed" });
+  res.json(detail);
 });
 
 checklistsRouter.get("/runs/:id/photos.zip", requireAuth, requireRole("admin", "manager"), (req, res) => {
