@@ -8,6 +8,15 @@ export function todayInOslo() {
   return new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Oslo" }).format(new Date());
 }
 
+// Only ever used for "what calendar day just ended" (e.g. a morning digest reporting on
+// yesterday's visits) — a flat 24h offset before formatting is safe at day granularity since
+// Oslo is at most +/-2h from UTC, never enough to skip or repeat a calendar day.
+export function yesterdayInOslo() {
+  const d = new Date();
+  d.setUTCDate(d.getUTCDate() - 1);
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Oslo" }).format(d);
+}
+
 function weekdayOf(dateStr) {
   return new Date(`${dateStr}T00:00:00`).getDay();
 }

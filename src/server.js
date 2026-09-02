@@ -14,6 +14,7 @@ import { reportsRouter } from "./routes/reports.js";
 import { dashboardRouter } from "./routes/dashboard.js";
 import { invitationsRouter } from "./routes/invitations.js";
 import { siteRoomsRouter, roomsRouter } from "./routes/rooms.js";
+import { startDailyReportScheduler } from "./services/scheduler.js";
 
 const uploadsDir = process.env.UPLOADS_DIR || "uploads";
 if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
@@ -45,3 +46,4 @@ app.use((err, req, res, next) => {
 
 const port = process.env.PORT || 4000;
 app.listen(port, () => console.log(`Rentlogg backend running on http://localhost:${port}`));
+startDailyReportScheduler();

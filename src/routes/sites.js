@@ -18,21 +18,21 @@ sitesRouter.get("/", requireAuth, (req, res) => {
 });
 
 sitesRouter.post("/", requireAuth, requireRole("admin", "manager"), (req, res) => {
-  const { name, client_id, address, checklist_template_id, latitude, longitude, gps_radius_meters, room_count } = req.body;
+  const { name, client_id, address, checklist_template_id, latitude, longitude, gps_radius_meters, room_count, report_recipients } = req.body;
   if (!name || !client_id) return res.status(400).json({ error: "name and client_id are required" });
 
   const qr_token = newQrToken();
   const info = db
     .prepare(
-      `INSERT INTO sites (name, client_id, address, checklist_template_id, qr_token, latitude, longitude, gps_radius_meters, room_count)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO sites (name, client_id, address, checklist_template_id, qr_token, latitude, longitude, gps_radius_meters, room_count, report_recipients)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
-    .run(name, client_id, address || null, checklist_template_id || null, qr_token, latitude || null, longitude || null, gps_radius_meters || 150, room_count || 0);
+    .run(name, client_id, address || null, checklist_template_id || null, qr_token, latitude || null, longitude || null, gps_radius_meters || 150, room_count || 0, report_recipients || null);
 
   res.status(201).json({ id: info.lastInsertRowid, qr_token });
 });
 
-const SITE_PATCH_FIELDS = ["name", "client_id", "address", "checklist_template_id", "latitude", "longitude", "gps_radius_meters", "room_count"];
+const SITE_PATCH_FIELDS = ["name", "client_id", "address", "checklist_template_id", "latitude", "longitude", "gps_radius_meters", "room_count", "report_recipients"];
 
 sitesRouter.patch("/:id", requireAuth, requireRole("admin", "manager"), (req, res) => {
   const fields = SITE_PATCH_FIELDS.filter((f) => f in req.body);

@@ -8,6 +8,8 @@ import { computeMonthlyReport } from "../services/schedule.js";
 import { gatherReportPhotos, streamPhotosZip } from "../services/photos.js";
 import { getRunDetail, canAccessRun } from "../services/runDetail.js";
 import { buildReportHtml, buildReportPdf } from "../services/runReport.js";
+import { sendDailyReports } from "../services/dailyReportJob.js";
+import { yesterdayInOslo } from "../services/schedule.js";
 
 const PHOTO_KIND_LABELS = { before: "Før", after: "Etter", general: "Generelt" };
 
@@ -115,6 +117,14 @@ reportsRouter.get("/runs/:id/pdf", requireAuth, (req, res) => {
   res.setHeader("Content-Type", "application/pdf");
   res.setHeader("Content-Disposition", `attachment; filename=rapport-besok-${detail.id}.pdf`);
   buildReportPdf(detail, res);
+});
+
+// Manual trigger for the daily digest — lets an admin verify/re-send for a specific date
+// without waiting for the 07:00 scheduler.
+reportsRouter.post("/daily-digest/run", requireAuth, requireRole("admin"), async (req, res) => {
+  const dateStr = req.body?.date || yesterdayInOslo();
+  const results = await sendDailyReports(dateStr);
+  res.json({ date: dateStr, ...results });
 });
 
 function parseSummaryQuery(req) {

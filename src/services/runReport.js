@@ -36,7 +36,9 @@ function formatStatus(detail) {
   return "Pågår";
 }
 
-export function buildReportHtml(detail) {
+// Split from buildReportHtml so the daily-digest email can concatenate multiple visits' bodies
+// into one <html> shell instead of nesting complete documents inside each other.
+export function buildReportBody(detail) {
   const sections = buildSections(detail);
 
   const sectionsHtml = sections
@@ -83,15 +85,7 @@ export function buildReportHtml(detail) {
         .join("")}`
     : "";
 
-  return `<!doctype html>
-<html lang="no">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Renholdsrapport — ${escapeHtml(detail.site_name)}</title>
-</head>
-<body style="margin:0;padding:24px;background:#ffffff;font-family:Arial,Helvetica,sans-serif;color:#1a1a1a;">
-  <div style="max-width:760px;margin:0 auto;">
+  return `<div style="max-width:760px;margin:0 auto;">
     <h1 style="font-size:26px;margin:0 0 4px;">Renholdsrapport</h1>
     <div style="font-size:14px;color:#555;margin-bottom:20px;">
       ${escapeHtml(detail.site_name)}${detail.site_address ? " — " + escapeHtml(detail.site_address) : ""}${detail.client_name ? " · " + escapeHtml(detail.client_name) : ""}
@@ -114,7 +108,19 @@ export function buildReportHtml(detail) {
 
     ${sectionsHtml}
     ${deviationsHtml}
-  </div>
+  </div>`;
+}
+
+export function buildReportHtml(detail) {
+  return `<!doctype html>
+<html lang="no">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Renholdsrapport — ${escapeHtml(detail.site_name)}</title>
+</head>
+<body style="margin:0;padding:24px;background:#ffffff;font-family:Arial,Helvetica,sans-serif;color:#1a1a1a;">
+  ${buildReportBody(detail)}
 </body>
 </html>`;
 }

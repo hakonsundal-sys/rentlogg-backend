@@ -17,3 +17,7 @@ services:
         value: /var/data/rentlogg.db
       - key: UPLOADS_DIR
         value: /var/data/uploads
+      - key: RESEND_API_KEY
+        sync: false
+      - key: REPORT_FROM_EMAIL
+        sync: false

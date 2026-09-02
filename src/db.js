@@ -46,3 +46,4 @@ ensureColumn("room_runs", "edited_at", "edited_at TEXT");
 ensureColumn("room_runs", "edited_by_initials", "edited_by_initials TEXT");
 ensureColumn("checklist_runs", "edited_at", "edited_at TEXT");
 ensureColumn("checklist_runs", "edited_by_initials", "edited_by_initials TEXT");
+ensureColumn("sites", "report_recipients", "report_recipients TEXT");
