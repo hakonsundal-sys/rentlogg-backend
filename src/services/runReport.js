@@ -74,6 +74,10 @@ export function buildReportHtml(detail) {
             </div>
             <div style="margin-top:4px;">${escapeHtml(d.description)}</div>
             ${d.reported_by_initials ? `<div style="margin-top:4px;color:#777;">Meldt av: ${escapeHtml(d.reported_by_initials)}</div>` : ""}
+            ${d.photos?.length ? `
+              <div style="margin-top:8px;display:flex;flex-wrap:wrap;gap:8px;">
+                ${d.photos.map((p) => `<a href="${photoUrl(p.file_path)}" target="_blank"><img src="${photoUrl(p.file_path)}" alt="" style="width:140px;height:140px;object-fit:cover;border-radius:4px;border:1px solid #f1b0b7;"></a>`).join("")}
+              </div>` : ""}
             ${d.reply_text ? `<div style="margin-top:6px;padding-top:6px;border-top:1px solid #f1b0b7;color:#333;">Svar: ${escapeHtml(d.reply_text)} — ${escapeHtml(d.replied_by_initials)}</div>` : ""}
           </div>`)
         .join("")}`
@@ -165,6 +169,13 @@ export function buildReportPdf(detail, res) {
       const where = d.room_name ? `${d.room_name}${d.room_task_label ? " · " + d.room_task_label : ""}` : "Generelt";
       doc.fontSize(10).fillColor("black").text(`${where} — ${PRIORITY_LABELS[d.priority] || d.priority}`);
       doc.fontSize(10).fillColor("black").text(d.description);
+      d.photos?.forEach((photo) => {
+        const absolutePath = path.join(uploadsDir, path.basename(photo.file_path));
+        if (!fs.existsSync(absolutePath)) return;
+        if (doc.y > doc.page.height - 200) doc.addPage();
+        doc.moveDown(0.3);
+        doc.image(absolutePath, { fit: [160, 160] });
+      });
       if (d.reply_text) doc.fontSize(9).fillColor("gray").text(`Svar: ${d.reply_text} — ${d.replied_by_initials}`);
       doc.moveDown(0.5);
     });

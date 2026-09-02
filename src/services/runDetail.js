@@ -45,13 +45,29 @@ export function getRunDetail(runId) {
     };
   });
 
-  const deviations = db
+  const deviationRows = db
     .prepare(
       `SELECT d.*, rm.name AS room_name FROM deviations d
        LEFT JOIN rooms rm ON rm.id = d.room_id
        WHERE d.run_id = ? ORDER BY d.created_at DESC`
     )
     .all(run.id);
+
+  // Same batched-lookup shape as deviations.js's withPhotosAndRun — getRunDetail's deviations
+  // previously carried no photos at all, so anything reading runDetail.deviations directly
+  // (the report, CleanerHistoryView's avvik list) silently dropped avvik photos even though
+  // GET /deviations itself has always included them.
+  const deviationIds = deviationRows.map((d) => d.id);
+  const deviationPhotosById = {};
+  if (deviationIds.length) {
+    const placeholders = deviationIds.map(() => "?").join(",");
+    db.prepare(`SELECT * FROM photos WHERE deviation_id IN (${placeholders})`)
+      .all(...deviationIds)
+      .forEach((p) => {
+        (deviationPhotosById[p.deviation_id] ??= []).push(p);
+      });
+  }
+  const deviations = deviationRows.map((d) => ({ ...d, photos: deviationPhotosById[d.id] || [] }));
 
   return { ...run, items, photos, rooms, deviations };
 }
