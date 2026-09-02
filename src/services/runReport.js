@@ -119,6 +119,39 @@ export function buildReportHtml(detail) {
 </html>`;
 }
 
+// PDFKit's doc.image() does NOT advance doc.y the way doc.text() does, so anything drawn
+// afterward (via moveDown/text/another image) lands back at the same y — silently overlapping
+// the image instead of flowing below it. This lays photos out in explicit rows and moves doc.y
+// past the tallest row itself, so the rest of the document keeps flowing correctly.
+function drawPhotoGrid(doc, photos, uploadsDir, boxSize) {
+  if (!photos?.length) return;
+  const gap = 10;
+  const contentWidth = doc.page.width - doc.page.margins.left - doc.page.margins.right;
+  const perRow = Math.max(1, Math.floor((contentWidth + gap) / (boxSize + gap)));
+  const startX = doc.page.margins.left;
+  let col = 0;
+  let rowY = doc.y;
+
+  photos.forEach((photo) => {
+    const absolutePath = path.join(uploadsDir, path.basename(photo.file_path));
+    if (!fs.existsSync(absolutePath)) return;
+    if (col === 0 && rowY > doc.page.height - doc.page.margins.bottom - boxSize) {
+      doc.addPage();
+      rowY = doc.y;
+    }
+    doc.image(absolutePath, startX + col * (boxSize + gap), rowY, { fit: [boxSize, boxSize] });
+    col++;
+    if (col >= perRow) {
+      col = 0;
+      rowY += boxSize + gap;
+    }
+  });
+
+  if (col !== 0) rowY += boxSize + gap;
+  doc.x = startX;
+  doc.y = rowY;
+}
+
 export function buildReportPdf(detail, res) {
   const sections = buildSections(detail);
   const uploadsDir = process.env.UPLOADS_DIR || "uploads";
@@ -150,13 +183,10 @@ export function buildReportPdf(detail, res) {
       doc.fillColor(item.done ? "green" : "red").text(item.done ? "  ✓ Utført" : "  ✗ Ikke utført");
     });
 
-    section.photos?.forEach((photo) => {
-      const absolutePath = path.join(uploadsDir, path.basename(photo.file_path));
-      if (!fs.existsSync(absolutePath)) return;
-      if (doc.y > doc.page.height - 240) doc.addPage();
+    if (section.photos?.length) {
       doc.moveDown(0.3);
-      doc.image(absolutePath, { fit: [200, 200] });
-    });
+      drawPhotoGrid(doc, section.photos, uploadsDir, 150);
+    }
     doc.moveDown();
   });
 
@@ -169,13 +199,10 @@ export function buildReportPdf(detail, res) {
       const where = d.room_name ? `${d.room_name}${d.room_task_label ? " · " + d.room_task_label : ""}` : "Generelt";
       doc.fontSize(10).fillColor("black").text(`${where} — ${PRIORITY_LABELS[d.priority] || d.priority}`);
       doc.fontSize(10).fillColor("black").text(d.description);
-      d.photos?.forEach((photo) => {
-        const absolutePath = path.join(uploadsDir, path.basename(photo.file_path));
-        if (!fs.existsSync(absolutePath)) return;
-        if (doc.y > doc.page.height - 200) doc.addPage();
+      if (d.photos?.length) {
         doc.moveDown(0.3);
-        doc.image(absolutePath, { fit: [160, 160] });
-      });
+        drawPhotoGrid(doc, d.photos, uploadsDir, 130);
+      }
       if (d.reply_text) doc.fontSize(9).fillColor("gray").text(`Svar: ${d.reply_text} — ${d.replied_by_initials}`);
       doc.moveDown(0.5);
     });
