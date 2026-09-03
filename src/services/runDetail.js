@@ -73,7 +73,13 @@ export function getRunDetail(runId) {
 }
 
 export function canAccessRun(run, user) {
-  if (user.role === "cleaner") return run.cleaner_id === user.id;
+  // A day's checklist_run is shared per site, not owned by whoever happened to check in first —
+  // POST /sites/checkin/:qrToken hands any cleaner back that same existing run if one already
+  // exists for the site today. Restricting reads to run.cleaner_id === user.id broke exactly
+  // that flow: a second cleaner scanning the same site the same day got a runId back, then was
+  // immediately 403'd fetching its detail. Cleaners already have unscoped read access to sites
+  // (GET /sites has no cleaner-specific filtering, only customer), so this isn't a new boundary.
+  if (user.role === "cleaner") return true;
   if (user.role === "customer") return run.site_client_id === user.client_id;
   return true; // admin/manager
 }

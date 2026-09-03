@@ -146,9 +146,11 @@ deviationsRouter.patch("/:id", requireAuth, requireRole("admin", "manager"), (re
 
 const REPLY_ACTIONS = ["resolve", "assign_manager", "assign_customer"];
 
-// Lets a cleaner (or manager) respond to an avvik reported against their own visit: always a
-// written reply + a typed signature, then a routing decision — close it themselves, or hand it
-// off to a manager or back to the customer.
+// Lets a cleaner (or manager) respond to an avvik: always a written reply + a typed signature,
+// then a routing decision — close it themselves, or hand it off to a manager or back to the
+// customer. Not restricted to the run's original cleaner_id — a day's run is shared per site
+// (see canAccessRun in runDetail.js), so whichever cleaner is actually on site today needs to be
+// able to reply, not just whoever happened to check in first.
 deviationsRouter.patch("/:id/reply", requireAuth, requireRole("cleaner", "manager"), (req, res) => {
   const deviation = db.prepare("SELECT * FROM deviations WHERE id = ?").get(req.params.id);
   if (!deviation) return res.status(404).json({ error: "Not found" });
@@ -157,11 +159,6 @@ deviationsRouter.patch("/:id/reply", requireAuth, requireRole("cleaner", "manage
   if (!reply_text || !reply_text.trim()) return res.status(400).json({ error: "Svar er påkrevd" });
   if (!initials || !initials.trim()) return res.status(400).json({ error: "Initialer/navn er påkrevd" });
   if (!REPLY_ACTIONS.includes(action)) return res.status(400).json({ error: "Invalid action" });
-
-  if (req.user.role === "cleaner") {
-    const run = deviation.run_id ? db.prepare("SELECT cleaner_id FROM checklist_runs WHERE id = ?").get(deviation.run_id) : null;
-    if (!run || run.cleaner_id !== req.user.id) return res.status(403).json({ error: "Not allowed" });
-  }
 
   db.prepare(
     "UPDATE deviations SET reply_text = ?, replied_by_initials = ?, replied_at = datetime('now') WHERE id = ?"
