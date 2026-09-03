@@ -1,13 +1,21 @@
-// Thin wrapper around Resend's HTTP API using the built-in fetch — no SDK dependency needed
-// for a single POST call, matching this codebase's minimal-dependency style.
+import nodemailer from "nodemailer";
+
+// Gmail SMTP via an app-specific password — no domain/DNS verification needed, unlike Resend,
+// which made it the pragmatic interim choice while okv-gruppen.no's DNS (at DigitalOcean,
+// outside Hakon's access) isn't set up yet. Gmail requires the "From" address to be the
+// authenticated mailbox itself (or a verified alias), so REPORT_FROM_EMAIL's address portion
+// must match GMAIL_USER — only the display name is free to customize.
+let transporter;
+function getTransporter() {
+  if (!transporter) {
+    transporter = nodemailer.createTransport({
+      service: "gmail",
+      auth: { user: process.env.GMAIL_USER, pass: process.env.GMAIL_APP_PASSWORD },
+    });
+  }
+  return transporter;
+}
+
 export async function sendEmail({ to, subject, html }) {
-  const res = await fetch("https://api.resend.com/emails", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${process.env.RESEND_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ from: process.env.REPORT_FROM_EMAIL, to, subject, html }),
-  });
-  if (!res.ok) throw new Error(`Resend feilet (${res.status}): ${await res.text()}`);
+  await getTransporter().sendMail({ from: process.env.REPORT_FROM_EMAIL, to, subject, html });
 }
