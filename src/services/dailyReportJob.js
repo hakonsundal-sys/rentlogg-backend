@@ -7,14 +7,16 @@ import { sendEmail } from "./mailer.js";
 // Sends one digest email per site with a completed/in-progress visit on dateStr, to that site's
 // report_recipients list. Sites with no recipients configured, or no visit at all that day, are
 // silently skipped — this is a daily "here's what happened" digest, not a missed-visit alert.
-export async function sendDailyReports(dateStr) {
-  const sites = db
-    .prepare("SELECT * FROM sites WHERE report_recipients IS NOT NULL AND TRIM(report_recipients) != ''")
-    .all();
+// siteId narrows this to a single site (for a manual resend), skipping the recipients-configured
+// filter so a targeted send still runs (and reports skipped) even if that site has none set.
+export async function sendDailyReports(dateStr, siteId) {
+  const sites = siteId
+    ? db.prepare("SELECT * FROM sites WHERE id = ?").all(siteId)
+    : db.prepare("SELECT * FROM sites WHERE report_recipients IS NOT NULL AND TRIM(report_recipients) != ''").all();
 
   const results = { sent: 0, skipped: 0, failed: 0 };
   for (const site of sites) {
-    const recipients = site.report_recipients.split(",").map((s) => s.trim()).filter(Boolean);
+    const recipients = (site.report_recipients || "").split(",").map((s) => s.trim()).filter(Boolean);
     const run = findRunForSiteDate(site.id, dateStr);
     if (!recipients.length || !run) {
       results.skipped++;

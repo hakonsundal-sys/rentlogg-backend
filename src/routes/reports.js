@@ -120,10 +120,10 @@ reportsRouter.get("/runs/:id/pdf", requireAuth, (req, res) => {
 });
 
 // Manual trigger for the daily digest — lets an admin verify/re-send for a specific date
-// without waiting for the 07:00 scheduler.
+// (optionally scoped to one site) without waiting for the 07:00 scheduler.
 reportsRouter.post("/daily-digest/run", requireAuth, requireRole("admin"), async (req, res) => {
   const dateStr = req.body?.date || yesterdayInOslo();
-  const results = await sendDailyReports(dateStr);
+  const results = await sendDailyReports(dateStr, req.body?.site_id || undefined);
   res.json({ date: dateStr, ...results });
 });
 
