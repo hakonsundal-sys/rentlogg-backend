@@ -2,6 +2,7 @@ import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import morgan from "morgan";
+import multer from "multer";
 import fs from "node:fs";
 import "./db.js";
 
@@ -39,7 +40,16 @@ app.use("/invitations", invitationsRouter);
 app.use("/sites/:siteId/rooms", siteRoomsRouter);
 app.use("/rooms", roomsRouter);
 
+// Without this, a rejected upload (most commonly a phone photo over the size limit — modern
+// camera HDR/high-res shots routinely exceed what a "reasonable" limit looks like on paper)
+// fell through to the generic 500 below with zero indication of what actually went wrong.
 app.use((err, req, res, next) => {
+  if (err instanceof multer.MulterError) {
+    if (err.code === "LIMIT_FILE_SIZE") {
+      return res.status(413).json({ error: "Bildet er for stort. Prøv et bilde under 20 MB." });
+    }
+    return res.status(400).json({ error: "Kunne ikke laste opp filen." });
+  }
   console.error(err);
   res.status(500).json({ error: "Internal server error" });
 });

@@ -11,7 +11,9 @@ const upload = multer({
     destination: process.env.UPLOADS_DIR || "uploads/",
     filename: (req, file, cb) => cb(null, `${Date.now()}-${file.originalname}`),
   }),
-  limits: { fileSize: 10 * 1024 * 1024 },
+  // Phone camera photos (HDR/high-res shots especially) routinely land well past 10MB —
+  // 20MB gives real-world headroom without allowing e.g. a video by mistake.
+  limits: { fileSize: 20 * 1024 * 1024 },
 });
 
 // Attaches each deviation's photos and the checklist run it was reported during (same
