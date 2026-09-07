@@ -1,3 +1,12 @@
+-- Companies: the cleaning-company tenants Rentlogg is sold to. Every admin/manager/cleaner and
+-- every client/site/checklist_template belongs to exactly one company; a null company_id is
+-- reserved for the super_admin role, which manages companies but has no company of its own.
+CREATE TABLE IF NOT EXISTS companies (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
 -- Clients: the companies that hire the cleaning company (30-40+ expected)
 CREATE TABLE IF NOT EXISTS clients (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -15,7 +24,7 @@ CREATE TABLE IF NOT EXISTS users (
   name TEXT NOT NULL,
   email TEXT UNIQUE NOT NULL,
   password_hash TEXT NOT NULL,
-  role TEXT NOT NULL CHECK (role IN ('admin', 'manager', 'cleaner', 'customer')),
+  role TEXT NOT NULL CHECK (role IN ('super_admin', 'admin', 'manager', 'cleaner', 'customer')),
   client_id INTEGER REFERENCES clients(id), -- set for 'customer' role users
   avatar_url TEXT,
   phone TEXT,

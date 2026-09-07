@@ -22,6 +22,9 @@ reportsRouter.get("/sites/:id/pdf", requireAuth, requireRole("admin", "manager",
   if (req.user.role === "customer" && site.client_id !== req.user.client_id) {
     return res.status(403).json({ error: "Not allowed" });
   }
+  if (req.user.role !== "customer" && site.company_id !== req.user.company_id) {
+    return res.status(403).json({ error: "Not allowed" });
+  }
 
   const client = db.prepare("SELECT * FROM clients WHERE id = ?").get(site.client_id);
   const runs = db
@@ -86,6 +89,9 @@ reportsRouter.get("/sites/:id/photos.zip", requireAuth, requireRole("admin", "ma
   if (req.user.role === "customer" && site.client_id !== req.user.client_id) {
     return res.status(403).json({ error: "Not allowed" });
   }
+  if (req.user.role !== "customer" && site.company_id !== req.user.company_id) {
+    return res.status(403).json({ error: "Not allowed" });
+  }
 
   const runs = db
     .prepare("SELECT * FROM checklist_runs WHERE site_id = ? ORDER BY started_at DESC LIMIT 20")
@@ -123,7 +129,7 @@ reportsRouter.get("/runs/:id/pdf", requireAuth, (req, res) => {
 // (optionally scoped to one site) without waiting for the 07:00 scheduler.
 reportsRouter.post("/daily-digest/run", requireAuth, requireRole("admin"), async (req, res) => {
   const dateStr = req.body?.date || yesterdayInOslo();
-  const results = await sendDailyReports(dateStr, req.body?.site_id || undefined);
+  const results = await sendDailyReports(dateStr, req.body?.site_id || undefined, req.user.company_id);
   res.json({ date: dateStr, ...results });
 });
 
@@ -134,7 +140,7 @@ function parseSummaryQuery(req) {
 }
 
 reportsRouter.get("/summary", requireAuth, requireRole("admin", "manager"), (req, res) => {
-  res.json(computeMonthlyReport(parseSummaryQuery(req)));
+  res.json(computeMonthlyReport({ ...parseSummaryQuery(req), companyId: req.user.company_id }));
 });
 
 function csvEscape(value) {
@@ -147,7 +153,7 @@ const STATUS_LABELS = { completed: "Fullført", in_progress: "Pågår", missing:
 
 reportsRouter.get("/summary.csv", requireAuth, requireRole("admin", "manager"), (req, res) => {
   const { month, siteId } = parseSummaryQuery(req);
-  const { rows } = computeMonthlyReport({ month, siteId });
+  const { rows } = computeMonthlyReport({ month, siteId, companyId: req.user.company_id });
 
   const header = ["Dato", "Lokasjon", "Planlagt", "Rom", "Oppgaver"];
   const lines = [header.map(csvEscape).join(",")];

@@ -9,6 +9,22 @@ import { getRunDetail, canAccessRun } from "../services/runDetail.js";
 
 export const checklistsRouter = Router();
 
+// Shared ownership check for the many :id-scoped run routes below (none of which had any
+// cross-tenant check at all before company_id existed — any admin/manager/cleaner could touch
+// any run in the whole database by guessing an id).
+function getRunScoped(runId, user) {
+  const run = db
+    .prepare(
+      `SELECT r.*, s.company_id AS site_company_id, s.client_id AS site_client_id
+       FROM checklist_runs r JOIN sites s ON s.id = r.site_id WHERE r.id = ?`
+    )
+    .get(runId);
+  if (!run) return { status: 404, error: "Not found" };
+  if (user.role === "customer" && run.site_client_id !== user.client_id) return { status: 403, error: "Not allowed" };
+  if (user.role !== "customer" && run.site_company_id !== user.company_id) return { status: 403, error: "Not allowed" };
+  return { run };
+}
+
 const upload = multer({
   storage: multer.diskStorage({
     destination: process.env.UPLOADS_DIR || "uploads/",
@@ -22,7 +38,7 @@ const upload = multer({
 // --- Templates ---
 
 checklistsRouter.get("/templates", requireAuth, requireRole("admin", "manager"), (req, res) => {
-  const templates = db.prepare("SELECT * FROM checklist_templates ORDER BY name").all();
+  const templates = db.prepare("SELECT * FROM checklist_templates WHERE company_id = ? ORDER BY name").all(req.user.company_id);
   const items = db.prepare("SELECT * FROM checklist_template_items WHERE template_id = ? ORDER BY sort_order");
   res.json(templates.map((t) => ({ ...t, items: items.all(t.id) })));
 });
@@ -31,7 +47,7 @@ checklistsRouter.post("/templates", requireAuth, requireRole("admin", "manager")
   const { name, items } = req.body; // items: string[]
   if (!name || !Array.isArray(items)) return res.status(400).json({ error: "name and items[] are required" });
 
-  const info = db.prepare("INSERT INTO checklist_templates (name) VALUES (?)").run(name);
+  const info = db.prepare("INSERT INTO checklist_templates (name, company_id) VALUES (?, ?)").run(name, req.user.company_id);
   const insertItem = db.prepare("INSERT INTO checklist_template_items (template_id, label, sort_order) VALUES (?, ?, ?)");
   items.forEach((label, i) => insertItem.run(info.lastInsertRowid, label, i));
 
@@ -70,6 +86,9 @@ checklistsRouter.get("/site-runs/:siteId", requireAuth, requireRole("admin", "ma
   if (req.user.role === "customer" && site.client_id !== req.user.client_id) {
     return res.status(403).json({ error: "Not allowed" });
   }
+  if (req.user.role !== "customer" && site.company_id !== req.user.company_id) {
+    return res.status(403).json({ error: "Not allowed" });
+  }
 
   const limit = Math.min(Number(req.query.limit) || 20, 50);
   const before = req.query.before ? Number(req.query.before) : null;
@@ -99,8 +118,8 @@ checklistsRouter.get("/site-runs/:siteId", requireAuth, requireRole("admin", "ma
 
 checklistsRouter.get("/runs", requireAuth, requireRole("admin", "manager"), (req, res) => {
   const { site_id, from, to } = req.query;
-  const conditions = [];
-  const params = [];
+  const conditions = ["s.company_id = ?"];
+  const params = [req.user.company_id];
   if (site_id) {
     conditions.push("r.site_id = ?");
     params.push(site_id);
@@ -134,8 +153,8 @@ checklistsRouter.get("/runs/:id", requireAuth, (req, res) => {
 });
 
 checklistsRouter.get("/runs/:id/photos.zip", requireAuth, requireRole("admin", "manager"), (req, res) => {
-  const run = db.prepare("SELECT * FROM checklist_runs WHERE id = ?").get(req.params.id);
-  if (!run) return res.status(404).json({ error: "Not found" });
+  const { run, status, error } = getRunScoped(req.params.id, req.user);
+  if (error) return res.status(status).json({ error });
 
   const photos = gatherReportPhotos([run]);
   if (photos.length === 0) return res.status(404).json({ error: "Ingen bilder funnet for dette besøket." });
@@ -155,6 +174,9 @@ function stampChecklistRunEdit(runId, initials) {
 }
 
 checklistsRouter.patch("/runs/:id/items/:itemId", requireAuth, requireRole("cleaner", "admin", "manager"), (req, res) => {
+  const { status, error } = getRunScoped(req.params.id, req.user);
+  if (error) return res.status(status).json({ error });
+
   const { done, initials } = req.body;
   db.prepare("UPDATE checklist_run_items SET done = ? WHERE id = ? AND run_id = ?").run(done ? 1 : 0, req.params.itemId, req.params.id);
   stampChecklistRunEdit(req.params.id, initials);
@@ -162,8 +184,8 @@ checklistsRouter.patch("/runs/:id/items/:itemId", requireAuth, requireRole("clea
 });
 
 checklistsRouter.post("/runs/:id/complete", requireAuth, requireRole("cleaner", "admin", "manager"), (req, res) => {
-  const run = db.prepare("SELECT * FROM checklist_runs WHERE id = ?").get(req.params.id);
-  if (!run) return res.status(404).json({ error: "Not found" });
+  const { run, status, error } = getRunScoped(req.params.id, req.user);
+  if (error) return res.status(status).json({ error });
 
   const initials = (req.body?.initials || "").trim();
   if (!initials) return res.status(400).json({ error: "Navn er påkrevd for å fullføre besøket." });
@@ -183,6 +205,8 @@ checklistsRouter.post("/runs/:id/complete", requireAuth, requireRole("cleaner", 
 });
 
 checklistsRouter.post("/runs/:id/photos", requireAuth, requireRole("cleaner", "admin", "manager"), upload.single("photo"), (req, res) => {
+  const { status, error } = getRunScoped(req.params.id, req.user);
+  if (error) return res.status(status).json({ error });
   if (!req.file) return res.status(400).json({ error: "No file uploaded (field name must be 'photo')" });
   const kind = req.body.kind || "general";
   const info = db
@@ -193,6 +217,9 @@ checklistsRouter.post("/runs/:id/photos", requireAuth, requireRole("cleaner", "a
 });
 
 checklistsRouter.delete("/runs/:id/photos/:photoId", requireAuth, requireRole("cleaner", "admin", "manager"), (req, res) => {
+  const { status: scopeStatus, error: scopeError } = getRunScoped(req.params.id, req.user);
+  if (scopeError) return res.status(scopeStatus).json({ error: scopeError });
+
   const photo = db.prepare("SELECT * FROM photos WHERE id = ? AND run_id = ?").get(req.params.photoId, req.params.id);
   if (!photo) return res.status(404).json({ error: "Not found" });
 
@@ -209,8 +236,8 @@ checklistsRouter.delete("/runs/:id/photos/:photoId", requireAuth, requireRole("c
 // endpoint) — refuses to delete a run that has deviations attached rather than silently
 // orphaning them, since those represent real reports that shouldn't quietly disappear.
 checklistsRouter.delete("/runs/:id", requireAuth, requireRole("admin", "manager"), (req, res) => {
-  const run = db.prepare("SELECT * FROM checklist_runs WHERE id = ?").get(req.params.id);
-  if (!run) return res.status(404).json({ error: "Not found" });
+  const { status, error } = getRunScoped(req.params.id, req.user);
+  if (error) return res.status(status).json({ error });
 
   const deviationCount = db.prepare("SELECT COUNT(*) AS n FROM deviations WHERE run_id = ?").get(req.params.id).n;
   if (deviationCount > 0) {

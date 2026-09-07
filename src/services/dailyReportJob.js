@@ -9,10 +9,22 @@ import { sendEmail } from "./mailer.js";
 // silently skipped — this is a daily "here's what happened" digest, not a missed-visit alert.
 // siteId narrows this to a single site (for a manual resend), skipping the recipients-configured
 // filter so a targeted send still runs (and reports skipped) even if that site has none set.
-export async function sendDailyReports(dateStr, siteId) {
-  const sites = siteId
-    ? db.prepare("SELECT * FROM sites WHERE id = ?").all(siteId)
-    : db.prepare("SELECT * FROM sites WHERE report_recipients IS NOT NULL AND TRIM(report_recipients) != ''").all();
+// companyId scopes to one company's sites (the manual admin-triggered endpoint always passes the
+// caller's own company, so a Company A admin can never target Company B's sites even by guessing
+// a site_id); the 07:00 scheduler omits it entirely since that run is system-wide, not tied to
+// any one company's session.
+export async function sendDailyReports(dateStr, siteId, companyId) {
+  let sites;
+  if (siteId) {
+    const site = db.prepare("SELECT * FROM sites WHERE id = ?").get(siteId);
+    sites = site && (companyId === undefined || site.company_id === companyId) ? [site] : [];
+  } else if (companyId !== undefined) {
+    sites = db
+      .prepare("SELECT * FROM sites WHERE company_id = ? AND report_recipients IS NOT NULL AND TRIM(report_recipients) != ''")
+      .all(companyId);
+  } else {
+    sites = db.prepare("SELECT * FROM sites WHERE report_recipients IS NOT NULL AND TRIM(report_recipients) != ''").all();
+  }
 
   const results = { sent: 0, skipped: 0, failed: 0 };
   for (const site of sites) {

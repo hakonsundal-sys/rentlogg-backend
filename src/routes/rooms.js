@@ -24,6 +24,42 @@ const upload = multer({
 
 const pdfUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 
+// Same shared-ownership-check pattern as sites.js/checklists.js/deviations.js, one per level
+// this file operates at (site, room, room_run) since a room-run's site is two joins away.
+function getSiteScopedForRooms(siteId, user) {
+  const site = db.prepare("SELECT * FROM sites WHERE id = ?").get(siteId);
+  if (!site) return { status: 404, error: "Not found" };
+  if (user.role === "customer" && site.client_id !== user.client_id) return { status: 403, error: "Not allowed" };
+  if (user.role !== "customer" && site.company_id !== user.company_id) return { status: 403, error: "Not allowed" };
+  return { site };
+}
+
+function getRoomScoped(roomId, user) {
+  const room = db
+    .prepare(
+      `SELECT r.*, s.company_id AS site_company_id, s.client_id AS site_client_id
+       FROM rooms r JOIN sites s ON s.id = r.site_id WHERE r.id = ?`
+    )
+    .get(roomId);
+  if (!room) return { status: 404, error: "Not found" };
+  if (user.role === "customer" && room.site_client_id !== user.client_id) return { status: 403, error: "Not allowed" };
+  if (user.role !== "customer" && room.site_company_id !== user.company_id) return { status: 403, error: "Not allowed" };
+  return { room };
+}
+
+function getRoomRunScoped(roomRunId, user) {
+  const roomRun = db
+    .prepare(
+      `SELECT rr.*, s.company_id AS site_company_id, s.client_id AS site_client_id
+       FROM room_runs rr JOIN rooms r ON r.id = rr.room_id JOIN sites s ON s.id = r.site_id WHERE rr.id = ?`
+    )
+    .get(roomRunId);
+  if (!roomRun) return { status: 404, error: "Not found" };
+  if (user.role === "customer" && roomRun.site_client_id !== user.client_id) return { status: 403, error: "Not allowed" };
+  if (user.role !== "customer" && roomRun.site_company_id !== user.company_id) return { status: 403, error: "Not allowed" };
+  return { roomRun };
+}
+
 const MAX_EXTRACTED_TEXT_CHARS = 15000;
 
 const SUBMIT_ROOMS_TOOL = {
@@ -139,10 +175,16 @@ function coerceRoomsShape(raw) {
 // --- Site-scoped: /sites/:siteId/rooms ---
 
 siteRoomsRouter.get("/", requireAuth, (req, res) => {
+  const { status, error } = getSiteScopedForRooms(req.params.siteId, req.user);
+  if (error) return res.status(status).json({ error });
+
   res.json(getRoomsForSite(req.params.siteId, todayInOslo()));
 });
 
 siteRoomsRouter.post("/", requireAuth, requireRole("admin", "manager"), (req, res) => {
+  const { status: scopeStatus, error: scopeError } = getSiteScopedForRooms(req.params.siteId, req.user);
+  if (scopeError) return res.status(scopeStatus).json({ error: scopeError });
+
   const { name, interval_days } = req.body;
   if (!name) return res.status(400).json({ error: "name is required" });
 
@@ -157,6 +199,9 @@ siteRoomsRouter.post("/", requireAuth, requireRole("admin", "manager"), (req, re
 // Bulk version of the single-room delete below — same cascade, wrapped in one transaction
 // so a crash partway through can't leave some rooms deleted and others half-cleaned-up.
 siteRoomsRouter.delete("/", requireAuth, requireRole("admin", "manager"), (req, res) => {
+  const { status: scopeStatus, error: scopeError } = getSiteScopedForRooms(req.params.siteId, req.user);
+  if (scopeError) return res.status(scopeStatus).json({ error: scopeError });
+
   const roomIds = db.prepare("SELECT id FROM rooms WHERE site_id = ?").all(req.params.siteId).map((r) => r.id);
 
   const deleteAll = db.transaction((ids) => {
@@ -185,6 +230,9 @@ siteRoomsRouter.delete("/", requireAuth, requireRole("admin", "manager"), (req, 
 });
 
 siteRoomsRouter.post("/complete-all-due", requireAuth, requireRole("cleaner"), (req, res) => {
+  const { status: scopeStatus, error: scopeError } = getSiteScopedForRooms(req.params.siteId, req.user);
+  if (scopeError) return res.status(scopeStatus).json({ error: scopeError });
+
   const initials = (req.body?.initials || "").trim();
   if (!initials) return res.status(400).json({ error: "Navn er påkrevd for å fullføre oppgavene." });
 
@@ -208,6 +256,8 @@ siteRoomsRouter.post("/complete-all-due", requireAuth, requireRole("cleaner"), (
 // --- AI PDF import: proposes rooms/tasks without persisting them ---
 
 siteRoomsRouter.post("/import-pdf", requireAuth, requireRole("admin", "manager"), pdfUpload.single("pdf"), async (req, res) => {
+  const { status: scopeStatus, error: scopeError } = getSiteScopedForRooms(req.params.siteId, req.user);
+  if (scopeError) return res.status(scopeStatus).json({ error: scopeError });
   if (!process.env.ANTHROPIC_API_KEY) {
     return res.status(503).json({ error: "AI-import er ikke konfigurert ennå." });
   }
@@ -281,6 +331,9 @@ siteRoomsRouter.post("/import-pdf", requireAuth, requireRole("admin", "manager")
 });
 
 siteRoomsRouter.post("/import-confirm", requireAuth, requireRole("admin", "manager"), (req, res) => {
+  const { status: scopeStatus, error: scopeError } = getSiteScopedForRooms(req.params.siteId, req.user);
+  if (scopeError) return res.status(scopeStatus).json({ error: scopeError });
+
   const { rooms } = req.body;
   if (!isValidRoomsShape(rooms)) return res.status(400).json({ error: "rooms[] with name/tasks[] is required" });
 
@@ -322,6 +375,9 @@ siteRoomsRouter.post("/import-confirm", requireAuth, requireRole("admin", "manag
 const ROOM_PATCH_FIELDS = ["name", "interval_days", "monthly_weekday", "monthly_occurrence"];
 
 roomsRouter.patch("/:id", requireAuth, requireRole("admin", "manager"), (req, res) => {
+  const { status: scopeStatus, error: scopeError } = getRoomScoped(req.params.id, req.user);
+  if (scopeError) return res.status(scopeStatus).json({ error: scopeError });
+
   const fields = ROOM_PATCH_FIELDS.filter((f) => f in req.body);
   if (fields.length === 0) return res.status(400).json({ error: "No valid fields to update" });
 
@@ -346,8 +402,8 @@ roomsRouter.patch("/:id", requireAuth, requireRole("admin", "manager"), (req, re
 });
 
 roomsRouter.delete("/:id", requireAuth, requireRole("admin", "manager"), (req, res) => {
-  const room = db.prepare("SELECT id FROM rooms WHERE id = ?").get(req.params.id);
-  if (!room) return res.status(404).json({ error: "Not found" });
+  const { status, error } = getRoomScoped(req.params.id, req.user);
+  if (error) return res.status(status).json({ error });
 
   const deleteCascade = db.transaction((roomId) => {
     db.prepare("UPDATE deviations SET room_id = NULL WHERE room_id = ?").run(roomId);
@@ -370,10 +426,16 @@ roomsRouter.delete("/:id", requireAuth, requireRole("admin", "manager"), (req, r
 // --- Room task template ---
 
 roomsRouter.get("/:id/items", requireAuth, (req, res) => {
+  const { status, error } = getRoomScoped(req.params.id, req.user);
+  if (error) return res.status(status).json({ error });
+
   res.json(db.prepare("SELECT * FROM room_checklist_items WHERE room_id = ? ORDER BY sort_order").all(req.params.id));
 });
 
 roomsRouter.post("/:id/items", requireAuth, requireRole("admin", "manager"), (req, res) => {
+  const { status: scopeStatus, error: scopeError } = getRoomScoped(req.params.id, req.user);
+  if (scopeError) return res.status(scopeStatus).json({ error: scopeError });
+
   const { label } = req.body;
   if (!label) return res.status(400).json({ error: "label is required" });
 
@@ -386,6 +448,9 @@ roomsRouter.post("/:id/items", requireAuth, requireRole("admin", "manager"), (re
 });
 
 roomsRouter.delete("/:id/items/:itemId", requireAuth, requireRole("admin", "manager"), (req, res) => {
+  const { status, error } = getRoomScoped(req.params.id, req.user);
+  if (error) return res.status(status).json({ error });
+
   db.prepare("DELETE FROM room_checklist_items WHERE id = ? AND room_id = ?").run(req.params.itemId, req.params.id);
   res.json({ ok: true });
 });
@@ -393,6 +458,9 @@ roomsRouter.delete("/:id/items/:itemId", requireAuth, requireRole("admin", "mana
 // --- Room schedule (weekday mode) ---
 
 roomsRouter.get("/:id/schedule", requireAuth, requireRole("admin", "manager"), (req, res) => {
+  const { status: scopeStatus, error: scopeError } = getRoomScoped(req.params.id, req.user);
+  if (scopeError) return res.status(scopeStatus).json({ error: scopeError });
+
   const rows = db
     .prepare(
       `SELECT sch.id, sch.weekday, sch.assigned_cleaner_id, u.name AS assigned_cleaner_name
@@ -406,6 +474,9 @@ roomsRouter.get("/:id/schedule", requireAuth, requireRole("admin", "manager"), (
 });
 
 roomsRouter.post("/:id/schedule", requireAuth, requireRole("admin", "manager"), (req, res) => {
+  const { status: scopeStatus, error: scopeError } = getRoomScoped(req.params.id, req.user);
+  if (scopeError) return res.status(scopeStatus).json({ error: scopeError });
+
   const { weekday, assigned_cleaner_id } = req.body;
   if (weekday === undefined || weekday === null || weekday < 0 || weekday > 6) {
     return res.status(400).json({ error: "weekday (0-6) is required" });
@@ -431,6 +502,9 @@ roomsRouter.post("/:id/schedule", requireAuth, requireRole("admin", "manager"), 
 });
 
 roomsRouter.delete("/:id/schedule/:weekday", requireAuth, requireRole("admin", "manager"), (req, res) => {
+  const { status, error } = getRoomScoped(req.params.id, req.user);
+  if (error) return res.status(status).json({ error });
+
   db.prepare("DELETE FROM room_schedules WHERE room_id = ? AND weekday = ?").run(req.params.id, req.params.weekday);
   res.json({ ok: true });
 });
@@ -438,8 +512,8 @@ roomsRouter.delete("/:id/schedule/:weekday", requireAuth, requireRole("admin", "
 // --- Room runs (a cleaner's cleaning instance for a room on a given day) ---
 
 roomsRouter.post("/:id/checkin", requireAuth, requireRole("cleaner"), (req, res) => {
-  const room = db.prepare("SELECT id FROM rooms WHERE id = ?").get(req.params.id);
-  if (!room) return res.status(404).json({ error: "Not found" });
+  const { status, error } = getRoomScoped(req.params.id, req.user);
+  if (error) return res.status(status).json({ error });
 
   const run = findOrCreateTodayRoomRun(req.params.id, req.user.id);
   const items = db.prepare("SELECT * FROM room_run_items WHERE room_run_id = ? ORDER BY sort_order").all(run.id);
@@ -453,6 +527,9 @@ roomsRouter.post("/:id/checkin", requireAuth, requireRole("cleaner"), (req, res)
 // single "Fullfør rom" click never touches item state, so undoing it must leave the
 // cleaner's own checkmarks alone.
 roomsRouter.post("/:id/reopen", requireAuth, requireRole("cleaner"), (req, res) => {
+  const { status: scopeStatus, error: scopeError } = getRoomScoped(req.params.id, req.user);
+  if (scopeError) return res.status(scopeStatus).json({ error: scopeError });
+
   const run = findRoomRunForDate(req.params.id, todayInOslo());
   if (!run) return res.status(404).json({ error: "Ingen fullført besøk å angre i dag" });
 
@@ -477,6 +554,9 @@ function stampRoomRunEdit(runId, initials) {
 }
 
 roomsRouter.patch("/runs/:runId/items/:itemId", requireAuth, requireRole("cleaner", "admin", "manager"), (req, res) => {
+  const { status, error } = getRoomRunScoped(req.params.runId, req.user);
+  if (error) return res.status(status).json({ error });
+
   const { done, initials } = req.body;
   db.prepare("UPDATE room_run_items SET done = ? WHERE id = ? AND room_run_id = ?").run(done ? 1 : 0, req.params.itemId, req.params.runId);
   stampRoomRunEdit(req.params.runId, initials);
@@ -486,8 +566,8 @@ roomsRouter.patch("/runs/:runId/items/:itemId", requireAuth, requireRole("cleane
 // Lets a cleaner clear a whole room's remaining tasks in one tap — for a routine room they
 // already know is fine, ticking every item individually is pure friction.
 roomsRouter.post("/runs/:runId/items/complete-all", requireAuth, requireRole("cleaner", "admin", "manager"), (req, res) => {
-  const run = db.prepare("SELECT id FROM room_runs WHERE id = ?").get(req.params.runId);
-  if (!run) return res.status(404).json({ error: "Not found" });
+  const { status, error } = getRoomRunScoped(req.params.runId, req.user);
+  if (error) return res.status(status).json({ error });
 
   db.prepare("UPDATE room_run_items SET done = 1 WHERE room_run_id = ?").run(req.params.runId);
   stampRoomRunEdit(req.params.runId, req.body?.initials);
@@ -495,17 +575,19 @@ roomsRouter.post("/runs/:runId/items/complete-all", requireAuth, requireRole("cl
 });
 
 roomsRouter.post("/runs/:runId/complete", requireAuth, requireRole("cleaner", "admin", "manager"), (req, res) => {
-  const run = db.prepare("SELECT * FROM room_runs WHERE id = ?").get(req.params.runId);
-  if (!run) return res.status(404).json({ error: "Not found" });
+  const { roomRun, status, error } = getRoomRunScoped(req.params.runId, req.user);
+  if (error) return res.status(status).json({ error });
 
   const initials = (req.body?.initials || "").trim();
   if (!initials) return res.status(400).json({ error: "Navn er påkrevd for å fullføre rommet." });
 
-  db.prepare("UPDATE room_runs SET completed_at = datetime('now'), signed_initials = ? WHERE id = ?").run(initials, run.id);
+  db.prepare("UPDATE room_runs SET completed_at = datetime('now'), signed_initials = ? WHERE id = ?").run(initials, roomRun.id);
   res.json({ ok: true });
 });
 
 roomsRouter.post("/runs/:runId/photos", requireAuth, requireRole("cleaner", "admin", "manager"), upload.single("photo"), (req, res) => {
+  const { status, error } = getRoomRunScoped(req.params.runId, req.user);
+  if (error) return res.status(status).json({ error });
   if (!req.file) return res.status(400).json({ error: "No file uploaded (field name must be 'photo')" });
   const kind = req.body.kind || "general";
   const info = db
@@ -516,6 +598,9 @@ roomsRouter.post("/runs/:runId/photos", requireAuth, requireRole("cleaner", "adm
 });
 
 roomsRouter.delete("/runs/:runId/photos/:photoId", requireAuth, requireRole("cleaner", "admin", "manager"), (req, res) => {
+  const { status: scopeStatus, error: scopeError } = getRoomRunScoped(req.params.runId, req.user);
+  if (scopeError) return res.status(scopeStatus).json({ error: scopeError });
+
   const photo = db.prepare("SELECT * FROM photos WHERE id = ? AND room_run_id = ?").get(req.params.photoId, req.params.runId);
   if (!photo) return res.status(404).json({ error: "Not found" });
 

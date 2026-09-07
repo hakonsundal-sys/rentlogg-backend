@@ -16,6 +16,21 @@ const upload = multer({
   limits: { fileSize: 20 * 1024 * 1024 },
 });
 
+// Shared ownership check for the :id-scoped routes below, mirroring getRunScoped in
+// checklists.js and getSiteScoped in sites.js.
+function getDeviationScoped(deviationId, user) {
+  const deviation = db
+    .prepare(
+      `SELECT d.*, s.company_id AS site_company_id, s.client_id AS site_client_id
+       FROM deviations d JOIN sites s ON s.id = d.site_id WHERE d.id = ?`
+    )
+    .get(deviationId);
+  if (!deviation) return { status: 404, error: "Not found" };
+  if (user.role === "customer" && deviation.site_client_id !== user.client_id) return { status: 403, error: "Not allowed" };
+  if (user.role !== "customer" && deviation.site_company_id !== user.company_id) return { status: 403, error: "Not allowed" };
+  return { deviation };
+}
+
 // Attaches each deviation's photos and the checklist run it was reported during (same
 // site name + date a cleaner or admin would see for that visit elsewhere in the app).
 function withPhotosAndRun(rows) {
@@ -61,11 +76,13 @@ deviationsRouter.get("/", requireAuth, (req, res) => {
   const rows = db
     .prepare(
       `SELECT d.*, r.started_at AS run_started_at, rm.name AS room_name FROM deviations d
+       JOIN sites s ON s.id = d.site_id
        LEFT JOIN checklist_runs r ON r.id = d.run_id
        LEFT JOIN rooms rm ON rm.id = d.room_id
+       WHERE s.company_id = ?
        ORDER BY d.created_at DESC`
     )
-    .all();
+    .all(req.user.company_id);
   res.json(withPhotosAndRun(rows));
 });
 
@@ -77,6 +94,9 @@ deviationsRouter.post("/", requireAuth, requireRole("cleaner", "manager", "custo
   const site = db.prepare("SELECT * FROM sites WHERE id = ?").get(site_id);
   if (!site) return res.status(404).json({ error: "Not found" });
   if (req.user.role === "customer" && site.client_id !== req.user.client_id) {
+    return res.status(403).json({ error: "Not allowed" });
+  }
+  if (req.user.role !== "customer" && site.company_id !== req.user.company_id) {
     return res.status(403).json({ error: "Not allowed" });
   }
 
@@ -106,6 +126,8 @@ deviationsRouter.post("/", requireAuth, requireRole("cleaner", "manager", "custo
 });
 
 deviationsRouter.post("/:id/photos", requireAuth, requireRole("cleaner", "manager"), upload.single("photo"), (req, res) => {
+  const { status, error } = getDeviationScoped(req.params.id, req.user);
+  if (error) return res.status(status).json({ error });
   if (!req.file) return res.status(400).json({ error: "No file uploaded (field name must be 'photo')" });
   const info = db
     .prepare("INSERT INTO photos (deviation_id, file_path, kind) VALUES (?, ?, 'general')")
@@ -122,8 +144,8 @@ function recomputeSiteStatus(siteId) {
 const DEVIATION_PATCH_FIELDS = ["title", "description", "priority"];
 
 deviationsRouter.patch("/:id", requireAuth, requireRole("admin", "manager"), (req, res) => {
-  const deviation = db.prepare("SELECT * FROM deviations WHERE id = ?").get(req.params.id);
-  if (!deviation) return res.status(404).json({ error: "Not found" });
+  const { deviation, status, error } = getDeviationScoped(req.params.id, req.user);
+  if (error) return res.status(status).json({ error });
 
   const fields = DEVIATION_PATCH_FIELDS.filter((f) => f in req.body);
   if (fields.length) {
@@ -154,8 +176,8 @@ const REPLY_ACTIONS = ["resolve", "assign_manager", "assign_customer"];
 // (see canAccessRun in runDetail.js), so whichever cleaner is actually on site today needs to be
 // able to reply, not just whoever happened to check in first.
 deviationsRouter.patch("/:id/reply", requireAuth, requireRole("cleaner", "manager"), (req, res) => {
-  const deviation = db.prepare("SELECT * FROM deviations WHERE id = ?").get(req.params.id);
-  if (!deviation) return res.status(404).json({ error: "Not found" });
+  const { deviation, status, error } = getDeviationScoped(req.params.id, req.user);
+  if (error) return res.status(status).json({ error });
 
   const { reply_text, initials, action } = req.body;
   if (!reply_text || !reply_text.trim()) return res.status(400).json({ error: "Svar er påkrevd" });
@@ -206,8 +228,8 @@ deviationsRouter.patch("/:id/approve", requireAuth, requireRole("customer"), (re
 });
 
 deviationsRouter.delete("/:id", requireAuth, requireRole("admin", "manager"), (req, res) => {
-  const deviation = db.prepare("SELECT * FROM deviations WHERE id = ?").get(req.params.id);
-  if (!deviation) return res.status(404).json({ error: "Not found" });
+  const { deviation, status, error } = getDeviationScoped(req.params.id, req.user);
+  if (error) return res.status(status).json({ error });
 
   db.prepare("DELETE FROM photos WHERE deviation_id = ?").run(req.params.id);
   db.prepare("DELETE FROM deviations WHERE id = ?").run(req.params.id);

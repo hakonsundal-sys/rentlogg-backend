@@ -63,14 +63,14 @@ const sitesScheduledOnWeekdayStmt = db.prepare(
    FROM site_schedules sch
    JOIN sites s ON s.id = sch.site_id
    LEFT JOIN users u ON u.id = sch.assigned_cleaner_id
-   WHERE sch.weekday = ?
+   WHERE sch.weekday = ? AND s.company_id = ?
    ORDER BY s.name`
 );
 
 // Sites scheduled on a given date, each tagged with whether today's run is missing/in_progress/completed.
-export function getSitesScheduledOn(dateStr) {
+export function getSitesScheduledOn(dateStr, companyId) {
   const weekday = weekdayOf(dateStr);
-  return sitesScheduledOnWeekdayStmt.all(weekday).map((site) => ({
+  return sitesScheduledOnWeekdayStmt.all(weekday, companyId).map((site) => ({
     ...site,
     scheduleStatus: getRunStatusForSiteDate(site.id, dateStr),
   }));
@@ -82,7 +82,7 @@ const scheduleWeekdaysStmt = db.prepare("SELECT weekday FROM site_schedules WHER
 // because the month is the current one and hasn't finished yet, or a future month entirely) —
 // otherwise every current-month report shows a misleading "missing" count for days that simply
 // haven't happened yet.
-export function computeMonthlyReport({ month, siteId }) {
+export function computeMonthlyReport({ month, siteId, companyId }) {
   const [yearStr, monthStr] = month.split("-");
   const year = Number(yearStr);
   const mon = Number(monthStr);
@@ -90,8 +90,8 @@ export function computeMonthlyReport({ month, siteId }) {
   const totalDays = daysInMonth(year, mon);
 
   const sites = siteId
-    ? db.prepare("SELECT * FROM sites WHERE id = ?").all(siteId)
-    : db.prepare("SELECT * FROM sites").all();
+    ? db.prepare("SELECT * FROM sites WHERE id = ? AND company_id = ?").all(siteId, companyId)
+    : db.prepare("SELECT * FROM sites WHERE company_id = ?").all(companyId);
 
   const scheduleBySite = new Map(
     sites.map((site) => [site.id, new Set(scheduleWeekdaysStmt.all(site.id).map((r) => r.weekday))])

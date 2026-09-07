@@ -12,7 +12,7 @@ export function getRunDetail(runId) {
   const run = db
     .prepare(
       `SELECT r.*, s.name AS site_name, s.address AS site_address, s.client_id AS site_client_id,
-              c.name AS client_name, u.name AS cleaner_name
+              s.company_id AS site_company_id, c.name AS client_name, u.name AS cleaner_name
        FROM checklist_runs r
        JOIN sites s ON s.id = r.site_id
        JOIN users u ON u.id = r.cleaner_id
@@ -77,9 +77,9 @@ export function canAccessRun(run, user) {
   // POST /sites/checkin/:qrToken hands any cleaner back that same existing run if one already
   // exists for the site today. Restricting reads to run.cleaner_id === user.id broke exactly
   // that flow: a second cleaner scanning the same site the same day got a runId back, then was
-  // immediately 403'd fetching its detail. Cleaners already have unscoped read access to sites
-  // (GET /sites has no cleaner-specific filtering, only customer), so this isn't a new boundary.
-  if (user.role === "cleaner") return true;
+  // immediately 403'd fetching its detail. Cleaners already have unscoped-within-their-company
+  // read access to sites (GET /sites filters by company only, not per-cleaner), so scoping this
+  // to "same company" isn't a new boundary for them, just the multi-tenant floor everyone gets.
   if (user.role === "customer") return run.site_client_id === user.client_id;
-  return true; // admin/manager
+  return run.site_company_id === user.company_id; // cleaner/admin/manager
 }

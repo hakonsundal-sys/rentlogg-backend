@@ -21,6 +21,42 @@ function ensureColumn(table, column, ddl) {
   if (!cols.some((c) => c.name === column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
 }
 
+// A CHECK constraint can't be altered with ADD COLUMN, so an existing database (created before
+// the super_admin role existed) needs a one-time table rebuild to accept it. Guarded by reading
+// the table's own stored SQL rather than a version flag, so it's safe to run on every boot and
+// a no-op on both fresh databases (schema.sql already includes super_admin) and already-migrated
+// ones.
+const usersSql = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'users'").get()?.sql || "";
+if (!usersSql.includes("super_admin")) {
+  // legacy_alter_table stops the RENAME below from rewriting every other table's stored FK text
+  // (checklist_runs.cleaner_id, deviations.reported_by, site_schedules.assigned_cleaner_id, ...)
+  // to point at "users_old" — without it, SQLite silently repoints them on rename, and then the
+  // final DROP TABLE users_old fails with a foreign key violation because those tables still
+  // reference it. With it off, every other table's "REFERENCES users(id)" is left untouched and
+  // simply resolves correctly again once the new "users" table exists under the same name.
+  db.pragma("foreign_keys = OFF");
+  db.pragma("legacy_alter_table = ON");
+  db.exec(`
+    ALTER TABLE users RENAME TO users_old;
+    CREATE TABLE users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      email TEXT UNIQUE NOT NULL,
+      password_hash TEXT NOT NULL,
+      role TEXT NOT NULL CHECK (role IN ('super_admin', 'admin', 'manager', 'cleaner', 'customer')),
+      client_id INTEGER REFERENCES clients(id),
+      avatar_url TEXT,
+      phone TEXT,
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+    INSERT INTO users (id, name, email, password_hash, role, client_id, avatar_url, phone, created_at)
+      SELECT id, name, email, password_hash, role, client_id, avatar_url, phone, created_at FROM users_old;
+    DROP TABLE users_old;
+  `);
+  db.pragma("legacy_alter_table = OFF");
+  db.pragma("foreign_keys = ON");
+}
+
 ensureColumn("clients", "contact_name", "contact_name TEXT");
 ensureColumn("clients", "phone", "phone TEXT");
 ensureColumn("clients", "address", "address TEXT");
@@ -47,3 +83,24 @@ ensureColumn("room_runs", "edited_by_initials", "edited_by_initials TEXT");
 ensureColumn("checklist_runs", "edited_at", "edited_at TEXT");
 ensureColumn("checklist_runs", "edited_by_initials", "edited_by_initials TEXT");
 ensureColumn("sites", "report_recipients", "report_recipients TEXT");
+ensureColumn("users", "company_id", "company_id INTEGER REFERENCES companies(id)");
+ensureColumn("clients", "company_id", "company_id INTEGER REFERENCES companies(id)");
+ensureColumn("sites", "company_id", "company_id INTEGER REFERENCES companies(id)");
+ensureColumn("checklist_templates", "company_id", "company_id INTEGER REFERENCES companies(id)");
+ensureColumn("invitations", "company_id", "company_id INTEGER REFERENCES companies(id)");
+
+// One-time backfill: any pre-existing database has real data with no company yet. Give it a
+// home ("OKV Gruppen", the only company Rentlogg had before this became multi-tenant) rather
+// than leaving it ownerless — a null company_id would otherwise make it invisible everywhere
+// once every route starts filtering by company_id, as if the data had vanished.
+if (db.prepare("SELECT COUNT(*) AS n FROM companies").get().n === 0) {
+  const existingData = db.prepare("SELECT COUNT(*) AS n FROM sites").get().n;
+  if (existingData > 0) {
+    const info = db.prepare("INSERT INTO companies (name) VALUES (?)").run("OKV Gruppen");
+    const companyId = info.lastInsertRowid;
+    db.prepare("UPDATE users SET company_id = ? WHERE company_id IS NULL").run(companyId);
+    db.prepare("UPDATE clients SET company_id = ? WHERE company_id IS NULL").run(companyId);
+    db.prepare("UPDATE sites SET company_id = ? WHERE company_id IS NULL").run(companyId);
+    db.prepare("UPDATE checklist_templates SET company_id = ? WHERE company_id IS NULL").run(companyId);
+  }
+}

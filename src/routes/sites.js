@@ -21,7 +21,21 @@ function scopeSitesForUser(user) {
   if (user.role === "customer") {
     return db.prepare("SELECT * FROM sites WHERE client_id = ? ORDER BY name").all(user.client_id);
   }
-  return db.prepare("SELECT * FROM sites ORDER BY name").all();
+  // company_id is null for a role with no company (only super_admin) — WHERE company_id = ?
+  // against null naturally matches nothing, so that role sees no operational sites by default
+  // rather than needing its own special-cased branch.
+  return db.prepare("SELECT * FROM sites WHERE company_id = ? ORDER BY name").all(user.company_id);
+}
+
+// Shared ownership check reused across every :id-scoped route below — fetches the site once and
+// applies whichever scoping rule matches the caller's role: customer is scoped to their own
+// client's sites (existing rule), every staff role is scoped to their own company's sites (new).
+function getSiteScoped(siteId, user) {
+  const site = db.prepare("SELECT * FROM sites WHERE id = ?").get(siteId);
+  if (!site) return { status: 404, error: "Not found" };
+  if (user.role === "customer" && site.client_id !== user.client_id) return { status: 403, error: "Not allowed" };
+  if (user.role !== "customer" && site.company_id !== user.company_id) return { status: 403, error: "Not allowed" };
+  return { site };
 }
 
 sitesRouter.get("/", requireAuth, (req, res) => {
@@ -32,13 +46,24 @@ sitesRouter.post("/", requireAuth, requireRole("admin", "manager"), (req, res) =
   const { name, client_id, address, checklist_template_id, latitude, longitude, gps_radius_meters, room_count, report_recipients } = req.body;
   if (!name || !client_id) return res.status(400).json({ error: "name and client_id are required" });
 
+  const client = db.prepare("SELECT company_id FROM clients WHERE id = ?").get(client_id);
+  if (!client || client.company_id !== req.user.company_id) {
+    return res.status(400).json({ error: "Ukjent kunde" });
+  }
+  if (checklist_template_id) {
+    const template = db.prepare("SELECT company_id FROM checklist_templates WHERE id = ?").get(checklist_template_id);
+    if (!template || template.company_id !== req.user.company_id) {
+      return res.status(400).json({ error: "Ukjent sjekklistemal" });
+    }
+  }
+
   const qr_token = newQrToken();
   const info = db
     .prepare(
-      `INSERT INTO sites (name, client_id, address, checklist_template_id, qr_token, latitude, longitude, gps_radius_meters, room_count, report_recipients)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO sites (name, client_id, company_id, address, checklist_template_id, qr_token, latitude, longitude, gps_radius_meters, room_count, report_recipients)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
-    .run(name, client_id, address || null, checklist_template_id || null, qr_token, latitude || null, longitude || null, gps_radius_meters || 150, room_count || 0, report_recipients || null);
+    .run(name, client_id, req.user.company_id, address || null, checklist_template_id || null, qr_token, latitude || null, longitude || null, gps_radius_meters || 150, room_count || 0, report_recipients || null);
 
   res.status(201).json({ id: info.lastInsertRowid, qr_token });
 });
@@ -46,20 +71,29 @@ sitesRouter.post("/", requireAuth, requireRole("admin", "manager"), (req, res) =
 const SITE_PATCH_FIELDS = ["name", "client_id", "address", "checklist_template_id", "latitude", "longitude", "gps_radius_meters", "room_count", "report_recipients"];
 
 sitesRouter.patch("/:id", requireAuth, requireRole("admin", "manager"), (req, res) => {
+  const { site, status, error } = getSiteScoped(req.params.id, req.user);
+  if (error) return res.status(status).json({ error });
+
   const fields = SITE_PATCH_FIELDS.filter((f) => f in req.body);
   if (fields.length === 0) return res.status(400).json({ error: "No valid fields to update" });
 
+  if (req.body.checklist_template_id) {
+    const template = db.prepare("SELECT company_id FROM checklist_templates WHERE id = ?").get(req.body.checklist_template_id);
+    if (!template || template.company_id !== req.user.company_id) {
+      return res.status(400).json({ error: "Ukjent sjekklistemal" });
+    }
+  }
+
   const setClause = fields.map((f) => `${f} = ?`).join(", ");
   const values = fields.map((f) => req.body[f]);
-  const info = db.prepare(`UPDATE sites SET ${setClause} WHERE id = ?`).run(...values, req.params.id);
-  if (info.changes === 0) return res.status(404).json({ error: "Not found" });
+  db.prepare(`UPDATE sites SET ${setClause} WHERE id = ?`).run(...values, site.id);
 
-  res.json(db.prepare("SELECT * FROM sites WHERE id = ?").get(req.params.id));
+  res.json(db.prepare("SELECT * FROM sites WHERE id = ?").get(site.id));
 });
 
 sitesRouter.delete("/:id", requireAuth, requireRole("admin", "manager"), (req, res) => {
-  const site = db.prepare("SELECT id FROM sites WHERE id = ?").get(req.params.id);
-  if (!site) return res.status(404).json({ error: "Not found" });
+  const { site, status, error } = getSiteScoped(req.params.id, req.user);
+  if (error) return res.status(status).json({ error });
 
   const deleteCascade = db.transaction((siteId) => {
     const runIds = db.prepare("SELECT id FROM checklist_runs WHERE site_id = ?").all(siteId).map((r) => r.id);
@@ -107,6 +141,9 @@ sitesRouter.delete("/:id", requireAuth, requireRole("admin", "manager"), (req, r
 // --- Recurring weekly schedule ---
 
 sitesRouter.get("/:id/schedule", requireAuth, requireRole("admin", "manager"), (req, res) => {
+  const { status, error } = getSiteScoped(req.params.id, req.user);
+  if (error) return res.status(status).json({ error });
+
   const rows = db
     .prepare(
       `SELECT sch.id, sch.weekday, sch.assigned_cleaner_id, u.name AS assigned_cleaner_name
@@ -120,6 +157,9 @@ sitesRouter.get("/:id/schedule", requireAuth, requireRole("admin", "manager"), (
 });
 
 sitesRouter.post("/:id/schedule", requireAuth, requireRole("admin", "manager"), (req, res) => {
+  const { status: scopeStatus, error: scopeError } = getSiteScoped(req.params.id, req.user);
+  if (scopeError) return res.status(scopeStatus).json({ error: scopeError });
+
   const { weekday, assigned_cleaner_id } = req.body;
   if (weekday === undefined || weekday === null || weekday < 0 || weekday > 6) {
     return res.status(400).json({ error: "weekday (0-6) is required" });
@@ -141,6 +181,9 @@ sitesRouter.post("/:id/schedule", requireAuth, requireRole("admin", "manager"), 
 });
 
 sitesRouter.delete("/:id/schedule/:weekday", requireAuth, requireRole("admin", "manager"), (req, res) => {
+  const { status, error } = getSiteScoped(req.params.id, req.user);
+  if (error) return res.status(status).json({ error });
+
   db.prepare("DELETE FROM site_schedules WHERE site_id = ? AND weekday = ?").run(req.params.id, req.params.weekday);
   res.json({ ok: true });
 });
@@ -150,11 +193,8 @@ sitesRouter.delete("/:id/schedule/:weekday", requireAuth, requireRole("admin", "
 // Staff (admin/manager/cleaner) see 'staff'/'both'; customer sees 'customer'/'both' and only
 // for their own client's site — same scoping every other customer-facing route already uses.
 sitesRouter.get("/:id/documents", requireAuth, (req, res) => {
-  const site = db.prepare("SELECT * FROM sites WHERE id = ?").get(req.params.id);
-  if (!site) return res.status(404).json({ error: "Not found" });
-  if (req.user.role === "customer" && site.client_id !== req.user.client_id) {
-    return res.status(403).json({ error: "Not allowed" });
-  }
+  const { site, status, error } = getSiteScoped(req.params.id, req.user);
+  if (error) return res.status(status).json({ error });
 
   const visibleTo = req.user.role === "customer" ? ["customer", "both"] : ["staff", "both"];
   const docs = db
@@ -166,8 +206,8 @@ sitesRouter.get("/:id/documents", requireAuth, (req, res) => {
 });
 
 sitesRouter.post("/:id/documents", requireAuth, requireRole("admin", "manager"), docUpload.single("file"), (req, res) => {
-  const site = db.prepare("SELECT id FROM sites WHERE id = ?").get(req.params.id);
-  if (!site) return res.status(404).json({ error: "Not found" });
+  const { site, status, error } = getSiteScoped(req.params.id, req.user);
+  if (error) return res.status(status).json({ error });
   if (!req.file) return res.status(400).json({ error: "Ingen fil valgt." });
 
   const name = (req.body.name || req.file.originalname || "Dokument").trim();
@@ -180,6 +220,9 @@ sitesRouter.post("/:id/documents", requireAuth, requireRole("admin", "manager"),
 });
 
 sitesRouter.delete("/:id/documents/:docId", requireAuth, requireRole("admin", "manager"), (req, res) => {
+  const { status: scopeStatus, error: scopeError } = getSiteScoped(req.params.id, req.user);
+  if (scopeError) return res.status(scopeStatus).json({ error: scopeError });
+
   const doc = db.prepare("SELECT * FROM site_documents WHERE id = ? AND site_id = ?").get(req.params.docId, req.params.id);
   if (!doc) return res.status(404).json({ error: "Not found" });
 
@@ -191,8 +234,8 @@ sitesRouter.delete("/:id/documents/:docId", requireAuth, requireRole("admin", "m
 
 // Returns a scannable QR image (data URL) that encodes the check-in link for this site.
 sitesRouter.get("/:id/qr", requireAuth, requireRole("admin", "manager"), async (req, res) => {
-  const site = db.prepare("SELECT * FROM sites WHERE id = ?").get(req.params.id);
-  if (!site) return res.status(404).json({ error: "Not found" });
+  const { site, status, error } = getSiteScoped(req.params.id, req.user);
+  if (error) return res.status(status).json({ error });
 
   const baseUrl = process.env.PUBLIC_BASE_URL || process.env.RENDER_EXTERNAL_URL || "http://localhost:4000";
   const checkInUrl = `${baseUrl}/checkin/${site.qr_token}`;
@@ -212,7 +255,9 @@ sitesRouter.get("/:id/qr", requireAuth, requireRole("admin", "manager"), async (
 // GPS distance check if coordinates are provided.
 sitesRouter.post("/checkin/:qrToken", requireAuth, requireRole("cleaner"), (req, res) => {
   const site = db.prepare("SELECT * FROM sites WHERE qr_token = ?").get(req.params.qrToken);
-  if (!site) return res.status(404).json({ error: "Unknown QR code" });
+  // Same "unknown QR code" message for a genuinely unknown token and one belonging to another
+  // company — a cleaner scanning a foreign QR shouldn't learn that a matching site exists.
+  if (!site || site.company_id !== req.user.company_id) return res.status(404).json({ error: "Unknown QR code" });
 
   const { latitude, longitude } = req.body;
   let gps_verified = 0;
