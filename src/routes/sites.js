@@ -1,10 +1,21 @@
 import { Router } from "express";
+import multer from "multer";
+import path from "node:path";
+import fs from "node:fs";
 import { db } from "../db.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 import { newQrToken, qrLabelSvgDataUrl } from "../utils/qrcode.js";
 import { findRunForSiteDate, todayInOslo } from "../services/schedule.js";
 
 export const sitesRouter = Router();
+
+const docUpload = multer({
+  storage: multer.diskStorage({
+    destination: process.env.UPLOADS_DIR || "uploads/",
+    filename: (req, file, cb) => cb(null, `${Date.now()}-${file.originalname}`),
+  }),
+  limits: { fileSize: 20 * 1024 * 1024 },
+});
 
 function scopeSitesForUser(user) {
   if (user.role === "customer") {
@@ -84,6 +95,7 @@ sitesRouter.delete("/:id", requireAuth, requireRole("admin", "manager"), (req, r
       db.prepare(`DELETE FROM room_checklist_items WHERE room_id IN (${roomPlaceholders})`).run(...roomIds);
     }
     db.prepare("DELETE FROM rooms WHERE site_id = ?").run(siteId);
+    db.prepare("DELETE FROM site_documents WHERE site_id = ?").run(siteId);
 
     db.prepare("DELETE FROM sites WHERE id = ?").run(siteId);
   });
@@ -130,6 +142,50 @@ sitesRouter.post("/:id/schedule", requireAuth, requireRole("admin", "manager"), 
 
 sitesRouter.delete("/:id/schedule/:weekday", requireAuth, requireRole("admin", "manager"), (req, res) => {
   db.prepare("DELETE FROM site_schedules WHERE site_id = ? AND weekday = ?").run(req.params.id, req.params.weekday);
+  res.json({ ok: true });
+});
+
+// --- Documents (floor plans, PDFs, etc.), visibility-scoped by role ---
+
+// Staff (admin/manager/cleaner) see 'staff'/'both'; customer sees 'customer'/'both' and only
+// for their own client's site — same scoping every other customer-facing route already uses.
+sitesRouter.get("/:id/documents", requireAuth, (req, res) => {
+  const site = db.prepare("SELECT * FROM sites WHERE id = ?").get(req.params.id);
+  if (!site) return res.status(404).json({ error: "Not found" });
+  if (req.user.role === "customer" && site.client_id !== req.user.client_id) {
+    return res.status(403).json({ error: "Not allowed" });
+  }
+
+  const visibleTo = req.user.role === "customer" ? ["customer", "both"] : ["staff", "both"];
+  const docs = db
+    .prepare(
+      `SELECT * FROM site_documents WHERE site_id = ? AND visibility IN (${visibleTo.map(() => "?").join(",")}) ORDER BY created_at DESC`
+    )
+    .all(site.id, ...visibleTo);
+  res.json(docs);
+});
+
+sitesRouter.post("/:id/documents", requireAuth, requireRole("admin", "manager"), docUpload.single("file"), (req, res) => {
+  const site = db.prepare("SELECT id FROM sites WHERE id = ?").get(req.params.id);
+  if (!site) return res.status(404).json({ error: "Not found" });
+  if (!req.file) return res.status(400).json({ error: "Ingen fil valgt." });
+
+  const name = (req.body.name || req.file.originalname || "Dokument").trim();
+  const visibility = ["staff", "customer", "both"].includes(req.body.visibility) ? req.body.visibility : "both";
+  const info = db
+    .prepare("INSERT INTO site_documents (site_id, name, file_path, visibility) VALUES (?, ?, ?, ?)")
+    .run(site.id, name, path.join("uploads", req.file.filename), visibility);
+
+  res.status(201).json({ id: info.lastInsertRowid, name, file_path: req.file.filename, visibility });
+});
+
+sitesRouter.delete("/:id/documents/:docId", requireAuth, requireRole("admin", "manager"), (req, res) => {
+  const doc = db.prepare("SELECT * FROM site_documents WHERE id = ? AND site_id = ?").get(req.params.docId, req.params.id);
+  if (!doc) return res.status(404).json({ error: "Not found" });
+
+  const uploadsDir = process.env.UPLOADS_DIR || "uploads";
+  fs.rmSync(path.join(uploadsDir, path.basename(doc.file_path)), { force: true });
+  db.prepare("DELETE FROM site_documents WHERE id = ?").run(doc.id);
   res.json({ ok: true });
 });
 

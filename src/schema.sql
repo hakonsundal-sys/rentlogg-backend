@@ -39,6 +39,17 @@ CREATE TABLE IF NOT EXISTS sites (
   created_at TEXT DEFAULT (datetime('now'))
 );
 
+-- Per-site document library (floor plans, PDFs, etc.), visibility-scoped so a document can be
+-- shown to staff only, customer only, or both.
+CREATE TABLE IF NOT EXISTS site_documents (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  site_id INTEGER NOT NULL REFERENCES sites(id),
+  name TEXT NOT NULL,
+  file_path TEXT NOT NULL,
+  visibility TEXT NOT NULL DEFAULT 'both' CHECK (visibility IN ('staff', 'customer', 'both')),
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
 -- Checklist templates: reusable per site type (kontor, produksjon, helse, ...)
 CREATE TABLE IF NOT EXISTS checklist_templates (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
