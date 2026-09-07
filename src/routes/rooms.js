@@ -559,7 +559,8 @@ roomsRouter.patch("/runs/:runId/items/:itemId", requireAuth, requireRole("cleane
   if (error) return res.status(status).json({ error });
 
   const { done, initials } = req.body;
-  db.prepare("UPDATE room_run_items SET done = ? WHERE id = ? AND room_run_id = ?").run(done ? 1 : 0, req.params.itemId, req.params.runId);
+  const result = db.prepare("UPDATE room_run_items SET done = ? WHERE id = ? AND room_run_id = ?").run(done ? 1 : 0, req.params.itemId, req.params.runId);
+  if (result.changes === 0) return res.status(404).json({ error: "Not found" });
   stampRoomRunEdit(req.params.runId, initials);
   res.json({ ok: true });
 });

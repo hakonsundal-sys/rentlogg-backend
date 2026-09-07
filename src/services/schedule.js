@@ -82,16 +82,21 @@ const scheduleWeekdaysStmt = db.prepare("SELECT weekday FROM site_schedules WHER
 // because the month is the current one and hasn't finished yet, or a future month entirely) —
 // otherwise every current-month report shows a misleading "missing" count for days that simply
 // haven't happened yet.
-export function computeMonthlyReport({ month, siteId, companyId }) {
+export function computeMonthlyReport({ month, siteId, departmentId, companyId }) {
   const [yearStr, monthStr] = month.split("-");
   const year = Number(yearStr);
   const mon = Number(monthStr);
   const today = todayInOslo();
   const totalDays = daysInMonth(year, mon);
 
-  const sites = siteId
-    ? db.prepare("SELECT * FROM sites WHERE id = ? AND company_id = ?").all(siteId, companyId)
-    : db.prepare("SELECT * FROM sites WHERE company_id = ?").all(companyId);
+  let sites;
+  if (siteId) {
+    sites = db.prepare("SELECT * FROM sites WHERE id = ? AND company_id = ?").all(siteId, companyId);
+  } else if (departmentId) {
+    sites = db.prepare("SELECT * FROM sites WHERE department_id = ? AND company_id = ?").all(departmentId, companyId);
+  } else {
+    sites = db.prepare("SELECT * FROM sites WHERE company_id = ?").all(companyId);
+  }
 
   const scheduleBySite = new Map(
     sites.map((site) => [site.id, new Set(scheduleWeekdaysStmt.all(site.id).map((r) => r.weekday))])
