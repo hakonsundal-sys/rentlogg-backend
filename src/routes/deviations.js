@@ -22,15 +22,12 @@ const upload = multer({
 function getDeviationScoped(deviationId, user) {
   const deviation = db
     .prepare(
-      `SELECT d.*, s.company_id AS site_company_id, s.client_id AS site_client_id, s.department_id AS site_department_id
+      `SELECT d.*, s.company_id AS site_company_id, s.client_id AS site_client_id
        FROM deviations d JOIN sites s ON s.id = d.site_id WHERE d.id = ?`
     )
     .get(deviationId);
   if (!deviation) return { status: 404, error: "Not found" };
-  if (user.role === "customer") {
-    const mismatch = user.department_id ? deviation.site_department_id !== user.department_id : deviation.site_client_id !== user.client_id;
-    if (mismatch) return { status: 403, error: "Not allowed" };
-  }
+  if (user.role === "customer" && deviation.site_client_id !== user.client_id) return { status: 403, error: "Not allowed" };
   if (user.role !== "customer" && deviation.site_company_id !== user.company_id) return { status: 403, error: "Not allowed" };
   return { deviation };
 }
@@ -53,39 +50,33 @@ function withPhotosAndRun(rows) {
 
 deviationsRouter.get("/", requireAuth, (req, res) => {
   if (req.user.role === "customer") {
-    const rows = req.user.department_id
-      ? db
-          .prepare(
-            `SELECT d.*, r.started_at AS run_started_at, rm.name AS room_name FROM deviations d
-             JOIN sites s ON s.id = d.site_id
-             LEFT JOIN checklist_runs r ON r.id = d.run_id
-             LEFT JOIN rooms rm ON rm.id = d.room_id
-             WHERE s.department_id = ?
-             ORDER BY d.created_at DESC`
-          )
-          .all(req.user.department_id)
-      : db
-          .prepare(
-            `SELECT d.*, r.started_at AS run_started_at, rm.name AS room_name FROM deviations d
-             JOIN sites s ON s.id = d.site_id
-             LEFT JOIN checklist_runs r ON r.id = d.run_id
-             LEFT JOIN rooms rm ON rm.id = d.room_id
-             WHERE s.client_id = ?
-             ORDER BY d.created_at DESC`
-          )
-          .all(req.user.client_id);
-    return res.json(withPhotosAndRun(rows));
-  }
-  if (req.user.role === "cleaner") {
     const rows = db
       .prepare(
         `SELECT d.*, r.started_at AS run_started_at, rm.name AS room_name FROM deviations d
-         JOIN checklist_runs r ON r.id = d.run_id
+         JOIN sites s ON s.id = d.site_id
+         LEFT JOIN checklist_runs r ON r.id = d.run_id
          LEFT JOIN rooms rm ON rm.id = d.room_id
-         WHERE r.cleaner_id = ?
+         WHERE s.client_id = ?
          ORDER BY d.created_at DESC`
       )
-      .all(req.user.id);
+      .all(req.user.client_id);
+    return res.json(withPhotosAndRun(rows));
+  }
+  if (req.user.role === "cleaner") {
+    // LEFT JOIN + filter on the site's company (not an INNER JOIN keyed to the run's original
+    // cleaner_id) — a deviation can have no run yet (customer-reported before any visit, see
+    // POST / below) and, per the reply endpoint's own reasoning, any cleaner covering the site
+    // today needs to see it, not just whoever happened to create that day's run.
+    const rows = db
+      .prepare(
+        `SELECT d.*, r.started_at AS run_started_at, rm.name AS room_name FROM deviations d
+         JOIN sites s ON s.id = d.site_id
+         LEFT JOIN checklist_runs r ON r.id = d.run_id
+         LEFT JOIN rooms rm ON rm.id = d.room_id
+         WHERE s.company_id = ?
+         ORDER BY d.created_at DESC`
+      )
+      .all(req.user.company_id);
     return res.json(withPhotosAndRun(rows));
   }
   const rows = db
@@ -101,19 +92,30 @@ deviationsRouter.get("/", requireAuth, (req, res) => {
   res.json(withPhotosAndRun(rows));
 });
 
-deviationsRouter.post("/", requireAuth, requireRole("cleaner", "manager", "customer"), (req, res) => {
+deviationsRouter.post("/", requireAuth, requireRole("admin", "cleaner", "manager", "customer"), (req, res) => {
   const { site_id, run_id, room_id, room_task_label, title, description, priority, initials } = req.body;
   if (!site_id || !description) return res.status(400).json({ error: "site_id and description are required" });
   if (!initials || !initials.trim()) return res.status(400).json({ error: "Initialer/navn er påkrevd" });
 
   const site = db.prepare("SELECT * FROM sites WHERE id = ?").get(site_id);
   if (!site) return res.status(404).json({ error: "Not found" });
-  if (req.user.role === "customer") {
-    const mismatch = req.user.department_id ? site.department_id !== req.user.department_id : site.client_id !== req.user.client_id;
-    if (mismatch) return res.status(403).json({ error: "Not allowed" });
+  if (req.user.role === "customer" && site.client_id !== req.user.client_id) {
+    return res.status(403).json({ error: "Not allowed" });
   }
   if (req.user.role !== "customer" && site.company_id !== req.user.company_id) {
     return res.status(403).json({ error: "Not allowed" });
+  }
+
+  // run_id/room_id are trusted input from here on — both must actually belong to this site, or a
+  // caller could attach a deviation to (and thereby leak, via the joins in GET / and
+  // getRunDetail) a foreign run/room's started_at or name from a different site or tenant.
+  if (run_id) {
+    const run = db.prepare("SELECT site_id FROM checklist_runs WHERE id = ?").get(run_id);
+    if (!run || run.site_id !== Number(site_id)) return res.status(400).json({ error: "Ukjent besøk" });
+  }
+  if (room_id) {
+    const room = db.prepare("SELECT site_id FROM rooms WHERE id = ?").get(room_id);
+    if (!room || room.site_id !== Number(site_id)) return res.status(400).json({ error: "Ukjent rom" });
   }
 
   // Cleaners report during their active visit and already know its run_id; customers report
@@ -141,7 +143,7 @@ deviationsRouter.post("/", requireAuth, requireRole("cleaner", "manager", "custo
   res.status(201).json({ id: info.lastInsertRowid });
 });
 
-deviationsRouter.post("/:id/photos", requireAuth, requireRole("cleaner", "manager"), upload.single("photo"), (req, res) => {
+deviationsRouter.post("/:id/photos", requireAuth, requireRole("admin", "cleaner", "manager"), upload.single("photo"), (req, res) => {
   const { status, error } = getDeviationScoped(req.params.id, req.user);
   if (error) return res.status(status).json({ error });
   if (!req.file) return res.status(400).json({ error: "No file uploaded (field name must be 'photo')" });
@@ -226,9 +228,8 @@ deviationsRouter.patch("/:id/approve", requireAuth, requireRole("customer"), (re
   const deviation = db.prepare("SELECT * FROM deviations WHERE id = ?").get(req.params.id);
   if (!deviation) return res.status(404).json({ error: "Not found" });
 
-  const site = db.prepare("SELECT client_id, department_id FROM sites WHERE id = ?").get(deviation.site_id);
-  const mismatch = req.user.department_id ? site?.department_id !== req.user.department_id : site?.client_id !== req.user.client_id;
-  if (!site || mismatch) return res.status(403).json({ error: "Not allowed" });
+  const site = db.prepare("SELECT client_id FROM sites WHERE id = ?").get(deviation.site_id);
+  if (!site || site.client_id !== req.user.client_id) return res.status(403).json({ error: "Not allowed" });
 
   if (deviation.status !== "resolved") {
     return res.status(400).json({ error: "Avviket er ikke løst ennå." });

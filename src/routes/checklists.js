@@ -16,15 +16,12 @@ export const checklistsRouter = Router();
 function getRunScoped(runId, user) {
   const run = db
     .prepare(
-      `SELECT r.*, s.company_id AS site_company_id, s.client_id AS site_client_id, s.department_id AS site_department_id
+      `SELECT r.*, s.company_id AS site_company_id, s.client_id AS site_client_id
        FROM checklist_runs r JOIN sites s ON s.id = r.site_id WHERE r.id = ?`
     )
     .get(runId);
   if (!run) return { status: 404, error: "Not found" };
-  if (user.role === "customer") {
-    const mismatch = user.department_id ? run.site_department_id !== user.department_id : run.site_client_id !== user.client_id;
-    if (mismatch) return { status: 403, error: "Not allowed" };
-  }
+  if (user.role === "customer" && run.site_client_id !== user.client_id) return { status: 403, error: "Not allowed" };
   if (user.role !== "customer" && run.site_company_id !== user.company_id) return { status: 403, error: "Not allowed" };
   return { run };
 }
@@ -87,9 +84,8 @@ checklistsRouter.get("/my-runs", requireAuth, requireRole("cleaner"), (req, res)
 checklistsRouter.get("/site-runs/:siteId", requireAuth, requireRole("admin", "manager", "customer"), (req, res) => {
   const site = db.prepare("SELECT * FROM sites WHERE id = ?").get(req.params.siteId);
   if (!site) return res.status(404).json({ error: "Not found" });
-  if (req.user.role === "customer") {
-    const mismatch = req.user.department_id ? site.department_id !== req.user.department_id : site.client_id !== req.user.client_id;
-    if (mismatch) return res.status(403).json({ error: "Not allowed" });
+  if (req.user.role === "customer" && site.client_id !== req.user.client_id) {
+    return res.status(403).json({ error: "Not allowed" });
   }
   if (req.user.role !== "customer" && site.company_id !== req.user.company_id) {
     return res.status(403).json({ error: "Not allowed" });

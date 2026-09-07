@@ -50,14 +50,14 @@ authRouter.post("/login", (req, res) => {
   }
 
   const token = jwt.sign(
-    { id: user.id, name: user.name, role: user.role, client_id: user.client_id, department_id: user.department_id, company_id: user.company_id },
+    { id: user.id, name: user.name, role: user.role, client_id: user.client_id, company_id: user.company_id },
     process.env.JWT_SECRET,
     { expiresIn: "12h" }
   );
 
   res.json({
     token,
-    user: { id: user.id, name: user.name, role: user.role, client_id: user.client_id, department_id: user.department_id, company_id: user.company_id },
+    user: { id: user.id, name: user.name, role: user.role, client_id: user.client_id, company_id: user.company_id },
   });
 });
 
@@ -75,7 +75,7 @@ authRouter.get("/users", requireAuth, requireRole("admin", "manager"), (req, res
 
 authRouter.get("/me", requireAuth, (req, res) => {
   const user = db
-    .prepare("SELECT id, name, email, role, client_id, department_id, company_id, avatar_url, phone, created_at FROM users WHERE id = ?")
+    .prepare("SELECT id, name, email, role, client_id, company_id, avatar_url, phone, created_at FROM users WHERE id = ?")
     .get(req.user.id);
   res.json(user);
 });
@@ -89,7 +89,7 @@ authRouter.patch("/me", requireAuth, (req, res) => {
   db.prepare(`UPDATE users SET ${setClause} WHERE id = ?`).run(...values, req.user.id);
 
   const user = db
-    .prepare("SELECT id, name, email, role, client_id, department_id, company_id, avatar_url, phone, created_at FROM users WHERE id = ?")
+    .prepare("SELECT id, name, email, role, client_id, company_id, avatar_url, phone, created_at FROM users WHERE id = ?")
     .get(req.user.id);
   res.json(user);
 });

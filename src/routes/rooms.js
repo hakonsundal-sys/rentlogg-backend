@@ -30,10 +30,7 @@ const pdfUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 
 function getSiteScopedForRooms(siteId, user) {
   const site = db.prepare("SELECT * FROM sites WHERE id = ?").get(siteId);
   if (!site) return { status: 404, error: "Not found" };
-  if (user.role === "customer") {
-    const mismatch = user.department_id ? site.department_id !== user.department_id : site.client_id !== user.client_id;
-    if (mismatch) return { status: 403, error: "Not allowed" };
-  }
+  if (user.role === "customer" && site.client_id !== user.client_id) return { status: 403, error: "Not allowed" };
   if (user.role !== "customer" && site.company_id !== user.company_id) return { status: 403, error: "Not allowed" };
   return { site };
 }
@@ -41,15 +38,12 @@ function getSiteScopedForRooms(siteId, user) {
 function getRoomScoped(roomId, user) {
   const room = db
     .prepare(
-      `SELECT r.*, s.company_id AS site_company_id, s.client_id AS site_client_id, s.department_id AS site_department_id
+      `SELECT r.*, s.company_id AS site_company_id, s.client_id AS site_client_id
        FROM rooms r JOIN sites s ON s.id = r.site_id WHERE r.id = ?`
     )
     .get(roomId);
   if (!room) return { status: 404, error: "Not found" };
-  if (user.role === "customer") {
-    const mismatch = user.department_id ? room.site_department_id !== user.department_id : room.site_client_id !== user.client_id;
-    if (mismatch) return { status: 403, error: "Not allowed" };
-  }
+  if (user.role === "customer" && room.site_client_id !== user.client_id) return { status: 403, error: "Not allowed" };
   if (user.role !== "customer" && room.site_company_id !== user.company_id) return { status: 403, error: "Not allowed" };
   return { room };
 }
@@ -57,15 +51,12 @@ function getRoomScoped(roomId, user) {
 function getRoomRunScoped(roomRunId, user) {
   const roomRun = db
     .prepare(
-      `SELECT rr.*, s.company_id AS site_company_id, s.client_id AS site_client_id, s.department_id AS site_department_id
+      `SELECT rr.*, s.company_id AS site_company_id, s.client_id AS site_client_id
        FROM room_runs rr JOIN rooms r ON r.id = rr.room_id JOIN sites s ON s.id = r.site_id WHERE rr.id = ?`
     )
     .get(roomRunId);
   if (!roomRun) return { status: 404, error: "Not found" };
-  if (user.role === "customer") {
-    const mismatch = user.department_id ? roomRun.site_department_id !== user.department_id : roomRun.site_client_id !== user.client_id;
-    if (mismatch) return { status: 403, error: "Not allowed" };
-  }
+  if (user.role === "customer" && roomRun.site_client_id !== user.client_id) return { status: 403, error: "Not allowed" };
   if (user.role !== "customer" && roomRun.site_company_id !== user.company_id) return { status: 403, error: "Not allowed" };
   return { roomRun };
 }

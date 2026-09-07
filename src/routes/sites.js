@@ -20,11 +20,6 @@ const docUpload = multer({
 
 function scopeSitesForUser(user) {
   if (user.role === "customer") {
-    // A department-scoped customer sees only that department's sites; a whole-client customer
-    // (department_id null, today's behavior) sees every site under their client.
-    if (user.department_id) {
-      return db.prepare("SELECT * FROM sites WHERE department_id = ? ORDER BY name").all(user.department_id);
-    }
     return db.prepare("SELECT * FROM sites WHERE client_id = ? ORDER BY name").all(user.client_id);
   }
   // company_id is null for a role with no company (only super_admin) — WHERE company_id = ?
@@ -35,15 +30,11 @@ function scopeSitesForUser(user) {
 
 // Shared ownership check reused across every :id-scoped route below — fetches the site once and
 // applies whichever scoping rule matches the caller's role: customer is scoped to their own
-// client's sites, or further to one department if they're department-scoped; every staff role is
-// scoped to their own company's sites.
+// client's sites, every staff role is scoped to their own company's sites.
 function getSiteScoped(siteId, user) {
   const site = db.prepare("SELECT * FROM sites WHERE id = ?").get(siteId);
   if (!site) return { status: 404, error: "Not found" };
-  if (user.role === "customer") {
-    const mismatch = user.department_id ? site.department_id !== user.department_id : site.client_id !== user.client_id;
-    if (mismatch) return { status: 403, error: "Not allowed" };
-  }
+  if (user.role === "customer" && site.client_id !== user.client_id) return { status: 403, error: "Not allowed" };
   if (user.role !== "customer" && site.company_id !== user.company_id) return { status: 403, error: "Not allowed" };
   return { site };
 }
@@ -61,8 +52,8 @@ sitesRouter.post("/", requireAuth, requireRole("admin", "manager"), (req, res) =
     return res.status(400).json({ error: "Ukjent kunde" });
   }
   if (department_id) {
-    const department = db.prepare("SELECT client_id FROM departments WHERE id = ?").get(department_id);
-    if (!department || department.client_id !== Number(client_id)) {
+    const department = db.prepare("SELECT company_id FROM departments WHERE id = ?").get(department_id);
+    if (!department || department.company_id !== req.user.company_id) {
       return res.status(400).json({ error: "Ukjent avdeling" });
     }
   }
@@ -106,9 +97,8 @@ sitesRouter.patch("/:id", requireAuth, requireRole("admin", "manager"), (req, re
     }
   }
   if (req.body.department_id) {
-    const targetClientId = "client_id" in req.body ? req.body.client_id : site.client_id;
-    const department = db.prepare("SELECT client_id FROM departments WHERE id = ?").get(req.body.department_id);
-    if (!department || department.client_id !== Number(targetClientId)) {
+    const department = db.prepare("SELECT company_id FROM departments WHERE id = ?").get(req.body.department_id);
+    if (!department || department.company_id !== req.user.company_id) {
       return res.status(400).json({ error: "Ukjent avdeling" });
     }
   }

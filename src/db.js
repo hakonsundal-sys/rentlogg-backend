@@ -89,8 +89,34 @@ ensureColumn("sites", "company_id", "company_id INTEGER REFERENCES companies(id)
 ensureColumn("checklist_templates", "company_id", "company_id INTEGER REFERENCES companies(id)");
 ensureColumn("invitations", "company_id", "company_id INTEGER REFERENCES companies(id)");
 ensureColumn("sites", "department_id", "department_id INTEGER REFERENCES departments(id)");
-ensureColumn("users", "department_id", "department_id INTEGER REFERENCES departments(id)");
-ensureColumn("invitations", "department_id", "department_id INTEGER REFERENCES departments(id)");
+
+// Departments started out (2026-09-07) as a per-client sub-grouping with a NOT NULL client_id,
+// before it turned out the actual need was an internal, company-wide region tag (Vest/Sør/Øst/
+// Midt) independent of client — see schema.sql's comment on the table. A database created
+// during that short window has the old client_id column; rebuild it away here. Guarded by
+// reading the table's own stored SQL, so this is a no-op on both a fresh database (schema.sql
+// already has the new shape) and one already migrated. Same legacy_alter_table dance as the
+// users-role rebuild above, needed because sites/invitations still hold a plain
+// "REFERENCES departments(id)" column that a RENAME would otherwise silently repoint.
+const departmentsSql = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'departments'").get()?.sql || "";
+if (departmentsSql.includes("client_id")) {
+  db.pragma("foreign_keys = OFF");
+  db.pragma("legacy_alter_table = ON");
+  db.exec(`
+    ALTER TABLE departments RENAME TO departments_old;
+    CREATE TABLE departments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      company_id INTEGER REFERENCES companies(id),
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+    INSERT INTO departments (id, name, company_id, created_at)
+      SELECT id, name, company_id, created_at FROM departments_old;
+    DROP TABLE departments_old;
+  `);
+  db.pragma("legacy_alter_table = OFF");
+  db.pragma("foreign_keys = ON");
+}
 
 // One-time backfill: any pre-existing database has real data with no company yet. Give it a
 // home ("OKV Gruppen", the only company Rentlogg had before this became multi-tenant) rather

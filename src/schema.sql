@@ -18,12 +18,12 @@ CREATE TABLE IF NOT EXISTS clients (
   created_at TEXT DEFAULT (datetime('now'))
 );
 
--- Departments: an optional grouping of sites under a client ("per avdeling"). A customer user
--- can be scoped to a whole client (department_id NULL, today's behavior) or to one department.
+-- Departments: an internal, company-wide regional grouping of sites (e.g. "Vest"/"Sør"/"Øst"/
+-- "Midt"), independent of which client a site belongs to. Staff-only (admin/manager manage
+-- these and tag sites with one) — customers have no visibility into or use for this.
 CREATE TABLE IF NOT EXISTS departments (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL,
-  client_id INTEGER NOT NULL REFERENCES clients(id),
   company_id INTEGER REFERENCES companies(id),
   created_at TEXT DEFAULT (datetime('now'))
 );
@@ -36,7 +36,6 @@ CREATE TABLE IF NOT EXISTS users (
   password_hash TEXT NOT NULL,
   role TEXT NOT NULL CHECK (role IN ('super_admin', 'admin', 'manager', 'cleaner', 'customer')),
   client_id INTEGER REFERENCES clients(id), -- set for 'customer' role users
-  department_id INTEGER REFERENCES departments(id), -- optional finer scope within client_id
   avatar_url TEXT,
   phone TEXT,
   created_at TEXT DEFAULT (datetime('now'))
@@ -47,7 +46,7 @@ CREATE TABLE IF NOT EXISTS sites (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL,
   client_id INTEGER NOT NULL REFERENCES clients(id),
-  department_id INTEGER REFERENCES departments(id), -- optional grouping within client_id
+  department_id INTEGER REFERENCES departments(id), -- optional internal region tag (Vest/Sør/Øst/Midt)
   address TEXT,
   checklist_template_id INTEGER REFERENCES checklist_templates(id),
   qr_token TEXT UNIQUE NOT NULL,
@@ -146,7 +145,6 @@ CREATE TABLE IF NOT EXISTS invitations (
   email TEXT NOT NULL,
   role TEXT NOT NULL CHECK (role IN ('admin', 'manager', 'cleaner', 'customer')),
   client_id INTEGER REFERENCES clients(id),
-  department_id INTEGER REFERENCES departments(id),
   token TEXT UNIQUE NOT NULL,
   status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'used', 'revoked')),
   invited_by INTEGER NOT NULL REFERENCES users(id),
