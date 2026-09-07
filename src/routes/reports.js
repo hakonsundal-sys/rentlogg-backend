@@ -129,7 +129,7 @@ reportsRouter.get("/runs/:id/pdf", requireAuth, (req, res) => {
 // (optionally scoped to one site) without waiting for the 07:00 scheduler.
 reportsRouter.post("/daily-digest/run", requireAuth, requireRole("admin"), async (req, res) => {
   const dateStr = req.body?.date || yesterdayInOslo();
-  const results = await sendDailyReports(dateStr, req.body?.site_id || undefined, req.user.company_id);
+  const results = await sendDailyReports(dateStr, req.body?.site_id || undefined, req.user.company_id, req.body?.recipients || undefined);
   res.json({ date: dateStr, ...results });
 });
 

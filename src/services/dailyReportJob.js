@@ -13,7 +13,12 @@ import { sendEmail } from "./mailer.js";
 // caller's own company, so a Company A admin can never target Company B's sites even by guessing
 // a site_id); the 07:00 scheduler omits it entirely since that run is system-wide, not tied to
 // any one company's session.
-export async function sendDailyReports(dateStr, siteId, companyId) {
+// recipientsOverride narrows a single-site manual send to a chosen subset of that site's own
+// configured recipients (the "who at this location" checkbox list in RapporterPage) — it's
+// filtered against the site's actual report_recipients below rather than trusted as-is, so a
+// tampered request body can never redirect the report to an address that wasn't already
+// configured for that site.
+export async function sendDailyReports(dateStr, siteId, companyId, recipientsOverride) {
   let sites;
   if (siteId) {
     const site = db.prepare("SELECT * FROM sites WHERE id = ?").get(siteId);
@@ -28,7 +33,10 @@ export async function sendDailyReports(dateStr, siteId, companyId) {
 
   const results = { sent: 0, skipped: 0, failed: 0 };
   for (const site of sites) {
-    const recipients = (site.report_recipients || "").split(",").map((s) => s.trim()).filter(Boolean);
+    const configuredRecipients = (site.report_recipients || "").split(",").map((s) => s.trim()).filter(Boolean);
+    const recipients = recipientsOverride?.length
+      ? configuredRecipients.filter((r) => recipientsOverride.includes(r))
+      : configuredRecipients;
     const run = findRunForSiteDate(site.id, dateStr);
     if (!recipients.length || !run) {
       results.skipped++;
