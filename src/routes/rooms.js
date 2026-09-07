@@ -8,7 +8,7 @@ import { db } from "../db.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 import { todayInOslo } from "../services/schedule.js";
 import { getRoomsForSite, findOrCreateTodayRoomRun, findRoomRunForDate } from "../services/rooms.js";
-import { safeOriginalName } from "../utils/uploads.js";
+import { safeOriginalName, normalizeImageOrientation } from "../utils/uploads.js";
 
 export const siteRoomsRouter = Router({ mergeParams: true });
 export const roomsRouter = Router();
@@ -587,10 +587,11 @@ roomsRouter.post("/runs/:runId/complete", requireAuth, requireRole("cleaner", "a
   res.json({ ok: true });
 });
 
-roomsRouter.post("/runs/:runId/photos", requireAuth, requireRole("cleaner", "admin", "manager"), upload.single("photo"), (req, res) => {
+roomsRouter.post("/runs/:runId/photos", requireAuth, requireRole("cleaner", "admin", "manager"), upload.single("photo"), async (req, res) => {
   const { status, error } = getRoomRunScoped(req.params.runId, req.user);
   if (error) return res.status(status).json({ error });
   if (!req.file) return res.status(400).json({ error: "No file uploaded (field name must be 'photo')" });
+  await normalizeImageOrientation(path.join(process.env.UPLOADS_DIR || "uploads", req.file.filename));
   const kind = req.body.kind || "general";
   const info = db
     .prepare("INSERT INTO photos (room_run_id, file_path, kind) VALUES (?, ?, ?)")

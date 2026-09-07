@@ -6,7 +6,7 @@ import { db } from "../db.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 import { newQrToken, qrLabelSvgDataUrl } from "../utils/qrcode.js";
 import { findRunForSiteDate, todayInOslo } from "../services/schedule.js";
-import { safeOriginalName } from "../utils/uploads.js";
+import { safeOriginalName, normalizeImageOrientation } from "../utils/uploads.js";
 
 export const sitesRouter = Router();
 
@@ -224,10 +224,13 @@ sitesRouter.get("/:id/documents", requireAuth, (req, res) => {
   res.json(docs);
 });
 
-sitesRouter.post("/:id/documents", requireAuth, requireRole("admin", "manager"), docUpload.single("file"), (req, res) => {
+sitesRouter.post("/:id/documents", requireAuth, requireRole("admin", "manager"), docUpload.single("file"), async (req, res) => {
   const { site, status, error } = getSiteScoped(req.params.id, req.user);
   if (error) return res.status(status).json({ error });
   if (!req.file) return res.status(400).json({ error: "Ingen fil valgt." });
+  if (req.file.mimetype.startsWith("image/")) {
+    await normalizeImageOrientation(path.join(process.env.UPLOADS_DIR || "uploads", req.file.filename));
+  }
 
   const name = (req.body.name || req.file.originalname || "Dokument").trim();
   const visibility = ["staff", "customer", "both"].includes(req.body.visibility) ? req.body.visibility : "both";

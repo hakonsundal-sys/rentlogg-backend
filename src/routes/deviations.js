@@ -3,7 +3,7 @@ import multer from "multer";
 import path from "node:path";
 import { db } from "../db.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
-import { safeOriginalName } from "../utils/uploads.js";
+import { safeOriginalName, normalizeImageOrientation } from "../utils/uploads.js";
 
 export const deviationsRouter = Router();
 
@@ -143,10 +143,11 @@ deviationsRouter.post("/", requireAuth, requireRole("admin", "cleaner", "manager
   res.status(201).json({ id: info.lastInsertRowid });
 });
 
-deviationsRouter.post("/:id/photos", requireAuth, requireRole("admin", "cleaner", "manager"), upload.single("photo"), (req, res) => {
+deviationsRouter.post("/:id/photos", requireAuth, requireRole("admin", "cleaner", "manager"), upload.single("photo"), async (req, res) => {
   const { status, error } = getDeviationScoped(req.params.id, req.user);
   if (error) return res.status(status).json({ error });
   if (!req.file) return res.status(400).json({ error: "No file uploaded (field name must be 'photo')" });
+  await normalizeImageOrientation(path.join(process.env.UPLOADS_DIR || "uploads", req.file.filename));
   const info = db
     .prepare("INSERT INTO photos (deviation_id, file_path, kind) VALUES (?, ?, 'general')")
     .run(req.params.id, path.join("uploads", req.file.filename));

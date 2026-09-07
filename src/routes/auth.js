@@ -2,9 +2,10 @@ import { Router } from "express";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import multer from "multer";
+import path from "node:path";
 import { db } from "../db.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
-import { safeOriginalName } from "../utils/uploads.js";
+import { safeOriginalName, normalizeImageOrientation } from "../utils/uploads.js";
 
 export const authRouter = Router();
 
@@ -94,8 +95,9 @@ authRouter.patch("/me", requireAuth, (req, res) => {
   res.json(user);
 });
 
-authRouter.post("/me/avatar", requireAuth, avatarUpload.single("avatar"), (req, res) => {
+authRouter.post("/me/avatar", requireAuth, avatarUpload.single("avatar"), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: "No file uploaded (field name must be 'avatar')" });
+  await normalizeImageOrientation(path.join(`${process.env.UPLOADS_DIR || "uploads"}/avatars`, req.file.filename));
   const avatar_url = `/uploads/avatars/${req.file.filename}`;
   db.prepare("UPDATE users SET avatar_url = ? WHERE id = ?").run(avatar_url, req.user.id);
   res.json({ avatar_url });
