@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { db } from "../db.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
-import { newQrToken, qrPngDataUrl } from "../utils/qrcode.js";
+import { newQrToken, qrLabelSvgDataUrl } from "../utils/qrcode.js";
 import { findRunForSiteDate, todayInOslo } from "../services/schedule.js";
 
 export const sitesRouter = Router();
@@ -141,7 +141,7 @@ sitesRouter.get("/:id/qr", requireAuth, requireRole("admin", "manager"), async (
   const baseUrl = process.env.PUBLIC_BASE_URL || process.env.RENDER_EXTERNAL_URL || "http://localhost:4000";
   const checkInUrl = `${baseUrl}/checkin/${site.qr_token}`;
   try {
-    const dataUrl = await qrPngDataUrl(checkInUrl);
+    const dataUrl = await qrLabelSvgDataUrl(checkInUrl, site.name, site.qr_token);
     res.json({ checkInUrl, qrImage: dataUrl });
   } catch (err) {
     console.error("QR generation error:", err);
