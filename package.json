@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
-    "seed": "node src/seed.js"
+    "seed": "node src/seed.js",
+    "seed:demo": "node src/seedDemo.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.112.5",
