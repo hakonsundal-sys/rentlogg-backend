@@ -3,13 +3,14 @@ import multer from "multer";
 import path from "node:path";
 import { db } from "../db.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
+import { safeOriginalName } from "../utils/uploads.js";
 
 export const deviationsRouter = Router();
 
 const upload = multer({
   storage: multer.diskStorage({
     destination: process.env.UPLOADS_DIR || "uploads/",
-    filename: (req, file, cb) => cb(null, `${Date.now()}-${file.originalname}`),
+    filename: (req, file, cb) => cb(null, `${Date.now()}-${safeOriginalName(file.originalname)}`),
   }),
   // Phone camera photos (HDR/high-res shots especially) routinely land well past 10MB —
   // 20MB gives real-world headroom without allowing e.g. a video by mistake.

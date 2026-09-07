@@ -4,13 +4,14 @@ import jwt from "jsonwebtoken";
 import multer from "multer";
 import { db } from "../db.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
+import { safeOriginalName } from "../utils/uploads.js";
 
 export const authRouter = Router();
 
 const avatarUpload = multer({
   storage: multer.diskStorage({
     destination: `${process.env.UPLOADS_DIR || "uploads"}/avatars`,
-    filename: (req, file, cb) => cb(null, `${req.user.id}-${Date.now()}-${file.originalname}`),
+    filename: (req, file, cb) => cb(null, `${req.user.id}-${Date.now()}-${safeOriginalName(file.originalname)}`),
   }),
   limits: { fileSize: 5 * 1024 * 1024 },
 });

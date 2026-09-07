@@ -21,17 +21,33 @@ invitationsRouter.post("/", requireAuth, requireRole("admin", "super_admin"), (r
   if (role === "customer" && !client_id) {
     return res.status(400).json({ error: "client_id is required for customer invitations" });
   }
-  if (role === "customer" && department_id) {
-    const department = db.prepare("SELECT client_id FROM departments WHERE id = ?").get(department_id);
-    if (!department || department.client_id !== Number(client_id)) {
-      return res.status(400).json({ error: "Ukjent avdeling" });
-    }
-  }
 
   let companyId = req.user.company_id;
   if (req.user.role === "super_admin") {
     companyId = req.body.company_id;
     if (!companyId) return res.status(400).json({ error: "company_id er påkrevd når du inviterer som super_admin" });
+    if (!db.prepare("SELECT 1 FROM companies WHERE id = ?").get(companyId)) {
+      return res.status(400).json({ error: "Ukjent firma" });
+    }
+  }
+
+  // client_id (and department_id, one level deeper) must belong to the company this invitation
+  // is actually landing in — never trust it as-is, the same way sites.js validates client_id
+  // against company_id on site create/patch. Without this, an admin/super_admin could invite a
+  // customer whose client_id belongs to a different company, handing that account cross-tenant
+  // access once accepted (every customer-scoping check in the app keys off client_id, not
+  // company_id).
+  if (role === "customer") {
+    const client = db.prepare("SELECT company_id FROM clients WHERE id = ?").get(client_id);
+    if (!client || client.company_id !== companyId) {
+      return res.status(400).json({ error: "Ukjent kunde" });
+    }
+    if (department_id) {
+      const department = db.prepare("SELECT client_id FROM departments WHERE id = ?").get(department_id);
+      if (!department || department.client_id !== Number(client_id)) {
+        return res.status(400).json({ error: "Ukjent avdeling" });
+      }
+    }
   }
 
   const existingUser = db.prepare("SELECT id FROM users WHERE email = ?").get(email);

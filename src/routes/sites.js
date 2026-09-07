@@ -6,13 +6,14 @@ import { db } from "../db.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 import { newQrToken, qrLabelSvgDataUrl } from "../utils/qrcode.js";
 import { findRunForSiteDate, todayInOslo } from "../services/schedule.js";
+import { safeOriginalName } from "../utils/uploads.js";
 
 export const sitesRouter = Router();
 
 const docUpload = multer({
   storage: multer.diskStorage({
     destination: process.env.UPLOADS_DIR || "uploads/",
-    filename: (req, file, cb) => cb(null, `${Date.now()}-${file.originalname}`),
+    filename: (req, file, cb) => cb(null, `${Date.now()}-${safeOriginalName(file.originalname)}`),
   }),
   limits: { fileSize: 20 * 1024 * 1024 },
 });
@@ -92,6 +93,12 @@ sitesRouter.patch("/:id", requireAuth, requireRole("admin", "manager"), (req, re
   const fields = SITE_PATCH_FIELDS.filter((f) => f in req.body);
   if (fields.length === 0) return res.status(400).json({ error: "No valid fields to update" });
 
+  if (req.body.client_id) {
+    const client = db.prepare("SELECT company_id FROM clients WHERE id = ?").get(req.body.client_id);
+    if (!client || client.company_id !== req.user.company_id) {
+      return res.status(400).json({ error: "Ukjent kunde" });
+    }
+  }
   if (req.body.checklist_template_id) {
     const template = db.prepare("SELECT company_id FROM checklist_templates WHERE id = ?").get(req.body.checklist_template_id);
     if (!template || template.company_id !== req.user.company_id) {

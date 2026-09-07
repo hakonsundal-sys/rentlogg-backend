@@ -8,6 +8,7 @@ import { db } from "../db.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 import { todayInOslo } from "../services/schedule.js";
 import { getRoomsForSite, findOrCreateTodayRoomRun, findRoomRunForDate } from "../services/rooms.js";
+import { safeOriginalName } from "../utils/uploads.js";
 
 export const siteRoomsRouter = Router({ mergeParams: true });
 export const roomsRouter = Router();
@@ -15,7 +16,7 @@ export const roomsRouter = Router();
 const upload = multer({
   storage: multer.diskStorage({
     destination: process.env.UPLOADS_DIR || "uploads/",
-    filename: (req, file, cb) => cb(null, `${Date.now()}-${file.originalname}`),
+    filename: (req, file, cb) => cb(null, `${Date.now()}-${safeOriginalName(file.originalname)}`),
   }),
   // Phone camera photos (HDR/high-res shots especially) routinely land well past 10MB —
   // 20MB gives real-world headroom without allowing e.g. a video by mistake.
