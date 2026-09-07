@@ -88,6 +88,9 @@ ensureColumn("clients", "company_id", "company_id INTEGER REFERENCES companies(i
 ensureColumn("sites", "company_id", "company_id INTEGER REFERENCES companies(id)");
 ensureColumn("checklist_templates", "company_id", "company_id INTEGER REFERENCES companies(id)");
 ensureColumn("invitations", "company_id", "company_id INTEGER REFERENCES companies(id)");
+ensureColumn("sites", "department_id", "department_id INTEGER REFERENCES departments(id)");
+ensureColumn("users", "department_id", "department_id INTEGER REFERENCES departments(id)");
+ensureColumn("invitations", "department_id", "department_id INTEGER REFERENCES departments(id)");
 
 // One-time backfill: any pre-existing database has real data with no company yet. Give it a
 // home ("OKV Gruppen", the only company Rentlogg had before this became multi-tenant) rather

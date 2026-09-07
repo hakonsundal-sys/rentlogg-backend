@@ -16,6 +16,7 @@ import { dashboardRouter } from "./routes/dashboard.js";
 import { invitationsRouter } from "./routes/invitations.js";
 import { siteRoomsRouter, roomsRouter } from "./routes/rooms.js";
 import { companiesRouter } from "./routes/companies.js";
+import { departmentsRouter } from "./routes/departments.js";
 import { startDailyReportScheduler } from "./services/scheduler.js";
 
 const uploadsDir = process.env.UPLOADS_DIR || "uploads";
@@ -41,6 +42,7 @@ app.use("/invitations", invitationsRouter);
 app.use("/sites/:siteId/rooms", siteRoomsRouter);
 app.use("/rooms", roomsRouter);
 app.use("/companies", companiesRouter);
+app.use("/departments", departmentsRouter);
 
 // Without this, a rejected upload (most commonly a phone photo over the size limit — modern
 // camera HDR/high-res shots routinely exceed what a "reasonable" limit looks like on paper)

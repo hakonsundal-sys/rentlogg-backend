@@ -14,12 +14,18 @@ const VALID_ROLES = ["admin", "manager", "cleaner", "customer"];
 // company's admin here). A regular admin/manager can only ever invite into their own company;
 // company_id from the request body is never trusted for them, only for super_admin.
 invitationsRouter.post("/", requireAuth, requireRole("admin", "super_admin"), (req, res) => {
-  const { email, role, client_id } = req.body;
+  const { email, role, client_id, department_id } = req.body;
   if (!email || !VALID_ROLES.includes(role)) {
     return res.status(400).json({ error: "email and a valid role are required" });
   }
   if (role === "customer" && !client_id) {
     return res.status(400).json({ error: "client_id is required for customer invitations" });
+  }
+  if (role === "customer" && department_id) {
+    const department = db.prepare("SELECT client_id FROM departments WHERE id = ?").get(department_id);
+    if (!department || department.client_id !== Number(client_id)) {
+      return res.status(400).json({ error: "Ukjent avdeling" });
+    }
   }
 
   let companyId = req.user.company_id;
@@ -37,10 +43,10 @@ invitationsRouter.post("/", requireAuth, requireRole("admin", "super_admin"), (r
   const token = newQrToken();
   const info = db
     .prepare(
-      `INSERT INTO invitations (email, role, client_id, company_id, token, invited_by, expires_at)
-       VALUES (?, ?, ?, ?, ?, ?, datetime('now', '+14 days'))`
+      `INSERT INTO invitations (email, role, client_id, department_id, company_id, token, invited_by, expires_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now', '+14 days'))`
     )
-    .run(email, role, role === "customer" ? client_id : null, companyId, token, req.user.id);
+    .run(email, role, role === "customer" ? client_id : null, role === "customer" ? department_id || null : null, companyId, token, req.user.id);
 
   const invitation = db.prepare("SELECT * FROM invitations WHERE id = ?").get(info.lastInsertRowid);
   res.status(201).json(invitation);
@@ -54,8 +60,9 @@ function withComputedStatus(invitation) {
 invitationsRouter.get("/", requireAuth, requireRole("admin", "super_admin"), (req, res) => {
   const rows = db
     .prepare(
-      `SELECT i.*, c.name AS client_name FROM invitations i
+      `SELECT i.*, c.name AS client_name, d.name AS department_name FROM invitations i
        LEFT JOIN clients c ON c.id = i.client_id
+       LEFT JOIN departments d ON d.id = i.department_id
        WHERE i.company_id = ?
        ORDER BY i.created_at DESC`
     )
@@ -106,14 +113,14 @@ invitationsRouter.post("/:token/accept", (req, res) => {
 
   const password_hash = bcrypt.hashSync(password, 10);
   const info = db
-    .prepare("INSERT INTO users (name, email, password_hash, role, client_id, company_id) VALUES (?, ?, ?, ?, ?, ?)")
-    .run(name, invitation.email, password_hash, invitation.role, invitation.client_id, invitation.company_id);
+    .prepare("INSERT INTO users (name, email, password_hash, role, client_id, department_id, company_id) VALUES (?, ?, ?, ?, ?, ?, ?)")
+    .run(name, invitation.email, password_hash, invitation.role, invitation.client_id, invitation.department_id, invitation.company_id);
 
   db.prepare("UPDATE invitations SET status = 'used' WHERE id = ?").run(invitation.id);
 
   const user = {
     id: info.lastInsertRowid, name, role: invitation.role,
-    client_id: invitation.client_id, company_id: invitation.company_id,
+    client_id: invitation.client_id, department_id: invitation.department_id, company_id: invitation.company_id,
   };
   const token = jwt.sign(user, process.env.JWT_SECRET, { expiresIn: "12h" });
   res.status(201).json({ token, user });

@@ -19,8 +19,9 @@ reportsRouter.get("/sites/:id/pdf", requireAuth, requireRole("admin", "manager",
   const site = db.prepare("SELECT * FROM sites WHERE id = ?").get(req.params.id);
   if (!site) return res.status(404).json({ error: "Not found" });
 
-  if (req.user.role === "customer" && site.client_id !== req.user.client_id) {
-    return res.status(403).json({ error: "Not allowed" });
+  if (req.user.role === "customer") {
+    const mismatch = req.user.department_id ? site.department_id !== req.user.department_id : site.client_id !== req.user.client_id;
+    if (mismatch) return res.status(403).json({ error: "Not allowed" });
   }
   if (req.user.role !== "customer" && site.company_id !== req.user.company_id) {
     return res.status(403).json({ error: "Not allowed" });
@@ -86,8 +87,9 @@ reportsRouter.get("/sites/:id/photos.zip", requireAuth, requireRole("admin", "ma
   const site = db.prepare("SELECT * FROM sites WHERE id = ?").get(req.params.id);
   if (!site) return res.status(404).json({ error: "Not found" });
 
-  if (req.user.role === "customer" && site.client_id !== req.user.client_id) {
-    return res.status(403).json({ error: "Not allowed" });
+  if (req.user.role === "customer") {
+    const mismatch = req.user.department_id ? site.department_id !== req.user.department_id : site.client_id !== req.user.client_id;
+    if (mismatch) return res.status(403).json({ error: "Not allowed" });
   }
   if (req.user.role !== "customer" && site.company_id !== req.user.company_id) {
     return res.status(403).json({ error: "Not allowed" });

@@ -19,6 +19,11 @@ const docUpload = multer({
 
 function scopeSitesForUser(user) {
   if (user.role === "customer") {
+    // A department-scoped customer sees only that department's sites; a whole-client customer
+    // (department_id null, today's behavior) sees every site under their client.
+    if (user.department_id) {
+      return db.prepare("SELECT * FROM sites WHERE department_id = ? ORDER BY name").all(user.department_id);
+    }
     return db.prepare("SELECT * FROM sites WHERE client_id = ? ORDER BY name").all(user.client_id);
   }
   // company_id is null for a role with no company (only super_admin) — WHERE company_id = ?
@@ -29,11 +34,15 @@ function scopeSitesForUser(user) {
 
 // Shared ownership check reused across every :id-scoped route below — fetches the site once and
 // applies whichever scoping rule matches the caller's role: customer is scoped to their own
-// client's sites (existing rule), every staff role is scoped to their own company's sites (new).
+// client's sites, or further to one department if they're department-scoped; every staff role is
+// scoped to their own company's sites.
 function getSiteScoped(siteId, user) {
   const site = db.prepare("SELECT * FROM sites WHERE id = ?").get(siteId);
   if (!site) return { status: 404, error: "Not found" };
-  if (user.role === "customer" && site.client_id !== user.client_id) return { status: 403, error: "Not allowed" };
+  if (user.role === "customer") {
+    const mismatch = user.department_id ? site.department_id !== user.department_id : site.client_id !== user.client_id;
+    if (mismatch) return { status: 403, error: "Not allowed" };
+  }
   if (user.role !== "customer" && site.company_id !== user.company_id) return { status: 403, error: "Not allowed" };
   return { site };
 }
@@ -43,12 +52,18 @@ sitesRouter.get("/", requireAuth, (req, res) => {
 });
 
 sitesRouter.post("/", requireAuth, requireRole("admin", "manager"), (req, res) => {
-  const { name, client_id, address, checklist_template_id, latitude, longitude, gps_radius_meters, room_count, report_recipients } = req.body;
+  const { name, client_id, department_id, address, checklist_template_id, latitude, longitude, gps_radius_meters, room_count, report_recipients } = req.body;
   if (!name || !client_id) return res.status(400).json({ error: "name and client_id are required" });
 
   const client = db.prepare("SELECT company_id FROM clients WHERE id = ?").get(client_id);
   if (!client || client.company_id !== req.user.company_id) {
     return res.status(400).json({ error: "Ukjent kunde" });
+  }
+  if (department_id) {
+    const department = db.prepare("SELECT client_id FROM departments WHERE id = ?").get(department_id);
+    if (!department || department.client_id !== Number(client_id)) {
+      return res.status(400).json({ error: "Ukjent avdeling" });
+    }
   }
   if (checklist_template_id) {
     const template = db.prepare("SELECT company_id FROM checklist_templates WHERE id = ?").get(checklist_template_id);
@@ -60,15 +75,15 @@ sitesRouter.post("/", requireAuth, requireRole("admin", "manager"), (req, res) =
   const qr_token = newQrToken();
   const info = db
     .prepare(
-      `INSERT INTO sites (name, client_id, company_id, address, checklist_template_id, qr_token, latitude, longitude, gps_radius_meters, room_count, report_recipients)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO sites (name, client_id, department_id, company_id, address, checklist_template_id, qr_token, latitude, longitude, gps_radius_meters, room_count, report_recipients)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
-    .run(name, client_id, req.user.company_id, address || null, checklist_template_id || null, qr_token, latitude || null, longitude || null, gps_radius_meters || 150, room_count || 0, report_recipients || null);
+    .run(name, client_id, department_id || null, req.user.company_id, address || null, checklist_template_id || null, qr_token, latitude || null, longitude || null, gps_radius_meters || 150, room_count || 0, report_recipients || null);
 
   res.status(201).json({ id: info.lastInsertRowid, qr_token });
 });
 
-const SITE_PATCH_FIELDS = ["name", "client_id", "address", "checklist_template_id", "latitude", "longitude", "gps_radius_meters", "room_count", "report_recipients"];
+const SITE_PATCH_FIELDS = ["name", "client_id", "department_id", "address", "checklist_template_id", "latitude", "longitude", "gps_radius_meters", "room_count", "report_recipients"];
 
 sitesRouter.patch("/:id", requireAuth, requireRole("admin", "manager"), (req, res) => {
   const { site, status, error } = getSiteScoped(req.params.id, req.user);
@@ -81,6 +96,13 @@ sitesRouter.patch("/:id", requireAuth, requireRole("admin", "manager"), (req, re
     const template = db.prepare("SELECT company_id FROM checklist_templates WHERE id = ?").get(req.body.checklist_template_id);
     if (!template || template.company_id !== req.user.company_id) {
       return res.status(400).json({ error: "Ukjent sjekklistemal" });
+    }
+  }
+  if (req.body.department_id) {
+    const targetClientId = "client_id" in req.body ? req.body.client_id : site.client_id;
+    const department = db.prepare("SELECT client_id FROM departments WHERE id = ?").get(req.body.department_id);
+    if (!department || department.client_id !== Number(targetClientId)) {
+      return res.status(400).json({ error: "Ukjent avdeling" });
     }
   }
 
