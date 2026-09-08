@@ -185,6 +185,18 @@ checklistsRouter.patch("/runs/:id/items/:itemId", requireAuth, requireRole("clea
   res.json({ ok: true });
 });
 
+// A free-text note for the whole visit — same granularity as its photos (one shared list for
+// the run, not per checklist item). Only used by room-less (flat checklist) sites; room-based
+// sites use PATCH /rooms/runs/:runId/note per room instead.
+checklistsRouter.patch("/runs/:id/note", requireAuth, requireRole("cleaner", "admin", "manager"), (req, res) => {
+  const { status, error } = getRunScoped(req.params.id, req.user);
+  if (error) return res.status(status).json({ error });
+
+  db.prepare("UPDATE checklist_runs SET note = ? WHERE id = ?").run(req.body?.note || null, req.params.id);
+  stampChecklistRunEdit(req.params.id, req.body?.initials);
+  res.json({ ok: true });
+});
+
 checklistsRouter.post("/runs/:id/complete", requireAuth, requireRole("cleaner", "admin", "manager"), (req, res) => {
   const { run, status, error } = getRunScoped(req.params.id, req.user);
   if (error) return res.status(status).json({ error });

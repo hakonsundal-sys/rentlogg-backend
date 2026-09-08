@@ -40,6 +40,7 @@ export function getRunDetail(runId) {
       signed_initials: roomRun?.signed_initials || null,
       edited_at: roomRun?.edited_at || null,
       edited_by_initials: roomRun?.edited_by_initials || null,
+      note: roomRun?.note || null,
       items: roomRun ? roomRunItemsStmt.all(roomRun.id) : [],
       photos: roomRun ? roomRunPhotosStmt.all(roomRun.id) : [],
     };

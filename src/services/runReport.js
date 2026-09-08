@@ -24,9 +24,9 @@ function escapeHtml(value) {
 // rest of the app already uses wherever rooms vs. flat is a branch point.
 function buildSections(detail) {
   if (detail.rooms?.length > 0) {
-    return detail.rooms.map((room) => ({ title: room.name, items: room.items, photos: room.photos }));
+    return detail.rooms.map((room) => ({ title: room.name, items: room.items, photos: room.photos, note: room.note }));
   }
-  return [{ title: "Sjekkliste", items: detail.items, photos: detail.photos }];
+  return [{ title: "Sjekkliste", items: detail.items, photos: detail.photos, note: detail.note }];
 }
 
 function formatStatus(detail) {
@@ -58,10 +58,15 @@ export function buildReportBody(detail) {
            </div>`
         : "";
 
+      const noteHtml = section.note?.trim()
+        ? `<div style="padding:10px 14px;border:1px solid #ddd;border-top:none;font-size:13px;background:#fafafa;white-space:pre-wrap;"><strong>Notat:</strong> ${escapeHtml(section.note)}</div>`
+        : "";
+
       return `
         <div style="background:#efefef;padding:10px 14px;font-weight:700;font-size:15px;border:1px solid #ddd;margin-top:22px;">${num}. ${escapeHtml(section.title)}</div>
         ${itemsHtml || `<div style="padding:10px 14px;border:1px solid #ddd;border-top:none;font-size:13px;color:#777;">Ingen oppgaver registrert.</div>`}
-        ${photosHtml}`;
+        ${photosHtml}
+        ${noteHtml}`;
     })
     .join("");
 
@@ -192,6 +197,11 @@ export function buildReportPdf(detail, res) {
     if (section.photos?.length) {
       doc.moveDown(0.3);
       drawPhotoGrid(doc, section.photos, uploadsDir, 150);
+    }
+    if (section.note?.trim()) {
+      doc.moveDown(0.3);
+      if (doc.y > doc.page.height - 80) doc.addPage();
+      doc.fontSize(10).fillColor("black").text("Notat:", { continued: true }).fillColor("gray").text(` ${section.note}`);
     }
     doc.moveDown();
   });

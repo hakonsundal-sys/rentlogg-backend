@@ -565,6 +565,17 @@ roomsRouter.patch("/runs/:runId/items/:itemId", requireAuth, requireRole("cleane
   res.json({ ok: true });
 });
 
+// A free-text note for the whole room's visit — same granularity as its photos (one shared
+// list for the room, not per checklist item).
+roomsRouter.patch("/runs/:runId/note", requireAuth, requireRole("cleaner", "admin", "manager"), (req, res) => {
+  const { status, error } = getRoomRunScoped(req.params.runId, req.user);
+  if (error) return res.status(status).json({ error });
+
+  db.prepare("UPDATE room_runs SET note = ? WHERE id = ?").run(req.body?.note || null, req.params.runId);
+  stampRoomRunEdit(req.params.runId, req.body?.initials);
+  res.json({ ok: true });
+});
+
 // Lets a cleaner clear a whole room's remaining tasks in one tap — for a routine room they
 // already know is fine, ticking every item individually is pure friction.
 roomsRouter.post("/runs/:runId/items/complete-all", requireAuth, requireRole("cleaner", "admin", "manager"), (req, res) => {

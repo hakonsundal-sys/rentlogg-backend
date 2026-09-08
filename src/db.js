@@ -89,6 +89,8 @@ ensureColumn("sites", "company_id", "company_id INTEGER REFERENCES companies(id)
 ensureColumn("checklist_templates", "company_id", "company_id INTEGER REFERENCES companies(id)");
 ensureColumn("invitations", "company_id", "company_id INTEGER REFERENCES companies(id)");
 ensureColumn("sites", "department_id", "department_id INTEGER REFERENCES departments(id)");
+ensureColumn("checklist_runs", "note", "note TEXT");
+ensureColumn("room_runs", "note", "note TEXT");
 
 // Departments started out (2026-09-07) as a per-client sub-grouping with a NOT NULL client_id,
 // before it turned out the actual need was an internal, company-wide region tag (Vest/Sør/Øst/
