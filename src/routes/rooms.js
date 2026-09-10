@@ -7,7 +7,7 @@ import { PDFParse } from "pdf-parse";
 import { db } from "../db.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 import { todayInOslo } from "../services/schedule.js";
-import { getRoomsForSite, findOrCreateTodayRoomRun, findRoomRunForDate } from "../services/rooms.js";
+import { getRoomsForSite, findOrCreateTodayRoomRun, findRoomRunForDate, getMonthlyItemsForSite } from "../services/rooms.js";
 import { safeOriginalName, normalizeImageOrientation } from "../utils/uploads.js";
 
 export const siteRoomsRouter = Router({ mergeParams: true });
@@ -228,6 +228,17 @@ siteRoomsRouter.delete("/", requireAuth, requireRole("admin", "manager"), (req, 
 
   deleteAll(roomIds);
   res.json({ ok: true, deletedCount: roomIds.length });
+});
+
+// Month defaults to the current Oslo month when omitted; otherwise must be "YYYY-MM".
+siteRoomsRouter.get("/monthly-items", requireAuth, requireRole("admin", "manager"), (req, res) => {
+  const { status: scopeStatus, error: scopeError } = getSiteScopedForRooms(req.params.siteId, req.user);
+  if (scopeError) return res.status(scopeStatus).json({ error: scopeError });
+
+  const month = req.query.month || todayInOslo().slice(0, 7);
+  if (!/^\d{4}-\d{2}$/.test(month)) return res.status(400).json({ error: "month must be YYYY-MM" });
+
+  res.json(getMonthlyItemsForSite(req.params.siteId, month));
 });
 
 siteRoomsRouter.post("/complete-all-due", requireAuth, requireRole("cleaner"), (req, res) => {

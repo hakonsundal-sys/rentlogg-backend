@@ -119,7 +119,7 @@ export function getRoomsForSite(siteId, dateStr) {
 const roomItemsStmt = db.prepare("SELECT * FROM room_checklist_items WHERE room_id = ? ORDER BY sort_order");
 const insertRoomRunStmt = db.prepare("INSERT INTO room_runs (room_id, cleaner_id) VALUES (?, ?)");
 const insertRoomRunItemStmt = db.prepare(
-  "INSERT INTO room_run_items (room_run_id, label, sort_order) VALUES (?, ?, ?)"
+  "INSERT INTO room_run_items (room_run_id, room_checklist_item_id, label, sort_order) VALUES (?, ?, ?, ?)"
 );
 const roomRunByIdStmt = db.prepare("SELECT * FROM room_runs WHERE id = ?");
 
@@ -135,6 +135,52 @@ export function findOrCreateTodayRoomRun(roomId, cleanerId) {
 
   const info = insertRoomRunStmt.run(roomId, cleanerId || null);
   const items = roomItemsStmt.all(roomId).filter((item) => isItemDueOn(item, today));
-  items.forEach((item, i) => insertRoomRunItemStmt.run(info.lastInsertRowid, item.label, i));
+  items.forEach((item, i) => insertRoomRunItemStmt.run(info.lastInsertRowid, item.id, item.label, i));
   return roomRunByIdStmt.get(info.lastInsertRowid);
+}
+
+const monthlyChecklistItemsForSiteStmt = db.prepare(
+  `SELECT rci.id, rci.label, rci.monthly_weekday, rci.monthly_occurrence, r.id AS room_id, r.name AS room_name
+   FROM room_checklist_items rci JOIN rooms r ON r.id = rci.room_id
+   WHERE r.site_id = ? AND rci.monthly_weekday IS NOT NULL AND rci.monthly_occurrence IS NOT NULL
+   ORDER BY r.sort_order, r.id, rci.sort_order`
+);
+const lastMonthlyItemCompletionStmt = db.prepare(
+  `SELECT rr.started_at FROM room_run_items rri JOIN room_runs rr ON rr.id = rri.room_run_id
+   WHERE rri.room_checklist_item_id = ? AND rri.done = 1 AND date(rr.started_at) BETWEEN ? AND ?
+   ORDER BY rr.started_at DESC LIMIT 1`
+);
+
+// Powers the "which monthly tasks are done this month" overview: every room_checklist_item
+// with a monthly schedule, its calculated due date for the given month, and — via the stable
+// room_checklist_item_id link on room_run_items — whether (and when) it was actually marked
+// done that month. `status` is "not_applicable" for the rare case a room has no Nth occurrence
+// of its weekday this month (e.g. a "5th Monday" in a 4-Monday month).
+export function getMonthlyItemsForSite(siteId, yearMonth) {
+  const [year, month] = yearMonth.split("-").map(Number);
+  const monthStart = `${yearMonth}-01`;
+  const monthEnd = `${yearMonth}-${String(new Date(Date.UTC(year, month, 0)).getUTCDate()).padStart(2, "0")}`;
+  const today = todayInOslo();
+
+  return monthlyChecklistItemsForSiteStmt.all(siteId).map((item) => {
+    const dueDay = nthWeekdayOfMonth(year, month - 1, item.monthly_weekday, item.monthly_occurrence);
+    const dueDate = dueDay ? `${yearMonth}-${String(dueDay).padStart(2, "0")}` : null;
+    const completion = dueDate ? lastMonthlyItemCompletionStmt.get(item.id, monthStart, monthEnd) : null;
+
+    let status;
+    if (!dueDate) status = "not_applicable";
+    else if (completion) status = "completed";
+    else if (dueDate <= today) status = "missing";
+    else status = "upcoming";
+
+    return {
+      roomId: item.room_id,
+      roomName: item.room_name,
+      itemId: item.id,
+      label: item.label,
+      dueDate,
+      completedAt: completion?.started_at || null,
+      status,
+    };
+  });
 }

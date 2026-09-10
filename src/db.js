@@ -99,6 +99,12 @@ ensureColumn("room_runs", "note", "note TEXT");
 // "days since last done" from, so only the pure-calendar monthly mode is supported for now.
 ensureColumn("room_checklist_items", "monthly_weekday", "monthly_weekday INTEGER");
 ensureColumn("room_checklist_items", "monthly_occurrence", "monthly_occurrence INTEGER");
+// Stable link back to the template item a given day's room_run_item was snapshotted from —
+// room_run_items previously only carried a copy of the label, with no way to reliably tell
+// "was this specific monthly task done this month" from history (a renamed item would silently
+// break a label-based match). Nullable since it's only populated going forward; old rows stay
+// label-only.
+ensureColumn("room_run_items", "room_checklist_item_id", "room_checklist_item_id INTEGER REFERENCES room_checklist_items(id)");
 
 // Departments started out (2026-09-07) as a per-client sub-grouping with a NOT NULL client_id,
 // before it turned out the actual need was an internal, company-wide region tag (Vest/Sør/Øst/
