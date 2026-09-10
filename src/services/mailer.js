@@ -1,21 +1,17 @@
-import nodemailer from "nodemailer";
+import { Resend } from "resend";
 
-// Gmail SMTP via an app-specific password — no domain/DNS verification needed, unlike Resend,
-// which made it the pragmatic interim choice while okv-gruppen.no's DNS (at DigitalOcean,
-// outside Hakon's access) isn't set up yet. Gmail requires the "From" address to be the
-// authenticated mailbox itself (or a verified alias), so REPORT_FROM_EMAIL's address portion
-// must match GMAIL_USER — only the display name is free to customize.
-let transporter;
-function getTransporter() {
-  if (!transporter) {
-    transporter = nodemailer.createTransport({
-      service: "gmail",
-      auth: { user: process.env.GMAIL_USER, pass: process.env.GMAIL_APP_PASSWORD },
-    });
-  }
-  return transporter;
+// Switched from Gmail SMTP to Resend once rentlogg.no's DNS became directly reachable (Hakon
+// owns the domain outright, unlike okv-gruppen.no which sits at DigitalOcean outside his
+// access) — a real branded sender with proper DKIM/SPF instead of Gmail's 500/day limit and
+// "via gmail.com" look. The API key only has Resend's "Sending access" scope, not domain
+// management, matching least-privilege for what this service actually does.
+let client;
+function getClient() {
+  if (!client) client = new Resend(process.env.RESEND_API_KEY);
+  return client;
 }
 
 export async function sendEmail({ to, subject, html }) {
-  await getTransporter().sendMail({ from: process.env.REPORT_FROM_EMAIL, to, subject, html });
+  const { error } = await getClient().emails.send({ from: process.env.REPORT_FROM_EMAIL, to, subject, html });
+  if (error) throw new Error(error.message || "Failed to send email via Resend");
 }
