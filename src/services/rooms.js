@@ -86,6 +86,18 @@ export function isRoomDueOn(room, dateStr) {
   return weekdays.has(weekdayOf(dateStr));
 }
 
+// Same "Nth weekday of month" check as isRoomDueOn's monthly mode, just scoped to one
+// checklist item instead of the whole room. No interval_days mode here (unlike rooms): an
+// item has no completion history of its own to measure "days since last done" against, so
+// only the pure-calendar monthly mode is supported. No schedule set at all means due every
+// time the room is — the pre-existing behavior for every item created before this existed.
+export function isItemDueOn(item, dateStr) {
+  if (item.monthly_weekday == null || item.monthly_occurrence == null) return true;
+  const [year, month, day] = dateStr.split("-").map(Number);
+  const targetDay = nthWeekdayOfMonth(year, month - 1, item.monthly_weekday, item.monthly_occurrence);
+  return targetDay === day;
+}
+
 const roomsForSiteStmt = db.prepare("SELECT * FROM rooms WHERE site_id = ? ORDER BY sort_order, id");
 const itemCountStmt = db.prepare("SELECT COUNT(*) AS n FROM room_checklist_items WHERE room_id = ?");
 const lastCleanedStmt = db.prepare(
@@ -113,14 +125,16 @@ const roomRunByIdStmt = db.prepare("SELECT * FROM room_runs WHERE id = ?");
 
 // Shared by the single-room check-in route and the bulk complete-all-due route. Reuses
 // today's run if one already exists (completed or not — an already-completed run is returned
-// as-is, never duplicated); otherwise creates one and snapshots the room's current task list.
+// as-is, never duplicated); otherwise creates one and snapshots the room's current task list —
+// filtered to just today's due items, so a monthly task in an otherwise-daily room only shows
+// up on its own day instead of nagging the cleaner about it every visit.
 export function findOrCreateTodayRoomRun(roomId, cleanerId) {
   const today = todayInOslo();
   const existing = findRoomRunForDate(roomId, today);
   if (existing) return existing;
 
   const info = insertRoomRunStmt.run(roomId, cleanerId || null);
-  const items = roomItemsStmt.all(roomId);
+  const items = roomItemsStmt.all(roomId).filter((item) => isItemDueOn(item, today));
   items.forEach((item, i) => insertRoomRunItemStmt.run(info.lastInsertRowid, item.label, i));
   return roomRunByIdStmt.get(info.lastInsertRowid);
 }

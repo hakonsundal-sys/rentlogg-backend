@@ -91,6 +91,14 @@ ensureColumn("invitations", "company_id", "company_id INTEGER REFERENCES compani
 ensureColumn("sites", "department_id", "department_id INTEGER REFERENCES departments(id)");
 ensureColumn("checklist_runs", "note", "note TEXT");
 ensureColumn("room_runs", "note", "note TEXT");
+// Per-item schedule override: null (the common case) means "due every time the room is
+// cleaned" — same default as before this existed. Set only for a task that's less frequent
+// than the room itself (e.g. a daily-cleaned room with one monthly task). Reuses the same
+// "Nth weekday of month" shape as rooms.monthly_weekday/monthly_occurrence, deliberately
+// without an interval_days mode — items have no per-item completion history to compute
+// "days since last done" from, so only the pure-calendar monthly mode is supported for now.
+ensureColumn("room_checklist_items", "monthly_weekday", "monthly_weekday INTEGER");
+ensureColumn("room_checklist_items", "monthly_occurrence", "monthly_occurrence INTEGER");
 
 // Departments started out (2026-09-07) as a per-client sub-grouping with a NOT NULL client_id,
 // before it turned out the actual need was an internal, company-wide region tag (Vest/Sør/Øst/

@@ -448,6 +448,21 @@ roomsRouter.post("/:id/items", requireAuth, requireRole("admin", "manager"), (re
   res.status(201).json(db.prepare("SELECT * FROM room_checklist_items WHERE id = ?").get(info.lastInsertRowid));
 });
 
+// Per-item schedule override (see db.js's migration comment). The frontend always sends both
+// monthly fields together — either a weekday+occurrence pair to switch into monthly mode, or
+// both null to go back to "every time the room is cleaned" — so no partial-pair validation.
+roomsRouter.patch("/:id/items/:itemId", requireAuth, requireRole("admin", "manager"), (req, res) => {
+  const { status, error } = getRoomScoped(req.params.id, req.user);
+  if (error) return res.status(status).json({ error });
+
+  const result = db
+    .prepare("UPDATE room_checklist_items SET monthly_weekday = ?, monthly_occurrence = ? WHERE id = ? AND room_id = ?")
+    .run(req.body?.monthly_weekday ?? null, req.body?.monthly_occurrence ?? null, req.params.itemId, req.params.id);
+  if (result.changes === 0) return res.status(404).json({ error: "Not found" });
+
+  res.json(db.prepare("SELECT * FROM room_checklist_items WHERE id = ?").get(req.params.itemId));
+});
+
 roomsRouter.delete("/:id/items/:itemId", requireAuth, requireRole("admin", "manager"), (req, res) => {
   const { status, error } = getRoomScoped(req.params.id, req.user);
   if (error) return res.status(status).json({ error });
