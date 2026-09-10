@@ -2,7 +2,11 @@ import { db } from "../db.js";
 import { toOsloDateStr } from "./schedule.js";
 import { findRoomRunForDate } from "./rooms.js";
 
-const roomRunItemsStmt = db.prepare("SELECT * FROM room_run_items WHERE room_run_id = ? ORDER BY sort_order");
+const roomRunItemsStmt = db.prepare(
+  `SELECT rri.*, rci.monthly_weekday IS NOT NULL AS monthly
+   FROM room_run_items rri LEFT JOIN room_checklist_items rci ON rci.id = rri.room_checklist_item_id
+   WHERE rri.room_run_id = ? ORDER BY rri.sort_order`
+);
 const roomRunPhotosStmt = db.prepare("SELECT * FROM photos WHERE room_run_id = ?");
 
 // Single source of truth for "everything about one checklist visit" — used by the JSON detail

@@ -543,7 +543,13 @@ roomsRouter.post("/:id/checkin", requireAuth, requireRole("cleaner"), (req, res)
   if (error) return res.status(status).json({ error });
 
   const run = findOrCreateTodayRoomRun(req.params.id, req.user.id);
-  const items = db.prepare("SELECT * FROM room_run_items WHERE room_run_id = ? ORDER BY sort_order").all(run.id);
+  const items = db
+    .prepare(
+      `SELECT rri.*, rci.monthly_weekday IS NOT NULL AS monthly
+       FROM room_run_items rri LEFT JOIN room_checklist_items rci ON rci.id = rri.room_checklist_item_id
+       WHERE rri.room_run_id = ? ORDER BY rri.sort_order`
+    )
+    .all(run.id);
   const photos = db.prepare("SELECT * FROM photos WHERE room_run_id = ?").all(run.id);
   res.json({ ...run, items, photos });
 });
