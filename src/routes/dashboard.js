@@ -2,6 +2,7 @@ import { Router } from "express";
 import { db } from "../db.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 import { todayInOslo, toOsloDateStr, getSitesScheduledOn } from "../services/schedule.js";
+import { getRoomCompletionForSiteDate } from "../services/rooms.js";
 
 export const dashboardRouter = Router();
 
@@ -50,14 +51,19 @@ dashboardRouter.get("/summary", requireAuth, requireRole("admin", "manager"), (r
   const recentActivity = [...runsToday]
     .sort((a, b) => b.started_at.localeCompare(a.started_at))
     .slice(0, 5)
-    .map((r) => ({
-      id: r.id,
-      siteName: r.site_name,
-      cleanerName: r.cleaner_name,
-      status: r.completed_at ? "completed" : "in_progress",
-      startedAt: r.started_at,
-      signedInitials: r.signed_initials || null,
-    }));
+    .map((r) => {
+      const roomCompletion = getRoomCompletionForSiteDate(r.site_id, today);
+      return {
+        id: r.id,
+        siteName: r.site_name,
+        cleanerName: r.cleaner_name,
+        status: r.completed_at ? "completed" : "in_progress",
+        startedAt: r.started_at,
+        signedInitials: r.signed_initials || null,
+        roomDueCount: roomCompletion?.dueCount ?? null,
+        roomCompletedCount: roomCompletion?.completedCount ?? null,
+      };
+    });
 
   const plannedToday = getSitesScheduledOn(today, companyId)
     .filter((s) => s.scheduleStatus === "missing")

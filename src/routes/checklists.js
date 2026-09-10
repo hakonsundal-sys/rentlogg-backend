@@ -6,6 +6,8 @@ import { db } from "../db.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 import { gatherReportPhotos, streamPhotosZip } from "../services/photos.js";
 import { getRunDetail, canAccessRun } from "../services/runDetail.js";
+import { getRoomCompletionForSiteDate } from "../services/rooms.js";
+import { toOsloDateStr } from "../services/schedule.js";
 import { safeOriginalName, normalizeImageOrientation } from "../utils/uploads.js";
 
 export const checklistsRouter = Router();
@@ -143,7 +145,18 @@ checklistsRouter.get("/runs", requireAuth, requireRole("admin", "manager"), (req
        ORDER BY r.started_at DESC`
     )
     .all(...params);
-  res.json(rows);
+  // completed_at only means the cleaner tapped "Avslutt besøk" — for a room-based site that
+  // can happen with most rooms still undone, so the list needs actual room progress alongside
+  // it rather than just the flat FULLFØRT/PÅGÅR badge implying the whole site is done.
+  const enriched = rows.map((r) => {
+    const roomCompletion = getRoomCompletionForSiteDate(r.site_id, toOsloDateStr(r.started_at));
+    return {
+      ...r,
+      room_due_count: roomCompletion?.dueCount ?? null,
+      room_completed_count: roomCompletion?.completedCount ?? null,
+    };
+  });
+  res.json(enriched);
 });
 
 checklistsRouter.get("/runs/:id", requireAuth, (req, res) => {

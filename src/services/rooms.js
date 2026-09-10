@@ -116,6 +116,19 @@ export function getRoomsForSite(siteId, dateStr) {
   }));
 }
 
+// Powers oversight views (monthly report, dashboard) that previously judged a room-based site's
+// day purely by whether the flat checklist_runs wrapper got closed ("Avslutt besøk") — true even
+// if the cleaner tapped that after finishing 2 of 29 rooms. This instead counts the rooms that
+// were actually due that day and how many of them were actually completed. Returns null for a
+// site with no rooms at all, so callers can tell "not room-based" apart from "room-based, 0 due".
+export function getRoomCompletionForSiteDate(siteId, dateStr) {
+  const rooms = roomsForSiteStmt.all(siteId);
+  if (rooms.length === 0) return null;
+  const dueRooms = rooms.filter((room) => isRoomDueOn(room, dateStr));
+  const completedCount = dueRooms.filter((room) => getRoomStatusForDate(room.id, dateStr) === "completed").length;
+  return { dueCount: dueRooms.length, completedCount, totalRooms: rooms.length };
+}
+
 const roomItemsStmt = db.prepare("SELECT * FROM room_checklist_items WHERE room_id = ? ORDER BY sort_order");
 const insertRoomRunStmt = db.prepare("INSERT INTO room_runs (room_id, cleaner_id) VALUES (?, ?)");
 const insertRoomRunItemStmt = db.prepare(

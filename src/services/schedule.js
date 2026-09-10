@@ -1,4 +1,5 @@
 import { db } from "../db.js";
+import { getRoomCompletionForSiteDate } from "./rooms.js";
 
 // Weekday convention throughout this module: JS Date#getDay() — 0=Sunday..6=Saturday.
 // Render runs in UTC, so "today" and any per-day matching must be computed in Europe/Oslo
@@ -117,19 +118,40 @@ export function computeMonthlyReport({ month, siteId, departmentId, companyId })
 
       plannedDays++;
       const run = findRunForSiteDate(site.id, dateStr);
-      const completed = !!(run && run.completed_at);
+
+      // Room-based site with at least one room actually due that day: judge "completed" by
+      // whether those rooms actually got done, not by whether the flat visit wrapper was
+      // closed — a cleaner can tap "Avslutt besøk" after finishing 2 of 29 rooms. Falls back
+      // to the flat-run check for a non-room site, or a room-based one with nothing due that
+      // particular day (rare — the site-level weekly plan and each room's own schedule aren't
+      // required to agree).
+      const roomCompletion = getRoomCompletionForSiteDate(site.id, dateStr);
+      let completed, tasksCompleted, tasksTotal;
+      if (roomCompletion && roomCompletion.dueCount > 0) {
+        tasksTotal = roomCompletion.dueCount;
+        tasksCompleted = roomCompletion.completedCount;
+        completed = roomCompletion.completedCount === roomCompletion.dueCount;
+      } else {
+        const itemCounts = run ? runItemCountsStmt.get(run.id) : null;
+        tasksTotal = itemCounts ? itemCounts.total || 0 : 0;
+        tasksCompleted = itemCounts ? itemCounts.done || 0 : 0;
+        completed = !!(run && run.completed_at);
+      }
       if (completed) completedDays++;
       else missingDays++;
 
-      const itemCounts = run ? runItemCountsStmt.get(run.id) : null;
       rows.push({
         date: dateStr,
         site_id: site.id,
         site_name: site.name,
-        room_count: site.room_count || 0,
+        // sites.room_count is only ever set at site-creation time and never kept in sync as
+        // rooms get added/removed afterward — roomCompletion.totalRooms is the real, current
+        // count, computed fresh from the rooms table itself. Falls back to the stale column
+        // only for a non-room site, where it's meaningless anyway (always 0).
+        room_count: roomCompletion?.totalRooms ?? (site.room_count || 0),
         status: completed ? "completed" : run ? "in_progress" : "missing",
-        tasksCompleted: itemCounts ? itemCounts.done || 0 : 0,
-        tasksTotal: itemCounts ? itemCounts.total || 0 : 0,
+        tasksCompleted,
+        tasksTotal,
       });
     }
   }
