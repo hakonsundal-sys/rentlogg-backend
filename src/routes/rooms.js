@@ -7,7 +7,7 @@ import { PDFParse } from "pdf-parse";
 import { db } from "../db.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 import { todayInOslo } from "../services/schedule.js";
-import { getRoomsForSite, findOrCreateTodayRoomRun, findRoomRunForDate, getMonthlyItemsForSite } from "../services/rooms.js";
+import { getRoomsForSite, findOrCreateTodayRoomRun, findRoomRunForDate, getMonthlyItemsForSite, getRoomGridForSiteMonth } from "../services/rooms.js";
 import { safeOriginalName, normalizeImageOrientation } from "../utils/uploads.js";
 
 export const siteRoomsRouter = Router({ mergeParams: true });
@@ -239,6 +239,19 @@ siteRoomsRouter.get("/monthly-items", requireAuth, requireRole("admin", "manager
   if (!/^\d{4}-\d{2}$/.test(month)) return res.status(400).json({ error: "month must be YYYY-MM" });
 
   res.json(getMonthlyItemsForSite(req.params.siteId, month));
+});
+
+// Room x day grid for Rapporter's "vaskeplan" view — which rooms were actually done on which
+// days over a month, at a glance.
+siteRoomsRouter.get("/monthly-grid", requireAuth, requireRole("admin", "manager"), (req, res) => {
+  const { status: scopeStatus, error: scopeError } = getSiteScopedForRooms(req.params.siteId, req.user);
+  if (scopeError) return res.status(scopeStatus).json({ error: scopeError });
+
+  const month = req.query.month || todayInOslo().slice(0, 7);
+  if (!/^\d{4}-\d{2}$/.test(month)) return res.status(400).json({ error: "month must be YYYY-MM" });
+  const [year, mon] = month.split("-").map(Number);
+
+  res.json(getRoomGridForSiteMonth(req.params.siteId, year, mon));
 });
 
 siteRoomsRouter.post("/complete-all-due", requireAuth, requireRole("cleaner"), (req, res) => {

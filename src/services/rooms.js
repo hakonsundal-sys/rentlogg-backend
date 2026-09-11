@@ -129,6 +129,26 @@ export function getRoomCompletionForSiteDate(siteId, dateStr) {
   return { dueCount: dueRooms.length, completedCount, totalRooms: rooms.length };
 }
 
+// Powers the room×day "vaskeplan" grid on Rapporter: for one site and month, every room's
+// day-by-day status — reusing the exact same due/status logic the cleaner app and monthly
+// report already use, so this view always agrees with what they show. Days after today are
+// left out entirely (not "missing") since nothing was due to have happened yet.
+export function getRoomGridForSiteMonth(siteId, year, month) {
+  const rooms = roomsForSiteStmt.all(siteId);
+  const totalDays = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  const today = todayInOslo();
+
+  return rooms.map((room) => {
+    const days = {};
+    for (let day = 1; day <= totalDays; day++) {
+      const dateStr = `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+      if (dateStr > today) break;
+      days[dateStr] = isRoomDueOn(room, dateStr) ? getRoomStatusForDate(room.id, dateStr) : "not_due";
+    }
+    return { id: room.id, name: room.name, days };
+  });
+}
+
 const roomItemsStmt = db.prepare("SELECT * FROM room_checklist_items WHERE room_id = ? ORDER BY sort_order");
 const insertRoomRunStmt = db.prepare("INSERT INTO room_runs (room_id, cleaner_id) VALUES (?, ?)");
 const insertRoomRunItemStmt = db.prepare(
