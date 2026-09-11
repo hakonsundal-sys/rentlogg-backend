@@ -241,10 +241,11 @@ siteRoomsRouter.get("/monthly-items", requireAuth, requireRole("admin", "manager
   res.json(getMonthlyItemsForSite(req.params.siteId, month));
 });
 
-// Room x day grid for Rapporter's "vaskeplan" view (and its read-only counterpart on the
-// customer portal) — which rooms were actually done on which days over a month, at a glance.
-// getSiteScopedForRooms below already restricts a customer caller to their own client's sites.
-siteRoomsRouter.get("/monthly-grid", requireAuth, requireRole("admin", "manager", "customer"), (req, res) => {
+// Room x day grid for Rapporter's "vaskeplan" view, the customer portal's read-only
+// counterpart, and a cleaner's own editable one — which rooms were actually done on which
+// days over a month, at a glance. getSiteScopedForRooms below already restricts a customer
+// caller to their own client's sites (and a cleaner/admin/manager caller to their own company's).
+siteRoomsRouter.get("/monthly-grid", requireAuth, requireRole("admin", "manager", "customer", "cleaner"), (req, res) => {
   const { status: scopeStatus, error: scopeError } = getSiteScopedForRooms(req.params.siteId, req.user);
   if (scopeError) return res.status(scopeStatus).json({ error: scopeError });
 
