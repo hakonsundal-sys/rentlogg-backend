@@ -1,5 +1,5 @@
 import { db } from "../db.js";
-import { todayInOslo, toOsloDateStr } from "./schedule.js";
+import { todayInOslo, toOsloDateStr, findRunForSiteDate } from "./schedule.js";
 
 // Same weekday convention as schedule.js: JS Date#getDay() — 0=Sunday..6=Saturday.
 
@@ -129,24 +129,30 @@ export function getRoomCompletionForSiteDate(siteId, dateStr) {
   return { dueCount: dueRooms.length, completedCount, totalRooms: rooms.length };
 }
 
-// Powers the room×day "vaskeplan" grid on Rapporter: for one site and month, every room's
-// day-by-day status — reusing the exact same due/status logic the cleaner app and monthly
-// report already use, so this view always agrees with what they show. Days after today are
-// left out entirely (not "missing") since nothing was due to have happened yet.
+// Powers the room×day "vaskeplan" grid on Rapporter/customer views: for one site and month,
+// every room's day-by-day status — reusing the exact same due/status logic the cleaner app and
+// monthly report already use, so this view always agrees with what they show. Days after today
+// are left out entirely (not "missing") since nothing was due to have happened yet. Also
+// returns the flat checklist_run id behind each day (one per site per day, shared by every
+// room that day), so a UI can link a cell straight to that day's editable checklist.
 export function getRoomGridForSiteMonth(siteId, year, month) {
   const rooms = roomsForSiteStmt.all(siteId);
   const totalDays = new Date(Date.UTC(year, month, 0)).getUTCDate();
   const today = todayInOslo();
+  const runsByDate = {};
 
-  return rooms.map((room) => {
+  const roomRows = rooms.map((room) => {
     const days = {};
     for (let day = 1; day <= totalDays; day++) {
       const dateStr = `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
       if (dateStr > today) break;
       days[dateStr] = isRoomDueOn(room, dateStr) ? getRoomStatusForDate(room.id, dateStr) : "not_due";
+      if (!(dateStr in runsByDate)) runsByDate[dateStr] = findRunForSiteDate(siteId, dateStr)?.id || null;
     }
     return { id: room.id, name: room.name, days };
   });
+
+  return { rooms: roomRows, runsByDate };
 }
 
 const roomItemsStmt = db.prepare("SELECT * FROM room_checklist_items WHERE room_id = ? ORDER BY sort_order");
