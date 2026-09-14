@@ -144,7 +144,7 @@ deviationsRouter.post("/", requireAuth, requireRole("admin", "cleaner", "manager
   res.status(201).json({ id: info.lastInsertRowid });
 });
 
-deviationsRouter.post("/:id/photos", requireAuth, requireRole("admin", "cleaner", "manager"), upload.single("photo"), async (req, res) => {
+deviationsRouter.post("/:id/photos", requireAuth, requireRole("admin", "cleaner", "manager", "customer"), upload.single("photo"), async (req, res) => {
   const { status, error } = getDeviationScoped(req.params.id, req.user);
   if (error) return res.status(status).json({ error });
   if (!req.file) return res.status(400).json({ error: "No file uploaded (field name must be 'photo')" });
