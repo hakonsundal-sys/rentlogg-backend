@@ -105,6 +105,11 @@ ensureColumn("room_checklist_items", "monthly_occurrence", "monthly_occurrence I
 // break a label-based match). Nullable since it's only populated going forward; old rows stay
 // label-only.
 ensureColumn("room_run_items", "room_checklist_item_id", "room_checklist_item_id INTEGER REFERENCES room_checklist_items(id)");
+// Set when a checklist_runs row was created after the fact (vaskeplan grid's "Sjekk inn i
+// etterkant" on a day nobody actually scanned the site QR for) rather than by a real check-in —
+// started_at is backdated to the day it represents either way, so this is the only way to tell
+// the two apart later (report/log views surface it as a visible "entered late" notice).
+ensureColumn("checklist_runs", "backdated", "backdated INTEGER DEFAULT 0");
 
 // Departments started out (2026-09-07) as a per-client sub-grouping with a NOT NULL client_id,
 // before it turned out the actual need was an internal, company-wide region tag (Vest/Sør/Øst/

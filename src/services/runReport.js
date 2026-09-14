@@ -4,13 +4,25 @@ import PDFDocument from "pdfkit";
 
 const PRIORITY_LABELS = { low: "Lav", medium: "Middels", high: "Høy" };
 
-function publicBaseUrl() {
-  return process.env.PUBLIC_BASE_URL || process.env.RENDER_EXTERNAL_URL || "http://localhost:4000";
-}
+const MIME_BY_EXT = {
+  ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+  ".webp": "image/webp", ".heic": "image/heic", ".heif": "image/heif",
+};
 
-function photoUrl(filePath) {
-  const filename = filePath.split(/[\\/]/).pop();
-  return `${publicBaseUrl()}/uploads/${filename}`;
+// The HTML report is opened both as a logged-in browser tab (RunDetailModal's "Vis rapport") and
+// baked into the daily-digest email sent to whoever's on a site's recipient list — neither has
+// any way to carry the auth token /uploads now requires (an email client fetching an <img src>
+// certainly can't, and isn't logged in at all), so a plain /uploads URL here would render as a
+// broken image for both. Embedding the actual bytes sidesteps needing any token at all.
+function photoDataUri(filePath) {
+  const absolutePath = path.join(process.env.UPLOADS_DIR || "uploads", path.basename(filePath));
+  try {
+    const buffer = fs.readFileSync(absolutePath);
+    const mime = MIME_BY_EXT[path.extname(absolutePath).toLowerCase()] || "application/octet-stream";
+    return `data:${mime};base64,${buffer.toString("base64")}`;
+  } catch {
+    return null; // file missing on disk — skip it rather than break the whole report
+  }
 }
 
 function escapeHtml(value) {
@@ -30,10 +42,13 @@ function buildSections(detail) {
 }
 
 function formatStatus(detail) {
-  if (detail.completed_at) {
-    return `Ferdigstilt ${detail.completed_at.slice(0, 16)}${detail.signed_initials ? ` av ${detail.signed_initials}` : ""}`;
-  }
-  return "Pågår";
+  const base = detail.completed_at
+    ? `Ferdigstilt ${detail.completed_at.slice(0, 16)}${detail.signed_initials ? ` av ${detail.signed_initials}` : ""}`
+    : "Pågår";
+  // The date this run is filed under is real (see checklists.js's backdated check-in), but the
+  // check-in itself wasn't made that day — the report has to say so wherever it shows a date, not
+  // just quietly pass it off as an ordinary same-day visit.
+  return detail.backdated ? `${base} (sjekket inn i etterkant)` : base;
 }
 
 // Split from buildReportHtml so the daily-digest email can concatenate multiple visits' bodies
@@ -54,7 +69,8 @@ export function buildReportBody(detail) {
 
       const photosHtml = section.photos?.length
         ? `<div style="padding:10px 14px;border:1px solid #ddd;border-top:none;display:flex;flex-wrap:wrap;gap:8px;">
-             ${section.photos.map((p) => `<a href="${photoUrl(p.file_path)}" target="_blank"><img src="${photoUrl(p.file_path)}" alt="" style="width:180px;height:180px;object-fit:cover;border-radius:4px;border:1px solid #ddd;"></a>`).join("")}
+             ${section.photos.map((p) => photoDataUri(p.file_path)).filter(Boolean)
+               .map((uri) => `<a href="${uri}" target="_blank"><img src="${uri}" alt="" style="width:180px;height:180px;object-fit:cover;border-radius:4px;border:1px solid #ddd;"></a>`).join("")}
            </div>`
         : "";
 
@@ -83,7 +99,8 @@ export function buildReportBody(detail) {
             ${d.reported_by_initials ? `<div style="margin-top:4px;color:#777;">Meldt av: ${escapeHtml(d.reported_by_initials)}</div>` : ""}
             ${d.photos?.length ? `
               <div style="margin-top:8px;display:flex;flex-wrap:wrap;gap:8px;">
-                ${d.photos.map((p) => `<a href="${photoUrl(p.file_path)}" target="_blank"><img src="${photoUrl(p.file_path)}" alt="" style="width:140px;height:140px;object-fit:cover;border-radius:4px;border:1px solid #f1b0b7;"></a>`).join("")}
+                ${d.photos.map((p) => photoDataUri(p.file_path)).filter(Boolean)
+                  .map((uri) => `<a href="${uri}" target="_blank"><img src="${uri}" alt="" style="width:140px;height:140px;object-fit:cover;border-radius:4px;border:1px solid #f1b0b7;"></a>`).join("")}
               </div>` : ""}
             ${d.reply_text ? `<div style="margin-top:6px;padding-top:6px;border-top:1px solid #f1b0b7;color:#333;">Svar: ${escapeHtml(d.reply_text)} — ${escapeHtml(d.replied_by_initials)}</div>` : ""}
           </div>`)

@@ -6,7 +6,7 @@ import { requireAuth, requireRole } from "../middleware/auth.js";
 import { gatherReportPhotos, streamPhotosZip } from "../services/photos.js";
 import { getRunDetail, getVirtualDayDetail, canAccessRun } from "../services/runDetail.js";
 import { getRoomCompletionForSiteDate } from "../services/rooms.js";
-import { toOsloDateStr, findRunForSiteDate } from "../services/schedule.js";
+import { toOsloDateStr, todayInOslo, findRunForSiteDate } from "../services/schedule.js";
 import { safeOriginalName, normalizeImageOrientation, imageFileFilter, removeUploadedFile } from "../utils/uploads.js";
 
 export const checklistsRouter = Router();
@@ -184,6 +184,38 @@ checklistsRouter.get("/site/:siteId/date/:date", requireAuth, (req, res) => {
   if (!detail) return res.status(404).json({ error: "Ingen rom å vise for denne datoen." });
 
   res.json(detail);
+});
+
+// Backdated check-in: turns a "virtual" day (see above — real room activity but no flat
+// checklist_runs row) into a real one, so it gets a report/PDF and shows up as a genuine visit
+// rather than staying a dead end. started_at is backdated to the day it represents (matching
+// findOrCreateRoomRunForDate's own convention for rooms), and `backdated` stays set permanently
+// so any later view of this run — the modal, the PDF/HTML report, the digest email — can keep
+// showing that it was entered after the fact rather than quietly passing it off as a same-day
+// check-in. Idempotent: if a real run already showed up for this day in the meantime, returns
+// that instead of creating a second one.
+checklistsRouter.post("/site/:siteId/date/:date", requireAuth, requireRole("cleaner", "admin", "manager"), (req, res) => {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(req.params.date)) return res.status(400).json({ error: "date must be YYYY-MM-DD" });
+  if (req.params.date > todayInOslo()) return res.status(400).json({ error: "Kan ikke sjekke inn på en fremtidig dato." });
+
+  const site = db.prepare("SELECT * FROM sites WHERE id = ?").get(req.params.siteId);
+  if (!site) return res.status(404).json({ error: "Not found" });
+  if (site.company_id !== req.user.company_id) return res.status(403).json({ error: "Not allowed" });
+
+  const existingRun = findRunForSiteDate(site.id, req.params.date);
+  if (existingRun) return res.json(getRunDetail(existingRun.id));
+
+  const info = db
+    .prepare("INSERT INTO checklist_runs (site_id, cleaner_id, started_at, backdated) VALUES (?, ?, ?, 1)")
+    .run(site.id, req.user.id, `${req.params.date} 12:00:00`);
+
+  const templateItems = site.checklist_template_id
+    ? db.prepare("SELECT * FROM checklist_template_items WHERE template_id = ? ORDER BY sort_order").all(site.checklist_template_id)
+    : [];
+  const insertItem = db.prepare("INSERT INTO checklist_run_items (run_id, label, sort_order) VALUES (?, ?, ?)");
+  templateItems.forEach((item, i) => insertItem.run(info.lastInsertRowid, item.label, i));
+
+  res.status(201).json(getRunDetail(info.lastInsertRowid));
 });
 
 checklistsRouter.get("/runs/:id/photos.zip", requireAuth, requireRole("admin", "manager"), (req, res) => {
