@@ -3,7 +3,7 @@ import multer from "multer";
 import path from "node:path";
 import { db } from "../db.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
-import { safeOriginalName, normalizeImageOrientation } from "../utils/uploads.js";
+import { safeOriginalName, normalizeImageOrientation, imageFileFilter, removeUploadedFile } from "../utils/uploads.js";
 
 export const deviationsRouter = Router();
 
@@ -12,6 +12,7 @@ const upload = multer({
     destination: process.env.UPLOADS_DIR || "uploads/",
     filename: (req, file, cb) => cb(null, `${Date.now()}-${safeOriginalName(file.originalname)}`),
   }),
+  fileFilter: imageFileFilter,
   // Phone camera photos (HDR/high-res shots especially) routinely land well past 10MB —
   // 20MB gives real-world headroom without allowing e.g. a video by mistake.
   limits: { fileSize: 20 * 1024 * 1024 },
@@ -226,11 +227,8 @@ deviationsRouter.patch("/:id/reply", requireAuth, requireRole("cleaner", "manage
 // fixed") instead of just passively seeing it disappear — stronger documentation for both
 // sides than a status flip nobody outside the cleaner/admin ever explicitly agreed to.
 deviationsRouter.patch("/:id/approve", requireAuth, requireRole("customer"), (req, res) => {
-  const deviation = db.prepare("SELECT * FROM deviations WHERE id = ?").get(req.params.id);
-  if (!deviation) return res.status(404).json({ error: "Not found" });
-
-  const site = db.prepare("SELECT client_id FROM sites WHERE id = ?").get(deviation.site_id);
-  if (!site || site.client_id !== req.user.client_id) return res.status(403).json({ error: "Not allowed" });
+  const { deviation, status, error } = getDeviationScoped(req.params.id, req.user);
+  if (error) return res.status(status).json({ error });
 
   if (deviation.status !== "resolved") {
     return res.status(400).json({ error: "Avviket er ikke løst ennå." });
@@ -250,6 +248,7 @@ deviationsRouter.delete("/:id", requireAuth, requireRole("admin", "manager"), (r
   const { deviation, status, error } = getDeviationScoped(req.params.id, req.user);
   if (error) return res.status(status).json({ error });
 
+  db.prepare("SELECT file_path FROM photos WHERE deviation_id = ?").all(req.params.id).forEach((p) => removeUploadedFile(p.file_path));
   db.prepare("DELETE FROM photos WHERE deviation_id = ?").run(req.params.id);
   db.prepare("DELETE FROM deviations WHERE id = ?").run(req.params.id);
   recomputeSiteStatus(deviation.site_id);

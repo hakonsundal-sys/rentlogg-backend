@@ -1,14 +1,13 @@
 import { Router } from "express";
 import multer from "multer";
 import path from "node:path";
-import fs from "node:fs";
 import Anthropic from "@anthropic-ai/sdk";
 import { PDFParse } from "pdf-parse";
 import { db } from "../db.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 import { todayInOslo } from "../services/schedule.js";
 import { getRoomsForSite, findOrCreateTodayRoomRun, findRoomRunForDate, getMonthlyItemsForSite, getRoomGridForSiteMonth } from "../services/rooms.js";
-import { safeOriginalName, normalizeImageOrientation } from "../utils/uploads.js";
+import { safeOriginalName, normalizeImageOrientation, imageFileFilter, removeUploadedFile, UploadRejectedError } from "../utils/uploads.js";
 
 export const siteRoomsRouter = Router({ mergeParams: true });
 export const roomsRouter = Router();
@@ -18,12 +17,18 @@ const upload = multer({
     destination: process.env.UPLOADS_DIR || "uploads/",
     filename: (req, file, cb) => cb(null, `${Date.now()}-${safeOriginalName(file.originalname)}`),
   }),
+  fileFilter: imageFileFilter,
   // Phone camera photos (HDR/high-res shots especially) routinely land well past 10MB —
   // 20MB gives real-world headroom without allowing e.g. a video by mistake.
   limits: { fileSize: 20 * 1024 * 1024 },
 });
 
-const pdfUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
+function pdfFileFilter(req, file, cb) {
+  if (file.mimetype !== "application/pdf") return cb(new UploadRejectedError("Bare PDF er tillatt."));
+  cb(null, true);
+}
+
+const pdfUpload = multer({ storage: multer.memoryStorage(), fileFilter: pdfFileFilter, limits: { fileSize: 10 * 1024 * 1024 } });
 
 // Same shared-ownership-check pattern as sites.js/checklists.js/deviations.js, one per level
 // this file operates at (site, room, room_run) since a room-run's site is two joins away.
@@ -204,6 +209,7 @@ siteRoomsRouter.delete("/", requireAuth, requireRole("admin", "manager"), (req, 
   if (scopeError) return res.status(scopeStatus).json({ error: scopeError });
 
   const roomIds = db.prepare("SELECT id FROM rooms WHERE site_id = ?").all(req.params.siteId).map((r) => r.id);
+  const filesToRemove = [];
 
   const deleteAll = db.transaction((ids) => {
     if (ids.length) {
@@ -216,6 +222,9 @@ siteRoomsRouter.delete("/", requireAuth, requireRole("admin", "manager"), (req, 
       const runIds = db.prepare("SELECT id FROM room_runs WHERE room_id = ?").all(roomId).map((r) => r.id);
       if (runIds.length) {
         const placeholders = runIds.map(() => "?").join(",");
+        filesToRemove.push(
+          ...db.prepare(`SELECT file_path FROM photos WHERE room_run_id IN (${placeholders})`).all(...runIds).map((p) => p.file_path)
+        );
         db.prepare(`DELETE FROM photos WHERE room_run_id IN (${placeholders})`).run(...runIds);
         db.prepare(`DELETE FROM room_run_items WHERE room_run_id IN (${placeholders})`).run(...runIds);
       }
@@ -227,6 +236,7 @@ siteRoomsRouter.delete("/", requireAuth, requireRole("admin", "manager"), (req, 
   });
 
   deleteAll(roomIds);
+  filesToRemove.forEach(removeUploadedFile);
   res.json({ ok: true, deletedCount: roomIds.length });
 });
 
@@ -432,11 +442,15 @@ roomsRouter.delete("/:id", requireAuth, requireRole("admin", "manager"), (req, r
   const { status, error } = getRoomScoped(req.params.id, req.user);
   if (error) return res.status(status).json({ error });
 
+  const filesToRemove = [];
   const deleteCascade = db.transaction((roomId) => {
     db.prepare("UPDATE deviations SET room_id = NULL WHERE room_id = ?").run(roomId);
     const runIds = db.prepare("SELECT id FROM room_runs WHERE room_id = ?").all(roomId).map((r) => r.id);
     if (runIds.length) {
       const placeholders = runIds.map(() => "?").join(",");
+      filesToRemove.push(
+        ...db.prepare(`SELECT file_path FROM photos WHERE room_run_id IN (${placeholders})`).all(...runIds).map((p) => p.file_path)
+      );
       db.prepare(`DELETE FROM photos WHERE room_run_id IN (${placeholders})`).run(...runIds);
       db.prepare(`DELETE FROM room_run_items WHERE room_run_id IN (${placeholders})`).run(...runIds);
     }
@@ -447,6 +461,7 @@ roomsRouter.delete("/:id", requireAuth, requireRole("admin", "manager"), (req, r
   });
 
   deleteCascade(req.params.id);
+  filesToRemove.forEach(removeUploadedFile);
   res.json({ ok: true });
 });
 
@@ -665,9 +680,7 @@ roomsRouter.delete("/runs/:runId/photos/:photoId", requireAuth, requireRole("cle
   const photo = db.prepare("SELECT * FROM photos WHERE id = ? AND room_run_id = ?").get(req.params.photoId, req.params.runId);
   if (!photo) return res.status(404).json({ error: "Not found" });
 
-  const uploadsDir = process.env.UPLOADS_DIR || "uploads";
-  const absolutePath = path.join(uploadsDir, path.basename(photo.file_path));
-  fs.rmSync(absolutePath, { force: true });
+  removeUploadedFile(photo.file_path);
   db.prepare("DELETE FROM photos WHERE id = ?").run(photo.id);
   stampRoomRunEdit(req.params.runId, req.body?.initials);
 

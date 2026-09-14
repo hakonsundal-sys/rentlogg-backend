@@ -1,14 +1,13 @@
 import { Router } from "express";
 import multer from "multer";
 import path from "node:path";
-import fs from "node:fs";
 import { db } from "../db.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 import { gatherReportPhotos, streamPhotosZip } from "../services/photos.js";
-import { getRunDetail, canAccessRun } from "../services/runDetail.js";
+import { getRunDetail, getVirtualDayDetail, canAccessRun } from "../services/runDetail.js";
 import { getRoomCompletionForSiteDate } from "../services/rooms.js";
-import { toOsloDateStr } from "../services/schedule.js";
-import { safeOriginalName, normalizeImageOrientation } from "../utils/uploads.js";
+import { toOsloDateStr, findRunForSiteDate } from "../services/schedule.js";
+import { safeOriginalName, normalizeImageOrientation, imageFileFilter, removeUploadedFile } from "../utils/uploads.js";
 
 export const checklistsRouter = Router();
 
@@ -33,6 +32,7 @@ const upload = multer({
     destination: process.env.UPLOADS_DIR || "uploads/",
     filename: (req, file, cb) => cb(null, `${Date.now()}-${safeOriginalName(file.originalname)}`),
   }),
+  fileFilter: imageFileFilter,
   // Phone camera photos (HDR/high-res shots especially) routinely land well past 10MB —
   // 20MB gives real-world headroom without allowing e.g. a video by mistake.
   limits: { fileSize: 20 * 1024 * 1024 },
@@ -166,6 +166,26 @@ checklistsRouter.get("/runs/:id", requireAuth, (req, res) => {
   res.json(detail);
 });
 
+// The vaskeplan grid's "open this day" button used to only work for a day that already had a
+// flat checklist_runs row — but that row only exists once a site-level QR scan happens, and a
+// room_run is independent of it (see buildRoomsForDate in runDetail.js). This lets the grid open
+// ANY day up to today, real run or not — falling back to a synthesized detail (id: null) built
+// straight from whatever room_runs actually exist for that date.
+checklistsRouter.get("/site/:siteId/date/:date", requireAuth, (req, res) => {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(req.params.date)) return res.status(400).json({ error: "date must be YYYY-MM-DD" });
+
+  const site = db.prepare("SELECT * FROM sites WHERE id = ?").get(req.params.siteId);
+  if (!site) return res.status(404).json({ error: "Not found" });
+  if (req.user.role === "customer" && site.client_id !== req.user.client_id) return res.status(403).json({ error: "Not allowed" });
+  if (req.user.role !== "customer" && site.company_id !== req.user.company_id) return res.status(403).json({ error: "Not allowed" });
+
+  const existingRun = findRunForSiteDate(site.id, req.params.date);
+  const detail = existingRun ? getRunDetail(existingRun.id) : getVirtualDayDetail(site, req.params.date);
+  if (!detail) return res.status(404).json({ error: "Ingen rom å vise for denne datoen." });
+
+  res.json(detail);
+});
+
 checklistsRouter.get("/runs/:id/photos.zip", requireAuth, requireRole("admin", "manager"), (req, res) => {
   const { run, status, error } = getRunScoped(req.params.id, req.user);
   if (error) return res.status(status).json({ error });
@@ -251,9 +271,7 @@ checklistsRouter.delete("/runs/:id/photos/:photoId", requireAuth, requireRole("c
   const photo = db.prepare("SELECT * FROM photos WHERE id = ? AND run_id = ?").get(req.params.photoId, req.params.id);
   if (!photo) return res.status(404).json({ error: "Not found" });
 
-  const uploadsDir = process.env.UPLOADS_DIR || "uploads";
-  const absolutePath = path.join(uploadsDir, path.basename(photo.file_path));
-  fs.rmSync(absolutePath, { force: true });
+  removeUploadedFile(photo.file_path);
   db.prepare("DELETE FROM photos WHERE id = ?").run(photo.id);
   stampChecklistRunEdit(req.params.id, req.body?.initials);
 
@@ -274,6 +292,7 @@ checklistsRouter.delete("/runs/:id", requireAuth, requireRole("admin", "manager"
     });
   }
 
+  db.prepare("SELECT file_path FROM photos WHERE run_id = ?").all(req.params.id).forEach((p) => removeUploadedFile(p.file_path));
   db.prepare("DELETE FROM photos WHERE run_id = ?").run(req.params.id);
   db.prepare("DELETE FROM checklist_run_items WHERE run_id = ?").run(req.params.id);
   db.prepare("DELETE FROM checklist_runs WHERE id = ?").run(req.params.id);

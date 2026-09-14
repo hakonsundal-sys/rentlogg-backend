@@ -3,9 +3,10 @@ import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import multer from "multer";
 import path from "node:path";
+import rateLimit from "express-rate-limit";
 import { db } from "../db.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
-import { safeOriginalName, normalizeImageOrientation } from "../utils/uploads.js";
+import { safeOriginalName, normalizeImageOrientation, imageFileFilter } from "../utils/uploads.js";
 
 export const authRouter = Router();
 
@@ -14,8 +15,24 @@ const avatarUpload = multer({
     destination: `${process.env.UPLOADS_DIR || "uploads"}/avatars`,
     filename: (req, file, cb) => cb(null, `${req.user.id}-${Date.now()}-${safeOriginalName(file.originalname)}`),
   }),
+  fileFilter: imageFileFilter,
   limits: { fileSize: 5 * 1024 * 1024 },
 });
+
+// Bounds brute-force/credential-stuffing attempts against /login — bcrypt's own cost (~50-100ms)
+// slows a single guess but doesn't stop a sustained attempt without something like this. Keyed
+// by IP, not email, so it can't be used to lock a real user out of their own account.
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "For mange innloggingsforsøk. Prøv igjen om litt." },
+});
+
+// Used only to keep bcrypt.compareSync's timing constant when the email doesn't exist at all —
+// see the comment on POST /login below.
+const DUMMY_PASSWORD_HASH = bcrypt.hashSync("no-such-user-timing-guard", 10);
 
 // Self-closing bootstrap: this used to be a fully open "create any account, any role" endpoint
 // with no guard at all — a real security hole. Now it can only ever create the very first
@@ -43,10 +60,15 @@ authRouter.post("/register", (req, res) => {
   res.status(201).json({ id: info.lastInsertRowid, name, email, role: "super_admin" });
 });
 
-authRouter.post("/login", (req, res) => {
+authRouter.post("/login", loginLimiter, (req, res) => {
   const { email, password } = req.body;
   const user = db.prepare("SELECT * FROM users WHERE email = ?").get(email);
-  if (!user || !bcrypt.compareSync(password, user.password_hash)) {
+  // Always run a bcrypt compare, even for an unknown email — comparing against a fixed dummy
+  // hash keeps the response time the same either way, so a timing difference can't be used to
+  // enumerate which emails have accounts (an unknown email used to return near-instantly, since
+  // `!user ||` short-circuited before bcrypt ever ran).
+  const passwordOk = bcrypt.compareSync(password, user?.password_hash || DUMMY_PASSWORD_HASH);
+  if (!user || !passwordOk) {
     return res.status(401).json({ error: "Invalid email or password" });
   }
 

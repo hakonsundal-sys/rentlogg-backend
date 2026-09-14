@@ -1,12 +1,11 @@
 import { Router } from "express";
 import multer from "multer";
 import path from "node:path";
-import fs from "node:fs";
 import { db } from "../db.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 import { newQrToken, qrLabelSvgDataUrl } from "../utils/qrcode.js";
 import { findRunForSiteDate, todayInOslo } from "../services/schedule.js";
-import { safeOriginalName, normalizeImageOrientation } from "../utils/uploads.js";
+import { safeOriginalName, normalizeImageOrientation, documentFileFilter, removeUploadedFile } from "../utils/uploads.js";
 
 export const sitesRouter = Router();
 
@@ -15,6 +14,7 @@ const docUpload = multer({
     destination: process.env.UPLOADS_DIR || "uploads/",
     filename: (req, file, cb) => cb(null, `${Date.now()}-${safeOriginalName(file.originalname)}`),
   }),
+  fileFilter: documentFileFilter,
   limits: { fileSize: 20 * 1024 * 1024 },
 });
 
@@ -114,17 +114,28 @@ sitesRouter.delete("/:id", requireAuth, requireRole("admin", "manager"), (req, r
   const { site, status, error } = getSiteScoped(req.params.id, req.user);
   if (error) return res.status(status).json({ error });
 
+  // Collected up front so every underlying file (not just the DB rows) is actually removed —
+  // previously this cascade deleted photos/site_documents rows but left the files themselves on
+  // disk, orphaned forever (and, before the /uploads auth fix, still fetchable by anyone).
+  const filesToRemove = [];
+
   const deleteCascade = db.transaction((siteId) => {
     const runIds = db.prepare("SELECT id FROM checklist_runs WHERE site_id = ?").all(siteId).map((r) => r.id);
     const deviationIds = db.prepare("SELECT id FROM deviations WHERE site_id = ?").all(siteId).map((d) => d.id);
 
     if (runIds.length) {
       const placeholders = runIds.map(() => "?").join(",");
+      filesToRemove.push(
+        ...db.prepare(`SELECT file_path FROM photos WHERE run_id IN (${placeholders})`).all(...runIds).map((p) => p.file_path)
+      );
       db.prepare(`DELETE FROM photos WHERE run_id IN (${placeholders})`).run(...runIds);
       db.prepare(`DELETE FROM checklist_run_items WHERE run_id IN (${placeholders})`).run(...runIds);
     }
     if (deviationIds.length) {
       const placeholders = deviationIds.map(() => "?").join(",");
+      filesToRemove.push(
+        ...db.prepare(`SELECT file_path FROM photos WHERE deviation_id IN (${placeholders})`).all(...deviationIds).map((p) => p.file_path)
+      );
       db.prepare(`DELETE FROM photos WHERE deviation_id IN (${placeholders})`).run(...deviationIds);
     }
     db.prepare("DELETE FROM deviations WHERE site_id = ?").run(siteId);
@@ -140,6 +151,9 @@ sitesRouter.delete("/:id", requireAuth, requireRole("admin", "manager"), (req, r
         .map((r) => r.id);
       if (roomRunIds.length) {
         const runPlaceholders = roomRunIds.map(() => "?").join(",");
+        filesToRemove.push(
+          ...db.prepare(`SELECT file_path FROM photos WHERE room_run_id IN (${runPlaceholders})`).all(...roomRunIds).map((p) => p.file_path)
+        );
         db.prepare(`DELETE FROM photos WHERE room_run_id IN (${runPlaceholders})`).run(...roomRunIds);
         db.prepare(`DELETE FROM room_run_items WHERE room_run_id IN (${runPlaceholders})`).run(...roomRunIds);
       }
@@ -148,12 +162,15 @@ sitesRouter.delete("/:id", requireAuth, requireRole("admin", "manager"), (req, r
       db.prepare(`DELETE FROM room_checklist_items WHERE room_id IN (${roomPlaceholders})`).run(...roomIds);
     }
     db.prepare("DELETE FROM rooms WHERE site_id = ?").run(siteId);
+
+    filesToRemove.push(...db.prepare("SELECT file_path FROM site_documents WHERE site_id = ?").all(siteId).map((d) => d.file_path));
     db.prepare("DELETE FROM site_documents WHERE site_id = ?").run(siteId);
 
     db.prepare("DELETE FROM sites WHERE id = ?").run(siteId);
   });
 
   deleteCascade(req.params.id);
+  filesToRemove.forEach(removeUploadedFile);
   res.json({ ok: true });
 });
 
@@ -248,8 +265,7 @@ sitesRouter.delete("/:id/documents/:docId", requireAuth, requireRole("admin", "m
   const doc = db.prepare("SELECT * FROM site_documents WHERE id = ? AND site_id = ?").get(req.params.docId, req.params.id);
   if (!doc) return res.status(404).json({ error: "Not found" });
 
-  const uploadsDir = process.env.UPLOADS_DIR || "uploads";
-  fs.rmSync(path.join(uploadsDir, path.basename(doc.file_path)), { force: true });
+  removeUploadedFile(doc.file_path);
   db.prepare("DELETE FROM site_documents WHERE id = ?").run(doc.id);
   res.json({ ok: true });
 });
