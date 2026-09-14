@@ -43,9 +43,15 @@ sitesRouter.get("/", requireAuth, (req, res) => {
   res.json(scopeSitesForUser(req.user));
 });
 
+// null/omitted = use the scheduler's default hour; anything else must be a real hour.
+function isValidSendHour(value) {
+  return value == null || (Number.isInteger(value) && value >= 0 && value <= 23);
+}
+
 sitesRouter.post("/", requireAuth, requireRole("admin", "manager"), (req, res) => {
-  const { name, client_id, department_id, address, checklist_template_id, latitude, longitude, gps_radius_meters, room_count, report_recipients } = req.body;
+  const { name, client_id, department_id, address, checklist_template_id, latitude, longitude, gps_radius_meters, room_count, report_recipients, report_send_hour } = req.body;
   if (!name || !client_id) return res.status(400).json({ error: "name and client_id are required" });
+  if (!isValidSendHour(report_send_hour)) return res.status(400).json({ error: "report_send_hour må være et heltall 0–23" });
 
   const client = db.prepare("SELECT company_id FROM clients WHERE id = ?").get(client_id);
   if (!client || client.company_id !== req.user.company_id) {
@@ -67,19 +73,23 @@ sitesRouter.post("/", requireAuth, requireRole("admin", "manager"), (req, res) =
   const qr_token = newQrToken();
   const info = db
     .prepare(
-      `INSERT INTO sites (name, client_id, department_id, company_id, address, checklist_template_id, qr_token, latitude, longitude, gps_radius_meters, room_count, report_recipients)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO sites (name, client_id, department_id, company_id, address, checklist_template_id, qr_token, latitude, longitude, gps_radius_meters, room_count, report_recipients, report_send_hour)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
-    .run(name, client_id, department_id || null, req.user.company_id, address || null, checklist_template_id || null, qr_token, latitude || null, longitude || null, gps_radius_meters || 150, room_count || 0, report_recipients || null);
+    .run(name, client_id, department_id || null, req.user.company_id, address || null, checklist_template_id || null, qr_token, latitude || null, longitude || null, gps_radius_meters || 150, room_count || 0, report_recipients || null, report_send_hour ?? null);
 
   res.status(201).json({ id: info.lastInsertRowid, qr_token });
 });
 
-const SITE_PATCH_FIELDS = ["name", "client_id", "department_id", "address", "checklist_template_id", "latitude", "longitude", "gps_radius_meters", "room_count", "report_recipients"];
+const SITE_PATCH_FIELDS = ["name", "client_id", "department_id", "address", "checklist_template_id", "latitude", "longitude", "gps_radius_meters", "room_count", "report_recipients", "report_send_hour"];
 
 sitesRouter.patch("/:id", requireAuth, requireRole("admin", "manager"), (req, res) => {
   const { site, status, error } = getSiteScoped(req.params.id, req.user);
   if (error) return res.status(status).json({ error });
+
+  if ("report_send_hour" in req.body && !isValidSendHour(req.body.report_send_hour)) {
+    return res.status(400).json({ error: "report_send_hour må være et heltall 0–23" });
+  }
 
   const fields = SITE_PATCH_FIELDS.filter((f) => f in req.body);
   if (fields.length === 0) return res.status(400).json({ error: "No valid fields to update" });

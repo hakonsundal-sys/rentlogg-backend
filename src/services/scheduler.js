@@ -1,12 +1,15 @@
 import { yesterdayInOslo } from "./schedule.js";
 import { sendDailyReports } from "./dailyReportJob.js";
 
-const SEND_HOUR = 7; // 07:00 Europe/Oslo
+// 07:00 Europe/Oslo is the default for any site that hasn't set its own report_send_hour (e.g.
+// a location whose report should land after its own opening routine instead) — see sites.js's
+// report_send_hour field, editable alongside a site's report recipients.
 
-// No cron library needed for a single daily trigger — a 60s interval comparing the current
-// Oslo wall-clock time is simpler and avoids a new dependency. lastRunDate guards against firing
-// twice if the interval happens to land on :00 more than once (clock jitter).
-let lastRunDate = null;
+// No cron library needed — a 60s interval comparing the current Oslo wall-clock time is simpler
+// and avoids a new dependency. Runs the check every hour (not just at the 07:00 default) so a
+// site with a custom hour actually gets picked up at its own time; lastRunKey guards against
+// firing the same hour twice if the interval happens to land on :00 more than once (clock jitter).
+let lastRunKey = null;
 
 export function startDailyReportScheduler() {
   setInterval(async () => {
@@ -19,13 +22,16 @@ export function startDailyReportScheduler() {
     const hour = Number(parts.find((p) => p.type === "hour").value);
     const minute = Number(parts.find((p) => p.type === "minute").value);
     const today = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Oslo" }).format(new Date());
+    const runKey = `${today}-${hour}`;
 
-    if (hour === SEND_HOUR && minute === 0 && lastRunDate !== today) {
-      lastRunDate = today;
-      const results = await sendDailyReports(yesterdayInOslo());
-      console.log(
-        `Daglig rapport-utsending: ${results.sent} sendt, ${results.skipped} hoppet over, ${results.failed} feilet`
-      );
+    if (minute === 0 && lastRunKey !== runKey) {
+      lastRunKey = runKey;
+      const results = await sendDailyReports(yesterdayInOslo(), undefined, undefined, undefined, hour);
+      if (results.sent || results.failed) {
+        console.log(
+          `Daglig rapport-utsending (kl ${String(hour).padStart(2, "0")}:00): ${results.sent} sendt, ${results.skipped} hoppet over, ${results.failed} feilet`
+        );
+      }
     }
   }, 60_000);
 }

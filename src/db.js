@@ -83,6 +83,9 @@ ensureColumn("room_runs", "edited_by_initials", "edited_by_initials TEXT");
 ensureColumn("checklist_runs", "edited_at", "edited_at TEXT");
 ensureColumn("checklist_runs", "edited_by_initials", "edited_by_initials TEXT");
 ensureColumn("sites", "report_recipients", "report_recipients TEXT");
+// Null = use the scheduler's default (07:00 Europe/Oslo) — only sites that need something else
+// (e.g. a customer whose report should land after their own morning routine) set this.
+ensureColumn("sites", "report_send_hour", "report_send_hour INTEGER");
 ensureColumn("users", "company_id", "company_id INTEGER REFERENCES companies(id)");
 ensureColumn("clients", "company_id", "company_id INTEGER REFERENCES companies(id)");
 ensureColumn("sites", "company_id", "company_id INTEGER REFERENCES companies(id)");

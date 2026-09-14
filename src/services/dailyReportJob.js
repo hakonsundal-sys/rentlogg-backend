@@ -18,7 +18,10 @@ import { sendEmail } from "./mailer.js";
 // filtered against the site's actual report_recipients below rather than trusted as-is, so a
 // tampered request body can never redirect the report to an address that wasn't already
 // configured for that site.
-export async function sendDailyReports(dateStr, siteId, companyId, recipientsOverride) {
+// sendHour is the scheduler's own hourly filter (see scheduler.js) — every other caller (manual
+// "Send nå", a targeted resend) always wants its target site(s) regardless of their configured
+// hour, so this only applies to the system-wide (no siteId, no companyId) branch.
+export async function sendDailyReports(dateStr, siteId, companyId, recipientsOverride, sendHour) {
   let sites;
   if (siteId) {
     const site = db.prepare("SELECT * FROM sites WHERE id = ?").get(siteId);
@@ -29,6 +32,9 @@ export async function sendDailyReports(dateStr, siteId, companyId, recipientsOve
       .all(companyId);
   } else {
     sites = db.prepare("SELECT * FROM sites WHERE report_recipients IS NOT NULL AND TRIM(report_recipients) != ''").all();
+    if (sendHour !== undefined) {
+      sites = sites.filter((s) => (s.report_send_hour ?? 7) === sendHour);
+    }
   }
 
   const results = { sent: 0, skipped: 0, failed: 0 };
