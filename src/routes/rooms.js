@@ -6,7 +6,7 @@ import { PDFParse } from "pdf-parse";
 import { db } from "../db.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 import { todayInOslo } from "../services/schedule.js";
-import { getRoomsForSite, findOrCreateTodayRoomRun, findRoomRunForDate, getMonthlyItemsForSite, getRoomGridForSiteMonth } from "../services/rooms.js";
+import { getRoomsForSite, findOrCreateTodayRoomRun, findOrCreateRoomRunForDate, findRoomRunForDate, getMonthlyItemsForSite, getRoomGridForSiteMonth } from "../services/rooms.js";
 import { safeOriginalName, normalizeImageOrientation, imageFileFilter, removeUploadedFile, UploadRejectedError } from "../utils/uploads.js";
 
 export const siteRoomsRouter = Router({ mergeParams: true });
@@ -582,6 +582,24 @@ roomsRouter.post("/:id/checkin", requireAuth, requireRole("cleaner"), (req, res)
     .all(run.id);
   const photos = db.prepare("SELECT * FROM photos WHERE room_run_id = ?").all(run.id);
   res.json({ ...run, items, photos });
+});
+
+// Opens a room that shows "IKKE STARTET" on a day being edited retroactively (via the vaskeplan
+// grid's day-open button, see GET /checklists/site/:siteId/date/:date) — without this there was
+// no way to start a room on any day but today, so a genuinely missed room on an older day was a
+// permanent dead end with nothing to click. Not role-restricted to cleaner like the live /checkin
+// above: admin/manager can retroactively open a room here too, same as they can already edit one
+// that does have data.
+roomsRouter.post("/:id/checkin-date", requireAuth, requireRole("cleaner", "admin", "manager"), (req, res) => {
+  const { status, error } = getRoomScoped(req.params.id, req.user);
+  if (error) return res.status(status).json({ error });
+
+  const { date } = req.body;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date || "")) return res.status(400).json({ error: "date must be YYYY-MM-DD" });
+  if (date > todayInOslo()) return res.status(400).json({ error: "Kan ikke åpne en fremtidig dato." });
+
+  const run = findOrCreateRoomRunForDate(req.params.id, date, req.user.id);
+  res.status(201).json(run);
 });
 
 // Undo for a just-completed room — powers the cleaner-facing "Angre" affordance for both a

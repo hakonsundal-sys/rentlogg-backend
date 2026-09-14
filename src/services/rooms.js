@@ -157,25 +157,39 @@ export function getRoomGridForSiteMonth(siteId, year, month) {
 
 const roomItemsStmt = db.prepare("SELECT * FROM room_checklist_items WHERE room_id = ? ORDER BY sort_order");
 const insertRoomRunStmt = db.prepare("INSERT INTO room_runs (room_id, cleaner_id) VALUES (?, ?)");
+// Backfilling a past day needs an explicit started_at — the schema's own datetime('now') default
+// (used for today, below) would otherwise stamp the run with today's real timestamp regardless
+// of which day it's meant to represent, and every day-matching lookup (findRoomRunForDate,
+// toOsloDateStr) keys off started_at, not off any request the caller made. Noon UTC lands
+// mid-afternoon in Oslo year-round (CET/CEST is UTC+1/+2), so it can never roll into a different
+// Oslo calendar day than the one requested.
+const insertRoomRunForDateStmt = db.prepare("INSERT INTO room_runs (room_id, cleaner_id, started_at) VALUES (?, ?, ?)");
 const insertRoomRunItemStmt = db.prepare(
   "INSERT INTO room_run_items (room_run_id, room_checklist_item_id, label, sort_order) VALUES (?, ?, ?, ?)"
 );
 const roomRunByIdStmt = db.prepare("SELECT * FROM room_runs WHERE id = ?");
 
-// Shared by the single-room check-in route and the bulk complete-all-due route. Reuses
-// today's run if one already exists (completed or not — an already-completed run is returned
-// as-is, never duplicated); otherwise creates one and snapshots the room's current task list —
-// filtered to just today's due items, so a monthly task in an otherwise-daily room only shows
-// up on its own day instead of nagging the cleaner about it every visit.
-export function findOrCreateTodayRoomRun(roomId, cleanerId) {
-  const today = todayInOslo();
-  const existing = findRoomRunForDate(roomId, today);
+// Shared by the single-room check-in route, the bulk complete-all-due route, and retroactively
+// opening a not-yet-started room from a past day (see POST /rooms/:id/checkin-date) — reuses
+// that day's run if one already exists (completed or not — an already-completed run is returned
+// as-is, never duplicated); otherwise creates one and snapshots the room's task list as of that
+// day — filtered to just that day's due items, so a monthly task in an otherwise-daily room only
+// shows up on its own day instead of nagging the cleaner about it every visit.
+export function findOrCreateRoomRunForDate(roomId, dateStr, cleanerId) {
+  const existing = findRoomRunForDate(roomId, dateStr);
   if (existing) return existing;
 
-  const info = insertRoomRunStmt.run(roomId, cleanerId || null);
-  const items = roomItemsStmt.all(roomId).filter((item) => isItemDueOn(item, today));
+  const info =
+    dateStr === todayInOslo()
+      ? insertRoomRunStmt.run(roomId, cleanerId || null)
+      : insertRoomRunForDateStmt.run(roomId, cleanerId || null, `${dateStr} 12:00:00`);
+  const items = roomItemsStmt.all(roomId).filter((item) => isItemDueOn(item, dateStr));
   items.forEach((item, i) => insertRoomRunItemStmt.run(info.lastInsertRowid, item.id, item.label, i));
   return roomRunByIdStmt.get(info.lastInsertRowid);
+}
+
+export function findOrCreateTodayRoomRun(roomId, cleanerId) {
+  return findOrCreateRoomRunForDate(roomId, todayInOslo(), cleanerId);
 }
 
 const monthlyChecklistItemsForSiteStmt = db.prepare(
