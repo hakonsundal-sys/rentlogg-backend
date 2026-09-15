@@ -34,15 +34,24 @@ function escapeHtml(value) {
 // Room-enabled sites report per room (their real structure); flat/legacy sites fall back to a
 // single "Sjekkliste" section built from the run's own items/photos — same fallback shape the
 // rest of the app already uses wherever rooms vs. flat is a branch point.
+// Only label rooms by who's responsible when the site actually mixes both (e.g. one zone OKV
+// cleans, one the customer cleans themselves) — otherwise every title would carry a pointless
+// "(Renholder)" suffix. Mixed sites can also have two rooms sharing a name across the two zones
+// (each side's own "Kontor", say), so the suffix doubles as disambiguation — used for both the
+// per-room sections below and any deviation reported against one of these rooms.
+function isMixedResponsibility(rooms) {
+  return rooms?.length > 0 && rooms.some((r) => r.responsible === "customer") && rooms.some((r) => r.responsible !== "customer");
+}
+
+function responsibleSuffix(responsible) {
+  return ` (${responsible === "customer" ? "Kunde" : "Renholder"})`;
+}
+
 function buildSections(detail) {
   if (detail.rooms?.length > 0) {
-    // Only label rooms by who's responsible when the site actually mixes both (e.g. one zone
-    // OKV cleans, one the customer cleans themselves) — otherwise every title would carry a
-    // pointless "(Renholder)" suffix. Mixed sites can also have two rooms sharing a name across
-    // the two zones (each side's own "Kontor", say), so the suffix doubles as disambiguation.
-    const isMixed = detail.rooms.some((r) => r.responsible === "customer") && detail.rooms.some((r) => r.responsible !== "customer");
+    const isMixed = isMixedResponsibility(detail.rooms);
     return detail.rooms.map((room) => ({
-      title: isMixed ? `${room.name} (${room.responsible === "customer" ? "Kunde" : "Renholder"})` : room.name,
+      title: isMixed ? `${room.name}${responsibleSuffix(room.responsible)}` : room.name,
       items: room.items, photos: room.photos, note: room.note,
     }));
   }
@@ -63,6 +72,7 @@ function formatStatus(detail) {
 // into one <html> shell instead of nesting complete documents inside each other.
 export function buildReportBody(detail) {
   const sections = buildSections(detail);
+  const isMixed = isMixedResponsibility(detail.rooms);
 
   const sectionsHtml = sections
     .map((section, sIdx) => {
@@ -100,7 +110,7 @@ export function buildReportBody(detail) {
       ${detail.deviations
         .map((d) => `
           <div style="padding:12px 14px;border:1px solid #f1b0b7;border-top:none;font-size:13px;">
-            <div style="font-weight:600;">${d.room_name ? escapeHtml(d.room_name) + (d.room_task_label ? " · " + escapeHtml(d.room_task_label) : "") : "Generelt"}
+            <div style="font-weight:600;">${d.room_name ? escapeHtml(d.room_name + (isMixed ? responsibleSuffix(d.room_responsible) : "")) + (d.room_task_label ? " · " + escapeHtml(d.room_task_label) : "") : "Generelt"}
               <span style="font-weight:400;color:#777;"> — ${PRIORITY_LABELS[d.priority] || d.priority}</span>
             </div>
             <div style="margin-top:4px;">${escapeHtml(d.description)}</div>
@@ -190,6 +200,7 @@ function drawPhotoGrid(doc, photos, uploadsDir, boxSize) {
 
 export function buildReportPdf(detail, res) {
   const sections = buildSections(detail);
+  const isMixed = isMixedResponsibility(detail.rooms);
   const uploadsDir = process.env.UPLOADS_DIR || "uploads";
 
   const doc = new PDFDocument({ margin: 50 });
@@ -237,7 +248,7 @@ export function buildReportPdf(detail, res) {
     doc.moveDown(0.3);
     detail.deviations.forEach((d) => {
       if (doc.y > doc.page.height - 100) doc.addPage();
-      const where = d.room_name ? `${d.room_name}${d.room_task_label ? " · " + d.room_task_label : ""}` : "Generelt";
+      const where = d.room_name ? `${d.room_name}${isMixed ? responsibleSuffix(d.room_responsible) : ""}${d.room_task_label ? " · " + d.room_task_label : ""}` : "Generelt";
       doc.fontSize(10).fillColor("black").text(`${where} — ${PRIORITY_LABELS[d.priority] || d.priority}`);
       doc.fontSize(10).fillColor("black").text(d.description);
       if (d.photos?.length) {

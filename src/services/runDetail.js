@@ -58,7 +58,7 @@ export function getRunDetail(runId) {
 
   const deviationRows = db
     .prepare(
-      `SELECT d.*, rm.name AS room_name FROM deviations d
+      `SELECT d.*, rm.name AS room_name, rm.responsible AS room_responsible FROM deviations d
        LEFT JOIN rooms rm ON rm.id = d.room_id
        WHERE d.run_id = ? ORDER BY d.created_at DESC`
     )

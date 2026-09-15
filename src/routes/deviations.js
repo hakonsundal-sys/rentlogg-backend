@@ -53,7 +53,7 @@ deviationsRouter.get("/", requireAuth, (req, res) => {
   if (req.user.role === "customer") {
     const rows = db
       .prepare(
-        `SELECT d.*, r.started_at AS run_started_at, rm.name AS room_name FROM deviations d
+        `SELECT d.*, r.started_at AS run_started_at, rm.name AS room_name, rm.responsible AS room_responsible FROM deviations d
          JOIN sites s ON s.id = d.site_id
          LEFT JOIN checklist_runs r ON r.id = d.run_id
          LEFT JOIN rooms rm ON rm.id = d.room_id
@@ -70,7 +70,7 @@ deviationsRouter.get("/", requireAuth, (req, res) => {
     // today needs to see it, not just whoever happened to create that day's run.
     const rows = db
       .prepare(
-        `SELECT d.*, r.started_at AS run_started_at, rm.name AS room_name FROM deviations d
+        `SELECT d.*, r.started_at AS run_started_at, rm.name AS room_name, rm.responsible AS room_responsible FROM deviations d
          JOIN sites s ON s.id = d.site_id
          LEFT JOIN checklist_runs r ON r.id = d.run_id
          LEFT JOIN rooms rm ON rm.id = d.room_id
@@ -82,7 +82,7 @@ deviationsRouter.get("/", requireAuth, (req, res) => {
   }
   const rows = db
     .prepare(
-      `SELECT d.*, r.started_at AS run_started_at, rm.name AS room_name FROM deviations d
+      `SELECT d.*, r.started_at AS run_started_at, rm.name AS room_name, rm.responsible AS room_responsible FROM deviations d
        JOIN sites s ON s.id = d.site_id
        LEFT JOIN checklist_runs r ON r.id = d.run_id
        LEFT JOIN rooms rm ON rm.id = d.room_id
