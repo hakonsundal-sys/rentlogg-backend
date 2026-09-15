@@ -294,7 +294,7 @@ siteRoomsRouter.get("/monthly-grid", requireAuth, requireRole("admin", "manager"
   res.json(getRoomGridForSiteMonth(req.params.siteId, year, mon));
 });
 
-siteRoomsRouter.post("/complete-all-due", requireAuth, requireRole("cleaner"), (req, res) => {
+siteRoomsRouter.post("/complete-all-due", requireAuth, requireRole("cleaner", "admin", "manager", "customer"), (req, res) => {
   const { status: scopeStatus, error: scopeError } = getSiteScopedForRooms(req.params.siteId, req.user);
   if (scopeError) return res.status(scopeStatus).json({ error: scopeError });
 
@@ -302,12 +302,15 @@ siteRoomsRouter.post("/complete-all-due", requireAuth, requireRole("cleaner"), (
   if (!initials) return res.status(400).json({ error: "Navn er påkrevd for å fullføre oppgavene." });
 
   const today = todayInOslo();
-  // Excludes responsible='customer' rooms — a cleaner's "complete all due" is scoped to the
-  // same rooms their own room list shows (see GET "/" above), never rooms the customer fills
-  // out themselves. Without this, a cleaner's bulk-complete silently completed the customer's
-  // own rooms too (using the cleaner's initials), whenever one of those happened to be due the
-  // same day — caught 2026-09-15 after it had already happened once in production.
-  const dueIncomplete = getRoomsForSite(req.params.siteId, today).filter((r) => r.dueToday && r.status !== "completed" && r.responsible !== "customer");
+  // A customer's bulk-complete is scoped to only their own (responsible='customer') rooms;
+  // staff's is scoped to only the cleaning company's rooms — same split as GET "/" above.
+  // Without this, a cleaner's bulk-complete silently completed the customer's own rooms too
+  // (using the cleaner's initials), whenever one of those happened to be due the same day —
+  // caught 2026-09-15 after it had already happened once in production.
+  const isCustomer = req.user.role === "customer";
+  const dueIncomplete = getRoomsForSite(req.params.siteId, today).filter(
+    (r) => r.dueToday && r.status !== "completed" && (isCustomer ? r.responsible === "customer" : r.responsible !== "customer")
+  );
 
   const completeAll = db.transaction((rooms) => {
     let completedCount = 0;

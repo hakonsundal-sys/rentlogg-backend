@@ -1,6 +1,6 @@
 import { db } from "../db.js";
 import { toOsloDateStr } from "./schedule.js";
-import { findRoomRunForDate } from "./rooms.js";
+import { findRoomRunForDate, isRoomDueOn } from "./rooms.js";
 
 const roomRunItemsStmt = db.prepare(
   `SELECT rri.*, rci.monthly_weekday IS NOT NULL AS monthly
@@ -8,7 +8,9 @@ const roomRunItemsStmt = db.prepare(
    WHERE rri.room_run_id = ? ORDER BY rri.sort_order`
 );
 const roomRunPhotosStmt = db.prepare("SELECT * FROM photos WHERE room_run_id = ?");
-const siteRoomsStmt = db.prepare("SELECT id, name, responsible FROM rooms WHERE site_id = ? ORDER BY sort_order, id");
+// SELECT * (not just id/name/responsible) — isRoomDueOn needs interval_days/monthly_weekday/
+// monthly_occurrence too, to compute `due` per room below.
+const siteRoomsStmt = db.prepare("SELECT * FROM rooms WHERE site_id = ? ORDER BY sort_order, id");
 
 // Room-enabled sites don't populate checklist_run_items (their tasks live per-room). Each room's
 // status/items for a given Oslo calendar day is independent of whether a flat checklist_runs
@@ -23,6 +25,7 @@ function buildRoomsForDate(siteId, dateStr) {
       id: room.id,
       name: room.name,
       responsible: room.responsible,
+      due: isRoomDueOn(room, dateStr),
       roomRunId: roomRun?.id || null,
       completed_at: roomRun?.completed_at || null,
       signed_initials: roomRun?.signed_initials || null,
