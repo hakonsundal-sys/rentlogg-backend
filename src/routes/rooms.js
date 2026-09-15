@@ -360,7 +360,26 @@ siteRoomsRouter.post("/import-pdf", requireAuth, requireRole("admin", "manager")
                   "specific days — a weekday grid's marked columns, text naming weekdays ('mandag-fredag', " +
                   "'tirsdager og fredager'), or a day abbreviation next to a task. If it's a grid, read it " +
                   "carefully: match each mark to its actual column header for that row, don't infer weekdays " +
-                  "from the mark count alone. Only use interval_days when the document gives nothing but a " +
+                  "from the mark count alone.\n\n" +
+                  "A very common header for the weekday columns is the single-letter row 'M T O T F L S' " +
+                  "(Mandag, Tirsdag, Onsdag, Torsdag, Fredag, Lørdag, Søndag) — note the letter T appears " +
+                  "TWICE, for both Tirsdag and Torsdag, so the letter alone can't tell those two apart. Never " +
+                  "match by letter for this or any similar abbreviated header; instead count column POSITION " +
+                  "from the leftmost day-column in this fixed order: 1st=mandag, 2nd=tirsdag, 3rd=onsdag, " +
+                  "4th=torsdag, 5th=fredag, 6th=lørdag, 7th=søndag (fewer than 7 columns usually means " +
+                  "weekends are simply omitted, so still count from the left in that same order). Count " +
+                  "carefully and re-check each mark's column before answering, especially in a dense table " +
+                  "with many rows and narrow columns — a mark read one column off from its true position is " +
+                  "a wrong weekday (e.g. Fredag misread as Onsdag, Torsdag, or Lørdag), and that's a real " +
+                  "operational error since it can land a task on a day the site isn't even staffed.\n\n" +
+                  "A row with a mark in only one or two columns is the easiest to misread by one column, " +
+                  "because there's no redundant pattern to sanity-check it against. Calibrate first: find a " +
+                  "nearby row in the same table with an unambiguous, easy-to-read pattern — e.g. a '5 / u' " +
+                  "row, which should have exactly 5 marks in the first 5 day-columns (mandag-fredag) — and " +
+                  "use its mark positions as your reference for exactly where each column sits before you " +
+                  "read a sparser row's single mark against that same alignment. Every row in one table shares " +
+                  "the same column positions, so this cross-check is reliable and worth doing explicitly.\n\n" +
+                  "Only use interval_days when the document gives nothing but a " +
                   "bare frequency with no day information anywhere (e.g. '1 gang per uke' with no grid and no " +
                   "named days) — never default to interval_days just because it's simpler to compute. A " +
                   "rolling interval drifts onto a different weekday every cycle, including weekends with no " +
