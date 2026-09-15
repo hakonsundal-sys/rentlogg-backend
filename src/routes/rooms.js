@@ -93,8 +93,10 @@ const SUBMIT_ROOMS_TOOL = {
                   type: "array",
                   items: { type: "integer", minimum: 0, maximum: 6 },
                   description:
-                    "0=søndag..6=lørdag. Only set when the task repeats weekly on specific named weekdays, e.g. " +
-                    "'mandag-fredag' -> [1,2,3,4,5], 'mandag og fredag' -> [1,5]. Leave unset otherwise.",
+                    "0=søndag..6=lørdag. PREFER THIS over interval_days whenever the document gives any day " +
+                    "information at all — named weekdays ('mandag-fredag' -> [1,2,3,4,5], 'mandag og fredag' " +
+                    "-> [1,5]), or a weekday-grid table's marked columns for that row (map each mark to its " +
+                    "actual column header). Leave unset only when the document truly gives no day information.",
                 },
                 monthly: {
                   type: "object",
@@ -113,10 +115,14 @@ const SUBMIT_ROOMS_TOOL = {
                 interval_days: {
                   type: "integer",
                   description:
-                    "Use when a frequency is given without naming specific weekdays or a monthly weekday " +
-                    "occurrence. Convert to an approximate day count: '1 gang per uke' -> 7, '2 ganger per uke' " +
-                    "-> 4, '3 ganger per uke' -> 2, '1 gang per måned' -> 30, '2 ganger per måned' -> 15, " +
-                    "'1 gang per år' -> 365, '2 ganger per år' -> 180, 'ved behov' -> omit entirely (no reliable " +
+                    "LAST RESORT — only when the document gives a bare frequency with no day information " +
+                    "anywhere for that room (no named weekdays, no grid column marks). A rolling interval " +
+                    "drifts onto a different weekday each cycle — including weekends with no production at " +
+                    "many sites — so weekdays (or monthly) is correct whenever any day information exists at " +
+                    "all, even a single marked column in an otherwise-empty grid row. When this does apply, " +
+                    "convert to an approximate day count: '1 gang per uke' -> 7, '2 ganger per uke' -> 4, " +
+                    "'3 ganger per uke' -> 2, '1 gang per måned' -> 30, '2 ganger per måned' -> 15, '1 gang " +
+                    "per år' -> 365, '2 ganger per år' -> 180, 'ved behov' -> omit entirely (no reliable " +
                     "frequency).",
                 },
               },
@@ -330,14 +336,38 @@ siteRoomsRouter.post("/import-pdf", requireAuth, requireRole("admin", "manager")
         messages: [
           {
             role: "user",
-            content:
-              "This is the text of a cleaning plan document for a commercial site (may be in Norwegian). " +
-              "Extract every room or area mentioned and the cleaning tasks for each. If a room has no " +
-              "explicit task list, use a single sensible general task. For each room, also infer its cleaning " +
-              "schedule from the frequency wording in its task text (e.g. '5 ganger per uke (mandag-fredag)', " +
-              "'første mandag i måneden', '1 gang per måned') per the schedule field's rules. Call submit_rooms " +
-              "with the result.\n\n" +
-              text,
+            content: [
+              // The raw PDF, not the pdf-parse'd text above (that's only used for the cheap
+              // pre-check that something readable exists) — a lot of real cleaning plans are a
+              // spreadsheet-style table with weekday columns and an X/checkmark per row, and
+              // pdf-parse's plain-text extraction flattens that grid, losing exactly which
+              // column (weekday) a mark belongs to. Sending the actual PDF lets the model read
+              // the table natively — column headers, row alignment, checkboxes — instead of
+              // guessing from a frequency number once that structure is already gone.
+              {
+                type: "document",
+                source: { type: "base64", media_type: "application/pdf", data: req.file.buffer.toString("base64") },
+              },
+              {
+                type: "text",
+                text:
+                  "This is a cleaning plan document for a commercial site (may be in Norwegian) — it may be a " +
+                  "plain list, or a spreadsheet-style table with a weekday grid (day-of-week column headers, " +
+                  "with an X or checkmark in some rows/columns showing which days that room or task applies). " +
+                  "Extract every room or area mentioned and the cleaning tasks for each. If a room has no " +
+                  "explicit task list, use a single sensible general task.\n\n" +
+                  "For each room, set the schedule's weekdays field whenever the document shows or names " +
+                  "specific days — a weekday grid's marked columns, text naming weekdays ('mandag-fredag', " +
+                  "'tirsdager og fredager'), or a day abbreviation next to a task. If it's a grid, read it " +
+                  "carefully: match each mark to its actual column header for that row, don't infer weekdays " +
+                  "from the mark count alone. Only use interval_days when the document gives nothing but a " +
+                  "bare frequency with no day information anywhere (e.g. '1 gang per uke' with no grid and no " +
+                  "named days) — never default to interval_days just because it's simpler to compute. A " +
+                  "rolling interval drifts onto a different weekday every cycle, including weekends with no " +
+                  "production at many sites; naming the actual weekdays keeps the task on a real working day " +
+                  "permanently. Call submit_rooms with the result.",
+              },
+            ],
           },
         ],
       });
