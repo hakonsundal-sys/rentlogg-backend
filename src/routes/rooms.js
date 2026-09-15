@@ -56,7 +56,7 @@ function getRoomScoped(roomId, user) {
 function getRoomRunScoped(roomRunId, user) {
   const roomRun = db
     .prepare(
-      `SELECT rr.*, s.company_id AS site_company_id, s.client_id AS site_client_id
+      `SELECT rr.*, r.responsible AS room_responsible, s.company_id AS site_company_id, s.client_id AS site_client_id
        FROM room_runs rr JOIN rooms r ON r.id = rr.room_id JOIN sites s ON s.id = r.site_id WHERE rr.id = ?`
     )
     .get(roomRunId);
@@ -64,6 +64,16 @@ function getRoomRunScoped(roomRunId, user) {
   if (user.role === "customer" && roomRun.site_client_id !== user.client_id) return { status: 403, error: "Not allowed" };
   if (user.role !== "customer" && roomRun.site_company_id !== user.company_id) return { status: 403, error: "Not allowed" };
   return { roomRun };
+}
+
+// A customer can only mutate (not just view) a room explicitly marked as their own
+// responsibility. Deliberately not baked into getRoomScoped/getRoomRunScoped themselves — some
+// of their other callers (e.g. GET /:id/items, used for the avvik room-picker) need a customer
+// to reach ANY room at their site regardless of who's responsible for cleaning it, only the
+// mutation routes below need this extra check.
+function requireCustomerOwnsRoom(user, responsible) {
+  if (user.role === "customer" && responsible !== "customer") return { status: 403, error: "Not allowed" };
+  return null;
 }
 
 const MAX_EXTRACTED_TEXT_CHARS = 15000;
@@ -190,20 +200,32 @@ siteRoomsRouter.get("/", requireAuth, (req, res) => {
   const { status, error } = getSiteScopedForRooms(req.params.siteId, req.user);
   if (error) return res.status(status).json({ error });
 
-  res.json(getRoomsForSite(req.params.siteId, todayInOslo()));
+  const rooms = getRoomsForSite(req.params.siteId, todayInOslo());
+  // A cleaner's live checklist only ever shows the cleaning company's own rooms — a
+  // customer-responsibility room (see rooms.responsible) is that client's own job, never
+  // something a cleaner should be prompted to do. Admin/manager (oversight) and customer
+  // (their own avvik room-picker, which reasonably covers any room at the site) still see
+  // everything, unfiltered.
+  const visible = req.user.role === "cleaner" ? rooms.filter((r) => r.responsible !== "customer") : rooms;
+  res.json(visible);
 });
+
+function isValidResponsible(value) {
+  return value == null || value === "company" || value === "customer";
+}
 
 siteRoomsRouter.post("/", requireAuth, requireRole("admin", "manager"), (req, res) => {
   const { status: scopeStatus, error: scopeError } = getSiteScopedForRooms(req.params.siteId, req.user);
   if (scopeError) return res.status(scopeStatus).json({ error: scopeError });
 
-  const { name, interval_days } = req.body;
+  const { name, interval_days, responsible } = req.body;
   if (!name) return res.status(400).json({ error: "name is required" });
+  if (!isValidResponsible(responsible)) return res.status(400).json({ error: "responsible must be 'company' or 'customer'" });
 
   const nextSort = db.prepare("SELECT COALESCE(MAX(sort_order), -1) + 1 AS n FROM rooms WHERE site_id = ?").get(req.params.siteId).n;
   const info = db
-    .prepare("INSERT INTO rooms (site_id, name, sort_order, interval_days) VALUES (?, ?, ?, ?)")
-    .run(req.params.siteId, name, nextSort, interval_days ?? null);
+    .prepare("INSERT INTO rooms (site_id, name, sort_order, interval_days, responsible) VALUES (?, ?, ?, ?, ?)")
+    .run(req.params.siteId, name, nextSort, interval_days ?? null, responsible || "company");
 
   res.status(201).json(db.prepare("SELECT * FROM rooms WHERE id = ?").get(info.lastInsertRowid));
 });
@@ -473,11 +495,15 @@ siteRoomsRouter.post("/import-confirm", requireAuth, requireRole("admin", "manag
 
 // --- Room-scoped: /rooms/:id ---
 
-const ROOM_PATCH_FIELDS = ["name", "interval_days", "monthly_weekday", "monthly_occurrence"];
+const ROOM_PATCH_FIELDS = ["name", "interval_days", "monthly_weekday", "monthly_occurrence", "responsible"];
 
 roomsRouter.patch("/:id", requireAuth, requireRole("admin", "manager"), (req, res) => {
   const { status: scopeStatus, error: scopeError } = getRoomScoped(req.params.id, req.user);
   if (scopeError) return res.status(scopeStatus).json({ error: scopeError });
+
+  if ("responsible" in req.body && !isValidResponsible(req.body.responsible)) {
+    return res.status(400).json({ error: "responsible must be 'company' or 'customer'" });
+  }
 
   const fields = ROOM_PATCH_FIELDS.filter((f) => f in req.body);
   if (fields.length === 0) return res.status(400).json({ error: "No valid fields to update" });
@@ -653,10 +679,13 @@ roomsRouter.post("/:id/checkin", requireAuth, requireRole("cleaner"), (req, res)
 // no way to start a room on any day but today, so a genuinely missed room on an older day was a
 // permanent dead end with nothing to click. Not role-restricted to cleaner like the live /checkin
 // above: admin/manager can retroactively open a room here too, same as they can already edit one
-// that does have data.
-roomsRouter.post("/:id/checkin-date", requireAuth, requireRole("cleaner", "admin", "manager"), (req, res) => {
-  const { status, error } = getRoomScoped(req.params.id, req.user);
+// that does have data — and so can a customer, but only for a room marked as their own
+// responsibility (see requireCustomerOwnsRoom).
+roomsRouter.post("/:id/checkin-date", requireAuth, requireRole("cleaner", "admin", "manager", "customer"), (req, res) => {
+  const { room, status, error } = getRoomScoped(req.params.id, req.user);
   if (error) return res.status(status).json({ error });
+  const ownError = requireCustomerOwnsRoom(req.user, room.responsible);
+  if (ownError) return res.status(ownError.status).json({ error: ownError.error });
 
   const { date } = req.body;
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date || "")) return res.status(400).json({ error: "date must be YYYY-MM-DD" });
@@ -698,9 +727,11 @@ function stampRoomRunEdit(runId, initials) {
   }
 }
 
-roomsRouter.patch("/runs/:runId/items/:itemId", requireAuth, requireRole("cleaner", "admin", "manager"), (req, res) => {
-  const { status, error } = getRoomRunScoped(req.params.runId, req.user);
+roomsRouter.patch("/runs/:runId/items/:itemId", requireAuth, requireRole("cleaner", "admin", "manager", "customer"), (req, res) => {
+  const { roomRun, status, error } = getRoomRunScoped(req.params.runId, req.user);
   if (error) return res.status(status).json({ error });
+  const ownError = requireCustomerOwnsRoom(req.user, roomRun.room_responsible);
+  if (ownError) return res.status(ownError.status).json({ error: ownError.error });
 
   const { done, initials } = req.body;
   const result = db.prepare("UPDATE room_run_items SET done = ? WHERE id = ? AND room_run_id = ?").run(done ? 1 : 0, req.params.itemId, req.params.runId);
@@ -711,9 +742,11 @@ roomsRouter.patch("/runs/:runId/items/:itemId", requireAuth, requireRole("cleane
 
 // A free-text note for the whole room's visit — same granularity as its photos (one shared
 // list for the room, not per checklist item).
-roomsRouter.patch("/runs/:runId/note", requireAuth, requireRole("cleaner", "admin", "manager"), (req, res) => {
-  const { status, error } = getRoomRunScoped(req.params.runId, req.user);
+roomsRouter.patch("/runs/:runId/note", requireAuth, requireRole("cleaner", "admin", "manager", "customer"), (req, res) => {
+  const { roomRun, status, error } = getRoomRunScoped(req.params.runId, req.user);
   if (error) return res.status(status).json({ error });
+  const ownError = requireCustomerOwnsRoom(req.user, roomRun.room_responsible);
+  if (ownError) return res.status(ownError.status).json({ error: ownError.error });
 
   db.prepare("UPDATE room_runs SET note = ? WHERE id = ?").run(req.body?.note || null, req.params.runId);
   stampRoomRunEdit(req.params.runId, req.body?.initials);
@@ -722,18 +755,22 @@ roomsRouter.patch("/runs/:runId/note", requireAuth, requireRole("cleaner", "admi
 
 // Lets a cleaner clear a whole room's remaining tasks in one tap — for a routine room they
 // already know is fine, ticking every item individually is pure friction.
-roomsRouter.post("/runs/:runId/items/complete-all", requireAuth, requireRole("cleaner", "admin", "manager"), (req, res) => {
-  const { status, error } = getRoomRunScoped(req.params.runId, req.user);
+roomsRouter.post("/runs/:runId/items/complete-all", requireAuth, requireRole("cleaner", "admin", "manager", "customer"), (req, res) => {
+  const { roomRun, status, error } = getRoomRunScoped(req.params.runId, req.user);
   if (error) return res.status(status).json({ error });
+  const ownError = requireCustomerOwnsRoom(req.user, roomRun.room_responsible);
+  if (ownError) return res.status(ownError.status).json({ error: ownError.error });
 
   db.prepare("UPDATE room_run_items SET done = 1 WHERE room_run_id = ?").run(req.params.runId);
   stampRoomRunEdit(req.params.runId, req.body?.initials);
   res.json({ ok: true });
 });
 
-roomsRouter.post("/runs/:runId/complete", requireAuth, requireRole("cleaner", "admin", "manager"), (req, res) => {
+roomsRouter.post("/runs/:runId/complete", requireAuth, requireRole("cleaner", "admin", "manager", "customer"), (req, res) => {
   const { roomRun, status, error } = getRoomRunScoped(req.params.runId, req.user);
   if (error) return res.status(status).json({ error });
+  const ownError = requireCustomerOwnsRoom(req.user, roomRun.room_responsible);
+  if (ownError) return res.status(ownError.status).json({ error: ownError.error });
 
   const initials = (req.body?.initials || "").trim();
   if (!initials) return res.status(400).json({ error: "Navn er påkrevd for å fullføre rommet." });
@@ -742,9 +779,11 @@ roomsRouter.post("/runs/:runId/complete", requireAuth, requireRole("cleaner", "a
   res.json({ ok: true });
 });
 
-roomsRouter.post("/runs/:runId/photos", requireAuth, requireRole("cleaner", "admin", "manager"), upload.single("photo"), async (req, res) => {
-  const { status, error } = getRoomRunScoped(req.params.runId, req.user);
+roomsRouter.post("/runs/:runId/photos", requireAuth, requireRole("cleaner", "admin", "manager", "customer"), upload.single("photo"), async (req, res) => {
+  const { roomRun, status, error } = getRoomRunScoped(req.params.runId, req.user);
   if (error) return res.status(status).json({ error });
+  const ownError = requireCustomerOwnsRoom(req.user, roomRun.room_responsible);
+  if (ownError) return res.status(ownError.status).json({ error: ownError.error });
   if (!req.file) return res.status(400).json({ error: "No file uploaded (field name must be 'photo')" });
   await normalizeImageOrientation(path.join(process.env.UPLOADS_DIR || "uploads", req.file.filename));
   const kind = req.body.kind || "general";
@@ -755,9 +794,11 @@ roomsRouter.post("/runs/:runId/photos", requireAuth, requireRole("cleaner", "adm
   res.status(201).json({ id: info.lastInsertRowid, file_path: req.file.filename });
 });
 
-roomsRouter.delete("/runs/:runId/photos/:photoId", requireAuth, requireRole("cleaner", "admin", "manager"), (req, res) => {
-  const { status: scopeStatus, error: scopeError } = getRoomRunScoped(req.params.runId, req.user);
+roomsRouter.delete("/runs/:runId/photos/:photoId", requireAuth, requireRole("cleaner", "admin", "manager", "customer"), (req, res) => {
+  const { roomRun, status: scopeStatus, error: scopeError } = getRoomRunScoped(req.params.runId, req.user);
   if (scopeError) return res.status(scopeStatus).json({ error: scopeError });
+  const ownError = requireCustomerOwnsRoom(req.user, roomRun.room_responsible);
+  if (ownError) return res.status(ownError.status).json({ error: ownError.error });
 
   const photo = db.prepare("SELECT * FROM photos WHERE id = ? AND room_run_id = ?").get(req.params.photoId, req.params.runId);
   if (!photo) return res.status(404).json({ error: "Not found" });

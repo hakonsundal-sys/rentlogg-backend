@@ -67,6 +67,12 @@ ensureColumn("deviations", "title", "title TEXT");
 ensureColumn("photos", "room_run_id", "room_run_id INTEGER REFERENCES room_runs(id)");
 ensureColumn("rooms", "monthly_weekday", "monthly_weekday INTEGER");
 ensureColumn("rooms", "monthly_occurrence", "monthly_occurrence INTEGER");
+// Which party is responsible for this room — 'company' (the cleaning company, e.g. OKV) or
+// 'customer' (that site's own client, who fills out this room's checklist themselves). A site
+// can mix both: a cleaner's live "Dagens plan" only ever shows 'company' rooms, and a customer
+// can only fill out (not just view) rooms marked 'customer' for their own client. No CHECK
+// constraint (matches every other ensureColumn'd field in this file) — validated in the route.
+ensureColumn("rooms", "responsible", "responsible TEXT DEFAULT 'company'");
 ensureColumn("checklist_runs", "signed_initials", "signed_initials TEXT");
 ensureColumn("room_runs", "signed_initials", "signed_initials TEXT");
 ensureColumn("deviations", "room_id", "room_id INTEGER REFERENCES rooms(id)");

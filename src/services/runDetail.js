@@ -8,7 +8,7 @@ const roomRunItemsStmt = db.prepare(
    WHERE rri.room_run_id = ? ORDER BY rri.sort_order`
 );
 const roomRunPhotosStmt = db.prepare("SELECT * FROM photos WHERE room_run_id = ?");
-const siteRoomsStmt = db.prepare("SELECT id, name FROM rooms WHERE site_id = ? ORDER BY sort_order, id");
+const siteRoomsStmt = db.prepare("SELECT id, name, responsible FROM rooms WHERE site_id = ? ORDER BY sort_order, id");
 
 // Room-enabled sites don't populate checklist_run_items (their tasks live per-room). Each room's
 // status/items for a given Oslo calendar day is independent of whether a flat checklist_runs
@@ -22,6 +22,7 @@ function buildRoomsForDate(siteId, dateStr) {
     return {
       id: room.id,
       name: room.name,
+      responsible: room.responsible,
       roomRunId: roomRun?.id || null,
       completed_at: roomRun?.completed_at || null,
       signed_initials: roomRun?.signed_initials || null,
