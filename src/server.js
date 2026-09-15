@@ -46,6 +46,20 @@ app.use("/uploads", uploadsRouter);
 
 app.get("/health", (req, res) => res.json({ ok: true }));
 
+// Every site's printed QR sticker encodes {PUBLIC_BASE_URL}/checkin/:qrToken — this backend's
+// own domain — because that's the only URL the app can compute at print time. Scanned through
+// the in-app scanner that's just parsed as text and never actually requested, but a phone's
+// native camera app treats it as a real link and opens it directly: previously that 404'd here,
+// since nothing served this path. This makes that same, already-printed link redirect straight
+// into the app's own check-in flow instead, with no need to reprint or regenerate any QR code —
+// old and new codes both point at this exact path already. No auth/DB lookup here on purpose:
+// the token is opaque and the real ownership/company check happens at the actual check-in call
+// this lands on, so this route is a pure, stateless redirect.
+app.get("/checkin/:qrToken", (req, res) => {
+  const frontendUrl = process.env.PUBLIC_FRONTEND_URL || "https://rentlogg.no";
+  res.redirect(302, `${frontendUrl}/?checkin=${encodeURIComponent(req.params.qrToken)}`);
+});
+
 app.use("/auth", authRouter);
 app.use("/clients", clientsRouter);
 app.use("/sites", sitesRouter);
