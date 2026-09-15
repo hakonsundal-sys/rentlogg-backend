@@ -18,9 +18,15 @@ const docUpload = multer({
   limits: { fileSize: 20 * 1024 * 1024 },
 });
 
+const siteHasCustomerRoomsStmt = db.prepare("SELECT 1 FROM rooms WHERE site_id = ? AND responsible = 'customer' LIMIT 1");
+
 function scopeSitesForUser(user) {
   if (user.role === "customer") {
-    return db.prepare("SELECT * FROM sites WHERE client_id = ? ORDER BY name").all(user.client_id);
+    const sites = db.prepare("SELECT * FROM sites WHERE client_id = ? ORDER BY name").all(user.client_id);
+    // Lets the customer portal show a direct "fill out today's checklist" shortcut only on sites
+    // where that's actually possible — most customer sites have no rooms marked responsible, and
+    // showing the shortcut there would just open an empty, nothing-to-do checklist.
+    return sites.map((site) => ({ ...site, has_customer_rooms: !!siteHasCustomerRoomsStmt.get(site.id) }));
   }
   // company_id is null for a role with no company (only super_admin) — WHERE company_id = ?
   // against null naturally matches nothing, so that role sees no operational sites by default
