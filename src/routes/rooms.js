@@ -371,11 +371,6 @@ siteRoomsRouter.post("/import-pdf", requireAuth, requireRole("admin", "manager")
                   "document, even where a later page's table looks visually simpler than an earlier one — the " +
                   "same Lokale/Inv-Objekt structure still means the same grouping rule. Getting this wrong " +
                   "produces far more rooms than the site actually has.\n\n" +
-                  "If the document has a farge-koder (color code) legend distinguishing rows/areas that are " +
-                  "the cleaning company's own responsibility from ones the customer cleans themselves (e.g. " +
-                  "'hvit/gul/oransje: OKV' vs 'blå/grå: [customer name]'), skip anything marked as the " +
-                  "customer's own responsibility entirely — only extract what the cleaning company itself " +
-                  "actually cleans.\n\n" +
                   "For each room, set the schedule's weekdays field whenever the document shows or names " +
                   "specific days — a weekday grid's marked columns, text naming weekdays ('mandag-fredag', " +
                   "'tirsdager og fredager'), or a day abbreviation next to a task. If it's a grid, read it " +
