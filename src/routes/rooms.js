@@ -701,11 +701,14 @@ roomsRouter.post("/:id/checkin-date", requireAuth, requireRole("cleaner", "admin
 });
 
 // Undo for a just-completed room — powers the cleaner-facing "Angre" affordance for both a
-// single room's "Fullfør rom" and the bulk "Huk av alle dagens oppgaver" action. `resetItems`
-// additionally un-checks every item, since only the bulk action force-checks them all; a
-// single "Fullfør rom" click never touches item state, so undoing it must leave the
+// single room's "Fullfør rom" and the bulk "Huk av alle dagens oppgaver" action, and also the
+// admin/manager "Angre"-when-already-completed control in the shared day-detail view (needed
+// to fix a room wrongly completed by someone else's mistake — e.g. the complete-all-due bug
+// fixed alongside this, which had no other way to undo once the original action's toast was
+// gone). `resetItems` additionally un-checks every item, since only the bulk action force-checks
+// them all; a single "Fullfør rom" click never touches item state, so undoing it must leave the
 // cleaner's own checkmarks alone.
-roomsRouter.post("/:id/reopen", requireAuth, requireRole("cleaner"), (req, res) => {
+roomsRouter.post("/:id/reopen", requireAuth, requireRole("cleaner", "admin", "manager"), (req, res) => {
   const { status: scopeStatus, error: scopeError } = getRoomScoped(req.params.id, req.user);
   if (scopeError) return res.status(scopeStatus).json({ error: scopeError });
 
