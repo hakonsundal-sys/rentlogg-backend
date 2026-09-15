@@ -356,6 +356,26 @@ siteRoomsRouter.post("/import-pdf", requireAuth, requireRole("admin", "manager")
                   "with an X or checkmark in some rows/columns showing which days that room or task applies). " +
                   "Extract every room or area mentioned and the cleaning tasks for each. If a room has no " +
                   "explicit task list, use a single sensible general task.\n\n" +
+                  "Some documents — this is OKV's own standard 'Renholdsplan' template, so expect it again — " +
+                  "use a table with a COARSER area column (often headed 'Lokale') whose value repeats down " +
+                  "several rows before changing, alongside a FINER per-item column (often 'Inv/Objekt' or " +
+                  "'Utstyr') naming one specific object or spot within that area. When this pattern is present, " +
+                  "each distinct Lokale value is ONE room — never create a separate room per Inv/Objekt row — " +
+                  "and every Inv/Objekt entry under that Lokale becomes one task inside that room's task list. " +
+                  "For example, a 'Produksjon' Lokale listing a dozen individual machines is ONE room named " +
+                  "'Produksjon' with a dozen tasks, not a dozen separate rooms; a real cleaner walks into one " +
+                  "physical space (the Lokale) and works through everything in it, they don't treat each piece " +
+                  "of equipment as its own room. Likewise a Lokale value like '1. Etg' grouping several rows " +
+                  "(e.g. Inngangsparti, Gang, Toalett, Tørrgarderobe) is ONE room named for that Lokale (e.g. " +
+                  "'1. Etasje'), not four separate rooms. Apply this the same way on every page of a multi-page " +
+                  "document, even where a later page's table looks visually simpler than an earlier one — the " +
+                  "same Lokale/Inv-Objekt structure still means the same grouping rule. Getting this wrong " +
+                  "produces far more rooms than the site actually has.\n\n" +
+                  "If the document has a farge-koder (color code) legend distinguishing rows/areas that are " +
+                  "the cleaning company's own responsibility from ones the customer cleans themselves (e.g. " +
+                  "'hvit/gul/oransje: OKV' vs 'blå/grå: [customer name]'), skip anything marked as the " +
+                  "customer's own responsibility entirely — only extract what the cleaning company itself " +
+                  "actually cleans.\n\n" +
                   "For each room, set the schedule's weekdays field whenever the document shows or names " +
                   "specific days — a weekday grid's marked columns, text naming weekdays ('mandag-fredag', " +
                   "'tirsdager og fredager'), or a day abbreviation next to a task. If it's a grid, read it " +
