@@ -149,7 +149,7 @@ export function getRoomGridForSiteMonth(siteId, year, month) {
       days[dateStr] = isRoomDueOn(room, dateStr) ? getRoomStatusForDate(room.id, dateStr) : "not_due";
       if (!(dateStr in runsByDate)) runsByDate[dateStr] = findRunForSiteDate(siteId, dateStr)?.id || null;
     }
-    return { id: room.id, name: room.name, days };
+    return { id: room.id, name: room.name, responsible: room.responsible, days };
   });
 
   return { rooms: roomRows, runsByDate };

@@ -36,7 +36,15 @@ function escapeHtml(value) {
 // rest of the app already uses wherever rooms vs. flat is a branch point.
 function buildSections(detail) {
   if (detail.rooms?.length > 0) {
-    return detail.rooms.map((room) => ({ title: room.name, items: room.items, photos: room.photos, note: room.note }));
+    // Only label rooms by who's responsible when the site actually mixes both (e.g. one zone
+    // OKV cleans, one the customer cleans themselves) — otherwise every title would carry a
+    // pointless "(Renholder)" suffix. Mixed sites can also have two rooms sharing a name across
+    // the two zones (each side's own "Kontor", say), so the suffix doubles as disambiguation.
+    const isMixed = detail.rooms.some((r) => r.responsible === "customer") && detail.rooms.some((r) => r.responsible !== "customer");
+    return detail.rooms.map((room) => ({
+      title: isMixed ? `${room.name} (${room.responsible === "customer" ? "Kunde" : "Renholder"})` : room.name,
+      items: room.items, photos: room.photos, note: room.note,
+    }));
   }
   return [{ title: "Sjekkliste", items: detail.items, photos: detail.photos, note: detail.note }];
 }
