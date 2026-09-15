@@ -338,6 +338,20 @@ sitesRouter.post("/checkin/:qrToken", requireAuth, requireRole("cleaner"), (req,
   res.status(201).json({ runId: runInfo.lastInsertRowid, site, gps_verified: !!gps_verified });
 });
 
+// Called when a customer scans the same physical QR sticker cleaners use (see App.jsx's
+// ?checkin= handling) — unlike the cleaner's POST above, this has no side effects at all: it
+// just resolves the token to a site (scoped to the customer's own client) so the frontend can
+// jump straight to that site's "Fyll ut sjekkliste i dag" flow, same shortcut as the button on
+// their dashboard. A customer has nothing analogous to a live GPS-verified check-in — they're
+// not doing physical rounds — so there's no run to create here, just a lookup.
+sitesRouter.get("/checkin/:qrToken", requireAuth, requireRole("customer"), (req, res) => {
+  const site = db.prepare("SELECT * FROM sites WHERE qr_token = ?").get(req.params.qrToken);
+  // Same "unknown QR code" message for a genuinely unknown token and one belonging to another
+  // client's site — a customer scanning a foreign QR shouldn't learn that a matching site exists.
+  if (!site || site.client_id !== req.user.client_id) return res.status(404).json({ error: "Unknown QR code" });
+  res.json({ site: { ...site, has_customer_rooms: !!siteHasCustomerRoomsStmt.get(site.id) } });
+});
+
 function haversineMeters(lat1, lon1, lat2, lon2) {
   const R = 6371000;
   const toRad = (d) => (d * Math.PI) / 180;
