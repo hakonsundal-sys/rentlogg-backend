@@ -84,16 +84,70 @@ authRouter.post("/login", loginLimiter, (req, res) => {
   });
 });
 
-// Lightweight staff directory for pickers (e.g. assigning a cleaner to a site's schedule).
-// Scoped to the caller's own company — company_id is null for a request with none (shouldn't
-// happen here since this route isn't reachable by super_admin's own UI, but WHERE company_id = ?
-// against NULL naturally matches nothing rather than leaking every company's staff).
+// Staff directory — originally just a lightweight picker source (e.g. assigning a cleaner to a
+// site's schedule, which still calls this with ?role=cleaner and only ever used id/name/email/
+// role), now also the data source for the "Ansatte" admin page, which additionally wants phone,
+// department, and signup date. Scoped to the caller's own company — company_id is null for a
+// request with none (shouldn't happen here since this route isn't reachable by super_admin's own
+// UI, but WHERE company_id = ? against NULL naturally matches nothing rather than leaking every
+// company's staff). No explicit ?role filter defaults to every non-customer role — a customer
+// account isn't "staff" and has no department, and the one existing caller of the unfiltered form
+// doesn't exist (the only current caller always passes ?role=cleaner), so this default was always
+// somewhat accidental; tightened here since "Ansatte" is the first real user of it.
 authRouter.get("/users", requireAuth, requireRole("admin", "manager"), (req, res) => {
   const { role } = req.query;
   const rows = role
-    ? db.prepare("SELECT id, name, email, role FROM users WHERE role = ? AND company_id = ? ORDER BY name").all(role, req.user.company_id)
-    : db.prepare("SELECT id, name, email, role FROM users WHERE company_id = ? ORDER BY name").all(req.user.company_id);
+    ? db.prepare("SELECT id, name, email, role, phone, department_id, created_at FROM users WHERE role = ? AND company_id = ? ORDER BY name").all(role, req.user.company_id)
+    : db.prepare("SELECT id, name, email, role, phone, department_id, created_at FROM users WHERE role != 'customer' AND company_id = ? ORDER BY name").all(req.user.company_id);
   res.json(rows);
+});
+
+// Assigns/clears which department a staff member belongs to — the one field "Ansatte" lets an
+// admin/manager edit inline from the list, everything else about a user (name, email, role)
+// stays managed via the invite flow. Same allowlist-of-one shape as every other PATCH_FIELDS
+// route in this app, just not worth naming a constant for a single field.
+authRouter.patch("/users/:id", requireAuth, requireRole("admin", "manager"), (req, res) => {
+  const target = db.prepare("SELECT id, company_id FROM users WHERE id = ?").get(req.params.id);
+  if (!target) return res.status(404).json({ error: "Not found" });
+  if (target.company_id !== req.user.company_id) return res.status(403).json({ error: "Not allowed" });
+  if (!("department_id" in req.body)) return res.status(400).json({ error: "No valid fields to update" });
+
+  const departmentId = req.body.department_id;
+  if (departmentId != null) {
+    const department = db.prepare("SELECT company_id FROM departments WHERE id = ?").get(departmentId);
+    if (!department || department.company_id !== req.user.company_id) {
+      return res.status(400).json({ error: "Ukjent avdeling" });
+    }
+  }
+
+  db.prepare("UPDATE users SET department_id = ? WHERE id = ?").run(departmentId ?? null, req.params.id);
+  res.json(db.prepare("SELECT id, name, email, role, phone, department_id, created_at FROM users WHERE id = ?").get(req.params.id));
+});
+
+// Lets an admin set a new password for a locked-out/forgotten-password staff member without
+// routing them through the invite flow again (which would need a fresh email invite + link
+// click — impractical for a cleaner who's just standing there on shift). Deliberately admin-only
+// (not manager, unlike the rest of this file) and deliberately can't target another admin or a
+// super_admin: this is a recovery tool for regular staff accounts, not a way for one company
+// admin to take over another admin's login, or reach outside the company at all (the company-scope
+// check below already blocks cross-company, but role is checked too since "same company" alone
+// doesn't rule out a same-company admin resetting a co-admin's password).
+authRouter.patch("/users/:id/password", requireAuth, requireRole("admin"), (req, res) => {
+  const target = db.prepare("SELECT id, company_id, role FROM users WHERE id = ?").get(req.params.id);
+  if (!target) return res.status(404).json({ error: "Not found" });
+  if (target.company_id !== req.user.company_id) return res.status(403).json({ error: "Not allowed" });
+  if (!["cleaner", "manager"].includes(target.role)) {
+    return res.status(403).json({ error: "Kan bare tilbakestille passord for renholdere og driftsledere." });
+  }
+
+  const { password } = req.body;
+  if (!password || password.length < 8) {
+    return res.status(400).json({ error: "Passordet må være minst 8 tegn." });
+  }
+
+  const password_hash = bcrypt.hashSync(password, 10);
+  db.prepare("UPDATE users SET password_hash = ? WHERE id = ?").run(password_hash, req.params.id);
+  res.json({ ok: true });
 });
 
 authRouter.get("/me", requireAuth, (req, res) => {

@@ -119,6 +119,10 @@ ensureColumn("room_run_items", "room_checklist_item_id", "room_checklist_item_id
 // started_at is backdated to the day it represents either way, so this is the only way to tell
 // the two apart later (report/log views surface it as a visible "entered late" notice).
 ensureColumn("checklist_runs", "backdated", "backdated INTEGER DEFAULT 0");
+// Which region/department a staff member belongs to — same company-wide tags (Vest/Sør/Øst/Midt)
+// sites already use, assignable from the "Ansatte" admin page. Nullable/optional like sites'
+// own department_id; a customer user has no use for this (departments are staff-only).
+ensureColumn("users", "department_id", "department_id INTEGER REFERENCES departments(id)");
 
 // Departments started out (2026-09-07) as a per-client sub-grouping with a NOT NULL client_id,
 // before it turned out the actual need was an internal, company-wide region tag (Vest/Sør/Øst/
