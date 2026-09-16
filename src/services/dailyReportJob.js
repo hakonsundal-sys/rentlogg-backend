@@ -50,7 +50,7 @@ export async function sendDailyReports(dateStr, siteId, companyId, recipientsOve
     }
 
     try {
-      const body = buildReportBody(getRunDetail(run.id));
+      const body = await buildReportBody(getRunDetail(run.id));
       const html = `<!doctype html><html lang="no"><head><meta charset="utf-8"></head><body style="margin:0;padding:24px;background:#ffffff;font-family:Arial,Helvetica,sans-serif;color:#1a1a1a;">${body}</body></html>`;
       await sendEmail({ to: recipients, subject: `Renholdsrapport ${site.name} — ${dateStr}`, html });
       results.sent++;

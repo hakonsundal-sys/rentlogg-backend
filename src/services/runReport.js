@@ -1,27 +1,37 @@
 import fs from "node:fs";
 import path from "node:path";
 import PDFDocument from "pdfkit";
+import sharp from "sharp";
 
 const PRIORITY_LABELS = { low: "Lav", medium: "Middels", high: "Høy" };
-
-const MIME_BY_EXT = {
-  ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
-  ".webp": "image/webp", ".heic": "image/heic", ".heif": "image/heif",
-};
 
 // The HTML report is opened both as a logged-in browser tab (RunDetailModal's "Vis rapport") and
 // baked into the daily-digest email sent to whoever's on a site's recipient list — neither has
 // any way to carry the auth token /uploads now requires (an email client fetching an <img src>
 // certainly can't, and isn't logged in at all), so a plain /uploads URL here would render as a
 // broken image for both. Embedding the actual bytes sidesteps needing any token at all.
-function photoDataUri(filePath) {
+//
+// Always resizes and re-encodes to JPEG via sharp, for two reasons found 2026-09-16 investigating
+// a digest that reached recipients with no images at all: (1) an unresized phone photo is easily
+// 2-4MB, and a visit with several rooms' worth of them inlined as base64 routinely produced a
+// 7MB+ HTML email — Gmail (and most clients) clip a message's displayed content around ~100KB,
+// so everything past that, images included, never rendered. (2) uploads allow HEIC/HEIF (the
+// default format on iPhones), which was previously embedded as `data:image/heic;base64,...` —
+// almost no email client or browser renders that inline at all, independent of size. Re-encoding
+// to a capped, compressed JPEG here fixes both at once, for every consumer of buildReportBody
+// (the email digest and "Vis rapport"); the original full-resolution file on disk is untouched,
+// so the in-app room photo view and the "Last ned alle bilder" zip are unaffected.
+async function photoDataUri(filePath) {
   const absolutePath = path.join(process.env.UPLOADS_DIR || "uploads", path.basename(filePath));
   try {
-    const buffer = fs.readFileSync(absolutePath);
-    const mime = MIME_BY_EXT[path.extname(absolutePath).toLowerCase()] || "application/octet-stream";
-    return `data:${mime};base64,${buffer.toString("base64")}`;
+    const buffer = await sharp(absolutePath)
+      .rotate()
+      .resize(1200, 1200, { fit: "inside", withoutEnlargement: true })
+      .jpeg({ quality: 72 })
+      .toBuffer();
+    return `data:image/jpeg;base64,${buffer.toString("base64")}`;
   } catch {
-    return null; // file missing on disk — skip it rather than break the whole report
+    return null; // file missing on disk, or an unsupported/corrupt image — skip it rather than break the whole report
   }
 }
 
@@ -68,14 +78,26 @@ function formatStatus(detail) {
   return detail.backdated ? `${base} (sjekket inn i etterkant)` : base;
 }
 
+// Renders a section/deviation's photos to <img> tags, dropping any that came back null (missing
+// file, or a format sharp couldn't decode) rather than leaving a gap in the layout.
+async function photosHtmlFor(photos, boxSize) {
+  if (!photos?.length) return "";
+  const uris = (await Promise.all(photos.map((p) => photoDataUri(p.file_path)))).filter(Boolean);
+  if (!uris.length) return "";
+  return `<div style="padding:10px 14px;border:1px solid #ddd;border-top:none;display:flex;flex-wrap:wrap;gap:8px;">
+    ${uris.map((uri) => `<a href="${uri}" target="_blank"><img src="${uri}" alt="" style="width:${boxSize}px;height:${boxSize}px;object-fit:cover;border-radius:4px;border:1px solid #ddd;"></a>`).join("")}
+  </div>`;
+}
+
 // Split from buildReportHtml so the daily-digest email can concatenate multiple visits' bodies
-// into one <html> shell instead of nesting complete documents inside each other.
-export function buildReportBody(detail) {
+// into one <html> shell instead of nesting complete documents inside each other. Async because
+// photoDataUri now goes through sharp (resize + re-encode) rather than a plain sync file read —
+// see its own comment for why.
+export async function buildReportBody(detail) {
   const sections = buildSections(detail);
   const isMixed = isMixedResponsibility(detail.rooms);
 
-  const sectionsHtml = sections
-    .map((section, sIdx) => {
+  const sectionsHtml = (await Promise.all(sections.map(async (section, sIdx) => {
       const num = sIdx + 1;
       const itemsHtml = section.items
         .map((item, iIdx) => `
@@ -85,12 +107,7 @@ export function buildReportBody(detail) {
           </div>`)
         .join("");
 
-      const photosHtml = section.photos?.length
-        ? `<div style="padding:10px 14px;border:1px solid #ddd;border-top:none;display:flex;flex-wrap:wrap;gap:8px;">
-             ${section.photos.map((p) => photoDataUri(p.file_path)).filter(Boolean)
-               .map((uri) => `<a href="${uri}" target="_blank"><img src="${uri}" alt="" style="width:180px;height:180px;object-fit:cover;border-radius:4px;border:1px solid #ddd;"></a>`).join("")}
-           </div>`
-        : "";
+      const photosHtml = await photosHtmlFor(section.photos, 180);
 
       const noteHtml = section.note?.trim()
         ? `<div style="padding:10px 14px;border:1px solid #ddd;border-top:none;font-size:13px;background:#fafafa;white-space:pre-wrap;"><strong>Notat:</strong> ${escapeHtml(section.note)}</div>`
@@ -101,27 +118,22 @@ export function buildReportBody(detail) {
         ${itemsHtml || `<div style="padding:10px 14px;border:1px solid #ddd;border-top:none;font-size:13px;color:#777;">Ingen oppgaver registrert.</div>`}
         ${photosHtml}
         ${noteHtml}`;
-    })
+    })))
     .join("");
 
   const deviationsHtml = detail.deviations?.length
     ? `
       <div style="background:#fdecea;padding:10px 14px;font-weight:700;font-size:15px;border:1px solid #f1b0b7;margin-top:26px;color:#611a15;">Avvik</div>
-      ${detail.deviations
-        .map((d) => `
+      ${(await Promise.all(detail.deviations.map(async (d) => `
           <div style="padding:12px 14px;border:1px solid #f1b0b7;border-top:none;font-size:13px;">
             <div style="font-weight:600;">${d.room_name ? escapeHtml(d.room_name + (isMixed ? responsibleSuffix(d.room_responsible) : "")) + (d.room_task_label ? " · " + escapeHtml(d.room_task_label) : "") : "Generelt"}
               <span style="font-weight:400;color:#777;"> — ${PRIORITY_LABELS[d.priority] || d.priority}</span>
             </div>
             <div style="margin-top:4px;">${escapeHtml(d.description)}</div>
             ${d.reported_by_initials ? `<div style="margin-top:4px;color:#777;">Meldt av: ${escapeHtml(d.reported_by_initials)}</div>` : ""}
-            ${d.photos?.length ? `
-              <div style="margin-top:8px;display:flex;flex-wrap:wrap;gap:8px;">
-                ${d.photos.map((p) => photoDataUri(p.file_path)).filter(Boolean)
-                  .map((uri) => `<a href="${uri}" target="_blank"><img src="${uri}" alt="" style="width:140px;height:140px;object-fit:cover;border-radius:4px;border:1px solid #f1b0b7;"></a>`).join("")}
-              </div>` : ""}
+            ${await photosHtmlFor(d.photos, 140)}
             ${d.reply_text ? `<div style="margin-top:6px;padding-top:6px;border-top:1px solid #f1b0b7;color:#333;">Svar: ${escapeHtml(d.reply_text)} — ${escapeHtml(d.replied_by_initials)}</div>` : ""}
-          </div>`)
+          </div>`)))
         .join("")}`
     : "";
 
@@ -151,7 +163,7 @@ export function buildReportBody(detail) {
   </div>`;
 }
 
-export function buildReportHtml(detail) {
+export async function buildReportHtml(detail) {
   return `<!doctype html>
 <html lang="no">
 <head>
@@ -160,7 +172,7 @@ export function buildReportHtml(detail) {
 <title>Renholdsrapport — ${escapeHtml(detail.site_name)}</title>
 </head>
 <body style="margin:0;padding:24px;background:#ffffff;font-family:Arial,Helvetica,sans-serif;color:#1a1a1a;">
-  ${buildReportBody(detail)}
+  ${await buildReportBody(detail)}
 </body>
 </html>`;
 }
@@ -185,7 +197,15 @@ function drawPhotoGrid(doc, photos, uploadsDir, boxSize) {
       doc.addPage();
       rowY = doc.y;
     }
-    doc.image(absolutePath, startX + col * (boxSize + gap), rowY, { fit: [boxSize, boxSize] });
+    try {
+      // pdfkit's doc.image() only decodes JPEG/PNG — a WebP or HEIC upload (both allowed by the
+      // image upload filter) throws here. Skip that one photo rather than let it take down the
+      // whole PDF (previously uncaught, so one such photo among many would fail the entire
+      // download with no report at all).
+      doc.image(absolutePath, startX + col * (boxSize + gap), rowY, { fit: [boxSize, boxSize] });
+    } catch (err) {
+      console.error("Kunne ikke tegne bilde i PDF:", err.message);
+    }
     col++;
     if (col >= perRow) {
       col = 0;

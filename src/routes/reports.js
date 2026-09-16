@@ -106,13 +106,13 @@ reportsRouter.get("/sites/:id/photos.zip", requireAuth, requireRole("admin", "ma
 // and photos, distinct from the rolling multi-visit summary above. Ready to view/copy as an
 // email body (buildReportHtml) or download as a PDF; both share the same detail-gathering and
 // access-scoping as GET /checklists/runs/:id via runDetail.js.
-reportsRouter.get("/runs/:id/html", requireAuth, (req, res) => {
+reportsRouter.get("/runs/:id/html", requireAuth, async (req, res) => {
   const detail = getRunDetail(req.params.id);
   if (!detail) return res.status(404).json({ error: "Not found" });
   if (!canAccessRun(detail, req.user)) return res.status(403).json({ error: "Not allowed" });
 
   res.setHeader("Content-Type", "text/html; charset=utf-8");
-  res.send(buildReportHtml(detail));
+  res.send(await buildReportHtml(detail));
 });
 
 reportsRouter.get("/runs/:id/pdf", requireAuth, (req, res) => {
