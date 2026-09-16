@@ -71,6 +71,13 @@ authRouter.post("/login", loginLimiter, (req, res) => {
   if (!user || !passwordOk) {
     return res.status(401).json({ error: "Invalid email or password" });
   }
+  // Checked only after the password is confirmed correct — telling someone who doesn't even know
+  // the right password that the account exists but is deactivated would leak more than a plain
+  // "Invalid email or password" does, and a check placed *before* the bcrypt compare above would
+  // also reopen exactly the timing side-channel that comment is guarding against.
+  if (!user.active) {
+    return res.status(403).json({ error: "Denne kontoen er deaktivert. Kontakt en administrator." });
+  }
 
   const token = jwt.sign(
     { id: user.id, name: user.name, role: user.role, client_id: user.client_id, company_id: user.company_id },
@@ -94,13 +101,26 @@ authRouter.post("/login", loginLimiter, (req, res) => {
 // account isn't "staff" and has no department, and the one existing caller of the unfiltered form
 // doesn't exist (the only current caller always passes ?role=cleaner), so this default was always
 // somewhat accidental; tightened here since "Ansatte" is the first real user of it.
+const STAFF_FIELDS = "id, name, email, role, phone, department_id, active, created_at";
+
 authRouter.get("/users", requireAuth, requireRole("admin", "manager"), (req, res) => {
   const { role } = req.query;
   const rows = role
-    ? db.prepare("SELECT id, name, email, role, phone, department_id, created_at FROM users WHERE role = ? AND company_id = ? ORDER BY name").all(role, req.user.company_id)
-    : db.prepare("SELECT id, name, email, role, phone, department_id, created_at FROM users WHERE role != 'customer' AND company_id = ? ORDER BY name").all(req.user.company_id);
+    ? db.prepare(`SELECT ${STAFF_FIELDS} FROM users WHERE role = ? AND company_id = ? ORDER BY name`).all(role, req.user.company_id)
+    : db.prepare(`SELECT ${STAFF_FIELDS} FROM users WHERE role != 'customer' AND company_id = ? ORDER BY name`).all(req.user.company_id);
   res.json(rows);
 });
+
+// Shared by every /users/:id/* route below: same company, and (for the admin-only ones — role,
+// active, password, delete) never a customer/super_admin target, since none of those actions make
+// sense for either (a customer has no role hierarchy here; a super_admin belongs to no company so
+// company-scoping already excludes it, this is just an explicit second check).
+function getStaffTarget(id, companyId) {
+  const target = db.prepare("SELECT id, company_id, role FROM users WHERE id = ?").get(id);
+  if (!target) return { status: 404, error: "Not found" };
+  if (target.company_id !== companyId || target.role === "customer") return { status: 403, error: "Not allowed" };
+  return { target };
+}
 
 // Assigns/clears which department a staff member belongs to — the one field "Ansatte" lets an
 // admin/manager edit inline from the list, everything else about a user (name, email, role)
@@ -121,7 +141,7 @@ authRouter.patch("/users/:id", requireAuth, requireRole("admin", "manager"), (re
   }
 
   db.prepare("UPDATE users SET department_id = ? WHERE id = ?").run(departmentId ?? null, req.params.id);
-  res.json(db.prepare("SELECT id, name, email, role, phone, department_id, created_at FROM users WHERE id = ?").get(req.params.id));
+  res.json(db.prepare(`SELECT ${STAFF_FIELDS} FROM users WHERE id = ?`).get(req.params.id));
 });
 
 // Lets an admin set a new password for a locked-out/forgotten-password staff member without
@@ -147,6 +167,78 @@ authRouter.patch("/users/:id/password", requireAuth, requireRole("admin"), (req,
 
   const password_hash = bcrypt.hashSync(password, 10);
   db.prepare("UPDATE users SET password_hash = ? WHERE id = ?").run(password_hash, req.params.id);
+  res.json({ ok: true });
+});
+
+const STAFF_ROLES = ["admin", "manager", "cleaner"];
+
+// Reassigns a staff member between admin/manager/cleaner — deliberately can't convert to/from
+// 'customer' (a different account shape entirely, tied to a client_id this endpoint knows nothing
+// about) or touch a super_admin. Admin-only, and can't target yourself — self-demoting out of
+// admin here would lock you out of this very page with no recovery route (no self-service
+// "restore my own role" exists, and a company might have only the one admin). Unlike the password
+// endpoint, this is allowed to target another admin: demoting a co-admin is a legitimate "remove
+// someone's access" action, and promoting a trusted manager to admin is exactly what this exists
+// to support in the first place.
+authRouter.patch("/users/:id/role", requireAuth, requireRole("admin"), (req, res) => {
+  const { target, status, error } = getStaffTarget(req.params.id, req.user.company_id);
+  if (error) return res.status(status).json({ error });
+  if (target.id === req.user.id) return res.status(403).json({ error: "Du kan ikke endre din egen rolle." });
+
+  const { role } = req.body;
+  if (!STAFF_ROLES.includes(role)) return res.status(400).json({ error: "Ugyldig rolle" });
+
+  db.prepare("UPDATE users SET role = ? WHERE id = ?").run(role, req.params.id);
+  res.json(db.prepare(`SELECT ${STAFF_FIELDS} FROM users WHERE id = ?`).get(req.params.id));
+});
+
+// Blocks/restores login without touching any of a user's existing history (visits, avvik, schedule
+// assignments) — the reversible alternative to DELETE below. Admin-only; can't target yourself for
+// the same lockout reason as the role endpoint above. Doesn't force out a session already issued
+// before deactivation (no token-revocation in this app — see db.js's comment on the column) so
+// this takes effect on that person's *next* login attempt, not necessarily immediately.
+authRouter.patch("/users/:id/active", requireAuth, requireRole("admin"), (req, res) => {
+  const { target, status, error } = getStaffTarget(req.params.id, req.user.company_id);
+  if (error) return res.status(status).json({ error });
+  if (target.id === req.user.id) return res.status(403).json({ error: "Du kan ikke deaktivere din egen konto." });
+  if (typeof req.body.active !== "boolean") return res.status(400).json({ error: "active må være true eller false" });
+
+  db.prepare("UPDATE users SET active = ? WHERE id = ?").run(req.body.active ? 1 : 0, req.params.id);
+  res.json(db.prepare(`SELECT ${STAFF_FIELDS} FROM users WHERE id = ?`).get(req.params.id));
+});
+
+// A real DELETE, not just deactivation — for the case that actually calls for it (a duplicate or
+// test account with no real activity yet). Refuses once the user has any genuine history
+// (checklist_runs.cleaner_id, room_runs.cleaner_id, deviations.reported_by, or invitations.
+// invited_by all NOT NULL FKs — the delete would fail on any of them anyway with foreign_keys=ON,
+// this just gives a clear reason instead of a raw SQLite constraint error) and points at
+// deactivating instead, which is almost always the right call for a real former employee.
+// site_schedules/room_schedules.assigned_cleaner_id are nullable scheduling metadata, not history
+// — cleared automatically as part of the delete rather than also blocking on those.
+authRouter.delete("/users/:id", requireAuth, requireRole("admin"), (req, res) => {
+  const { target, status, error } = getStaffTarget(req.params.id, req.user.company_id);
+  if (error) return res.status(status).json({ error });
+  if (target.id === req.user.id) return res.status(403).json({ error: "Du kan ikke slette din egen konto." });
+
+  const counts = {
+    besøk: db.prepare("SELECT COUNT(*) AS n FROM checklist_runs WHERE cleaner_id = ?").get(req.params.id).n,
+    romvisitter: db.prepare("SELECT COUNT(*) AS n FROM room_runs WHERE cleaner_id = ?").get(req.params.id).n,
+    avvik: db.prepare("SELECT COUNT(*) AS n FROM deviations WHERE reported_by = ?").get(req.params.id).n,
+    invitasjoner: db.prepare("SELECT COUNT(*) AS n FROM invitations WHERE invited_by = ?").get(req.params.id).n,
+  };
+  const withHistory = Object.entries(counts).filter(([, n]) => n > 0);
+  if (withHistory.length > 0) {
+    return res.status(409).json({
+      error: `Kan ikke slettes: har historikk (${withHistory.map(([label, n]) => `${n} ${label}`).join(", ")}). Deaktiver i stedet.`,
+    });
+  }
+
+  const deleteUser = db.transaction((id) => {
+    db.prepare("UPDATE site_schedules SET assigned_cleaner_id = NULL WHERE assigned_cleaner_id = ?").run(id);
+    db.prepare("UPDATE room_schedules SET assigned_cleaner_id = NULL WHERE assigned_cleaner_id = ?").run(id);
+    db.prepare("DELETE FROM users WHERE id = ?").run(id);
+  });
+  deleteUser(req.params.id);
   res.json({ ok: true });
 });
 

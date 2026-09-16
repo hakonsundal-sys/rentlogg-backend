@@ -123,6 +123,11 @@ ensureColumn("checklist_runs", "backdated", "backdated INTEGER DEFAULT 0");
 // sites already use, assignable from the "Ansatte" admin page. Nullable/optional like sites'
 // own department_id; a customer user has no use for this (departments are staff-only).
 ensureColumn("users", "department_id", "department_id INTEGER REFERENCES departments(id)");
+// Deactivating a user (from "Ansatte") blocks future logins without deleting them — keeps their
+// name attached to their existing history (visits, avvik) intact, unlike a hard delete. Doesn't
+// revoke a JWT already issued before deactivation (there's no token-revocation/blacklist in this
+// app) — that session just keeps working until its own 12h expiry.
+ensureColumn("users", "active", "active INTEGER NOT NULL DEFAULT 1");
 
 // Departments started out (2026-09-07) as a per-client sub-grouping with a NOT NULL client_id,
 // before it turned out the actual need was an internal, company-wide region tag (Vest/Sør/Øst/
