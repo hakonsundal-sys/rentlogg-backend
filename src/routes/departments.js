@@ -5,9 +5,16 @@ import { requireAuth, requireRole } from "../middleware/auth.js";
 export const departmentsRouter = Router();
 
 // Internal, company-wide region tags (Vest/Sør/Øst/Midt) for grouping sites across clients —
-// staff-only, customers have no visibility into or use for this.
-departmentsRouter.get("/", requireAuth, requireRole("admin", "manager"), (req, res) => {
-  const departments = db.prepare("SELECT * FROM departments WHERE company_id = ? ORDER BY name").all(req.user.company_id);
+// staff-only, customers have no visibility into or use for this. super_admin has no company of
+// its own and needs every company's departments at once (to assign departments to staff across
+// companies from "Ansatte") — ?company_id narrows to one when the caller knows which.
+departmentsRouter.get("/", requireAuth, requireRole("admin", "manager", "super_admin"), (req, res) => {
+  const departments =
+    req.user.role === "super_admin"
+      ? req.query.company_id
+        ? db.prepare("SELECT * FROM departments WHERE company_id = ? ORDER BY name").all(req.query.company_id)
+        : db.prepare("SELECT * FROM departments ORDER BY company_id, name").all()
+      : db.prepare("SELECT * FROM departments WHERE company_id = ? ORDER BY name").all(req.user.company_id);
   res.json(departments);
 });
 

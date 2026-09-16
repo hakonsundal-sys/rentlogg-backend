@@ -94,48 +94,78 @@ authRouter.post("/login", loginLimiter, (req, res) => {
 // Staff directory — originally just a lightweight picker source (e.g. assigning a cleaner to a
 // site's schedule, which still calls this with ?role=cleaner and only ever used id/name/email/
 // role), now also the data source for the "Ansatte" admin page, which additionally wants phone,
-// department, and signup date. Scoped to the caller's own company — company_id is null for a
-// request with none (shouldn't happen here since this route isn't reachable by super_admin's own
-// UI, but WHERE company_id = ? against NULL naturally matches nothing rather than leaking every
-// company's staff). No explicit ?role filter defaults to every non-customer role — a customer
-// account isn't "staff" and has no department, and the one existing caller of the unfiltered form
-// doesn't exist (the only current caller always passes ?role=cleaner), so this default was always
-// somewhat accidental; tightened here since "Ansatte" is the first real user of it.
+// department, and signup date. Scoped to the caller's own company for admin/manager — company_id
+// is null for a request with none (shouldn't happen for them, but WHERE company_id = ? against
+// NULL naturally matches nothing rather than leaking every company's staff). super_admin has no
+// company of its own and manages staff across every company instead (see GET /users below), so
+// it's exempted from that scoping. No explicit ?role filter defaults to every non-customer role —
+// a customer account isn't "staff" and has no department, and the one existing caller of the
+// unfiltered form doesn't exist (the only current caller always passes ?role=cleaner), so this
+// default was always somewhat accidental; tightened here since "Ansatte" is the first real user
+// of it.
 const STAFF_FIELDS = "id, name, email, role, phone, department_id, active, created_at";
+// Same fields, plus which company each row belongs to — only meaningful for super_admin's
+// cross-company view (an admin/manager's own rows are all their own company already).
+const STAFF_LIST_FIELDS = "u.id, u.name, u.email, u.role, u.phone, u.department_id, u.active, u.created_at, u.company_id, c.name AS company_name";
 
-authRouter.get("/users", requireAuth, requireRole("admin", "manager"), (req, res) => {
-  const { role } = req.query;
-  const rows = role
-    ? db.prepare(`SELECT ${STAFF_FIELDS} FROM users WHERE role = ? AND company_id = ? ORDER BY name`).all(role, req.user.company_id)
-    : db.prepare(`SELECT ${STAFF_FIELDS} FROM users WHERE role != 'customer' AND company_id = ? ORDER BY name`).all(req.user.company_id);
+authRouter.get("/users", requireAuth, requireRole("admin", "manager", "super_admin"), (req, res) => {
+  const { role, company_id } = req.query;
+  // super_admin is excluded unconditionally, not just by the default filter below — it's not
+  // "staff" any company or even another super_admin edits from this list (matches getStaffTarget's
+  // same exclusion for the mutation routes further down).
+  const conditions = ["u.role != 'customer'", "u.role != 'super_admin'"];
+  const params = [];
+  if (role) {
+    conditions[0] = "u.role = ?";
+    params.push(role);
+  }
+  if (req.user.role === "super_admin") {
+    if (company_id) {
+      conditions.push("u.company_id = ?");
+      params.push(company_id);
+    }
+  } else {
+    conditions.push("u.company_id = ?");
+    params.push(req.user.company_id);
+  }
+  const rows = db
+    .prepare(`SELECT ${STAFF_LIST_FIELDS} FROM users u LEFT JOIN companies c ON c.id = u.company_id WHERE ${conditions.join(" AND ")} ORDER BY u.name`)
+    .all(...params);
   res.json(rows);
 });
 
-// Shared by every /users/:id/* route below: same company, and (for the admin-only ones — role,
-// active, password, delete) never a customer/super_admin target, since none of those actions make
-// sense for either (a customer has no role hierarchy here; a super_admin belongs to no company so
-// company-scoping already excludes it, this is just an explicit second check).
-function getStaffTarget(id, companyId) {
+// Shared by every /users/:id/* route below: same company (unless the requester is super_admin,
+// who manages every company's staff and so is exempt from that check), and never a customer/
+// super_admin target — a customer has no role hierarchy here, and a super_admin account is
+// Rentlogg's own operator surface, not something even another super_admin edits from this staff
+// list.
+function getStaffTarget(id, requester) {
   const target = db.prepare("SELECT id, company_id, role FROM users WHERE id = ?").get(id);
   if (!target) return { status: 404, error: "Not found" };
-  if (target.company_id !== companyId || target.role === "customer") return { status: 403, error: "Not allowed" };
+  if (target.role === "customer" || target.role === "super_admin") return { status: 403, error: "Not allowed" };
+  if (requester.role !== "super_admin" && target.company_id !== requester.company_id) {
+    return { status: 403, error: "Not allowed" };
+  }
   return { target };
 }
 
 // Assigns/clears which department a staff member belongs to — the one field "Ansatte" lets an
-// admin/manager edit inline from the list, everything else about a user (name, email, role)
-// stays managed via the invite flow. Same allowlist-of-one shape as every other PATCH_FIELDS
-// route in this app, just not worth naming a constant for a single field.
-authRouter.patch("/users/:id", requireAuth, requireRole("admin", "manager"), (req, res) => {
-  const target = db.prepare("SELECT id, company_id FROM users WHERE id = ?").get(req.params.id);
-  if (!target) return res.status(404).json({ error: "Not found" });
-  if (target.company_id !== req.user.company_id) return res.status(403).json({ error: "Not allowed" });
+// admin/manager (or super_admin, across companies) edit inline from the list, everything else
+// about a user (name, email, role) stays managed via the invite flow. Same allowlist-of-one shape
+// as every other PATCH_FIELDS route in this app, just not worth naming a constant for a single
+// field.
+authRouter.patch("/users/:id", requireAuth, requireRole("admin", "manager", "super_admin"), (req, res) => {
+  const { target, status, error } = getStaffTarget(req.params.id, req.user);
+  if (error) return res.status(status).json({ error });
   if (!("department_id" in req.body)) return res.status(400).json({ error: "No valid fields to update" });
 
   const departmentId = req.body.department_id;
   if (departmentId != null) {
+    // Validated against the target user's own company, not the requester's — the two are always
+    // the same for admin/manager (getStaffTarget already enforced that), but a super_admin has no
+    // company of their own, so the department has to match whoever is actually being edited.
     const department = db.prepare("SELECT company_id FROM departments WHERE id = ?").get(departmentId);
-    if (!department || department.company_id !== req.user.company_id) {
+    if (!department || department.company_id !== target.company_id) {
       return res.status(400).json({ error: "Ukjent avdeling" });
     }
   }
@@ -144,18 +174,17 @@ authRouter.patch("/users/:id", requireAuth, requireRole("admin", "manager"), (re
   res.json(db.prepare(`SELECT ${STAFF_FIELDS} FROM users WHERE id = ?`).get(req.params.id));
 });
 
-// Lets an admin set a new password for a locked-out/forgotten-password staff member without
-// routing them through the invite flow again (which would need a fresh email invite + link
-// click — impractical for a cleaner who's just standing there on shift). Deliberately admin-only
-// (not manager, unlike the rest of this file) and deliberately can't target another admin or a
-// super_admin: this is a recovery tool for regular staff accounts, not a way for one company
-// admin to take over another admin's login, or reach outside the company at all (the company-scope
-// check below already blocks cross-company, but role is checked too since "same company" alone
-// doesn't rule out a same-company admin resetting a co-admin's password).
-authRouter.patch("/users/:id/password", requireAuth, requireRole("admin"), (req, res) => {
-  const target = db.prepare("SELECT id, company_id, role FROM users WHERE id = ?").get(req.params.id);
-  if (!target) return res.status(404).json({ error: "Not found" });
-  if (target.company_id !== req.user.company_id) return res.status(403).json({ error: "Not allowed" });
+// Lets an admin (or super_admin, across companies) set a new password for a locked-out/forgotten-
+// password staff member without routing them through the invite flow again (which would need a
+// fresh email invite + link click — impractical for a cleaner who's just standing there on
+// shift). Deliberately admin-only (not manager, unlike the rest of this file) and deliberately
+// can't target another admin — this stays a recovery tool for regular staff accounts, not a way
+// to take over a co-admin's (or, for super_admin, any company's admin's) login. If Rentlogg
+// support ever needs to unlock a company admin directly, that's a deliberately separate decision
+// from this endpoint, not an accidental side effect of it.
+authRouter.patch("/users/:id/password", requireAuth, requireRole("admin", "super_admin"), (req, res) => {
+  const { target, status, error } = getStaffTarget(req.params.id, req.user);
+  if (error) return res.status(status).json({ error });
   if (!["cleaner", "manager"].includes(target.role)) {
     return res.status(403).json({ error: "Kan bare tilbakestille passord for renholdere og driftsledere." });
   }
@@ -174,14 +203,14 @@ const STAFF_ROLES = ["admin", "manager", "cleaner"];
 
 // Reassigns a staff member between admin/manager/cleaner — deliberately can't convert to/from
 // 'customer' (a different account shape entirely, tied to a client_id this endpoint knows nothing
-// about) or touch a super_admin. Admin-only, and can't target yourself — self-demoting out of
-// admin here would lock you out of this very page with no recovery route (no self-service
-// "restore my own role" exists, and a company might have only the one admin). Unlike the password
-// endpoint, this is allowed to target another admin: demoting a co-admin is a legitimate "remove
-// someone's access" action, and promoting a trusted manager to admin is exactly what this exists
-// to support in the first place.
-authRouter.patch("/users/:id/role", requireAuth, requireRole("admin"), (req, res) => {
-  const { target, status, error } = getStaffTarget(req.params.id, req.user.company_id);
+// about) or touch a super_admin. Admin-only (or super_admin, across every company), and can't
+// target yourself — self-demoting out of admin here would lock you out of this very page with no
+// recovery route (no self-service "restore my own role" exists, and a company might have only the
+// one admin). Unlike the password endpoint, this is allowed to target another admin: demoting a
+// co-admin is a legitimate "remove someone's access" action, and promoting a trusted manager to
+// admin is exactly what this exists to support in the first place.
+authRouter.patch("/users/:id/role", requireAuth, requireRole("admin", "super_admin"), (req, res) => {
+  const { target, status, error } = getStaffTarget(req.params.id, req.user);
   if (error) return res.status(status).json({ error });
   if (target.id === req.user.id) return res.status(403).json({ error: "Du kan ikke endre din egen rolle." });
 
@@ -193,12 +222,13 @@ authRouter.patch("/users/:id/role", requireAuth, requireRole("admin"), (req, res
 });
 
 // Blocks/restores login without touching any of a user's existing history (visits, avvik, schedule
-// assignments) — the reversible alternative to DELETE below. Admin-only; can't target yourself for
-// the same lockout reason as the role endpoint above. Doesn't force out a session already issued
-// before deactivation (no token-revocation in this app — see db.js's comment on the column) so
-// this takes effect on that person's *next* login attempt, not necessarily immediately.
-authRouter.patch("/users/:id/active", requireAuth, requireRole("admin"), (req, res) => {
-  const { target, status, error } = getStaffTarget(req.params.id, req.user.company_id);
+// assignments) — the reversible alternative to DELETE below. Admin-only (or super_admin, across
+// every company); can't target yourself for the same lockout reason as the role endpoint above.
+// Doesn't force out a session already issued before deactivation (no token-revocation in this app
+// — see db.js's comment on the column) so this takes effect on that person's *next* login attempt,
+// not necessarily immediately.
+authRouter.patch("/users/:id/active", requireAuth, requireRole("admin", "super_admin"), (req, res) => {
+  const { target, status, error } = getStaffTarget(req.params.id, req.user);
   if (error) return res.status(status).json({ error });
   if (target.id === req.user.id) return res.status(403).json({ error: "Du kan ikke deaktivere din egen konto." });
   if (typeof req.body.active !== "boolean") return res.status(400).json({ error: "active må være true eller false" });
@@ -214,9 +244,10 @@ authRouter.patch("/users/:id/active", requireAuth, requireRole("admin"), (req, r
 // this just gives a clear reason instead of a raw SQLite constraint error) and points at
 // deactivating instead, which is almost always the right call for a real former employee.
 // site_schedules/room_schedules.assigned_cleaner_id are nullable scheduling metadata, not history
-// — cleared automatically as part of the delete rather than also blocking on those.
-authRouter.delete("/users/:id", requireAuth, requireRole("admin"), (req, res) => {
-  const { target, status, error } = getStaffTarget(req.params.id, req.user.company_id);
+// — cleared automatically as part of the delete rather than also blocking on those. Admin-only
+// (or super_admin, across every company).
+authRouter.delete("/users/:id", requireAuth, requireRole("admin", "super_admin"), (req, res) => {
+  const { target, status, error } = getStaffTarget(req.params.id, req.user);
   if (error) return res.status(status).json({ error });
   if (target.id === req.user.id) return res.status(403).json({ error: "Du kan ikke slette din egen konto." });
 
