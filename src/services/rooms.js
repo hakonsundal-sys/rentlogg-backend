@@ -39,7 +39,9 @@ function nthWeekdayOfMonth(year, month, weekday, occurrence) {
 // Room runs are stored in UTC; pre-filter to a +/-1 day UTC window, then resolve the exact
 // Oslo calendar day in JS — same approach as schedule.js's site-run lookup.
 const candidateRoomRunsStmt = db.prepare(
-  `SELECT id, started_at, completed_at, cleaner_id, signed_initials, edited_at, edited_by_initials, note FROM room_runs
+  `SELECT id, started_at, completed_at, cleaner_id, signed_initials, edited_at, edited_by_initials, note,
+          ready_for_approval_at, approved_at, approved_by_initials
+   FROM room_runs
    WHERE room_id = ? AND date(started_at) BETWEEN date(?, '-1 day') AND date(?, '+1 day')
    ORDER BY started_at DESC`
 );
@@ -52,7 +54,9 @@ export function findRoomRunForDate(roomId, dateStr) {
 export function getRoomStatusForDate(roomId, dateStr) {
   const run = findRoomRunForDate(roomId, dateStr);
   if (!run) return "missing";
-  return run.completed_at ? "completed" : "in_progress";
+  if (run.completed_at) return "completed";
+  if (run.ready_for_approval_at) return "awaiting_approval";
+  return "in_progress";
 }
 
 const roomScheduleWeekdaysStmt = db.prepare("SELECT weekday FROM room_schedules WHERE room_id = ?");
@@ -106,14 +110,20 @@ const lastCleanedStmt = db.prepare(
 );
 
 export function getRoomsForSite(siteId, dateStr) {
-  return roomsForSiteStmt.all(siteId).map((room) => ({
-    ...room,
-    dueToday: isRoomDueOn(room, dateStr),
-    status: getRoomStatusForDate(room.id, dateStr),
-    lastCleanedAt: lastCleanedStmt.get(room.id)?.completed_at || null,
-    itemCount: itemCountStmt.get(room.id).n,
-    signedInitials: findRoomRunForDate(room.id, dateStr)?.signed_initials || null,
-  }));
+  return roomsForSiteStmt.all(siteId).map((room) => {
+    const run = findRoomRunForDate(room.id, dateStr);
+    return {
+      ...room,
+      dueToday: isRoomDueOn(room, dateStr),
+      status: getRoomStatusForDate(room.id, dateStr),
+      lastCleanedAt: lastCleanedStmt.get(room.id)?.completed_at || null,
+      itemCount: itemCountStmt.get(room.id).n,
+      signedInitials: run?.signed_initials || null,
+      readyForApprovalAt: run?.ready_for_approval_at || null,
+      approvedAt: run?.approved_at || null,
+      approvedByInitials: run?.approved_by_initials || null,
+    };
+  });
 }
 
 // Powers oversight views (monthly report, dashboard) that previously judged a room-based site's

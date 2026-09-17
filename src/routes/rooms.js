@@ -56,7 +56,8 @@ function getRoomScoped(roomId, user) {
 function getRoomRunScoped(roomRunId, user) {
   const roomRun = db
     .prepare(
-      `SELECT rr.*, r.responsible AS room_responsible, s.company_id AS site_company_id, s.client_id AS site_client_id
+      `SELECT rr.*, r.responsible AS room_responsible, r.requires_approval AS room_requires_approval,
+              s.company_id AS site_company_id, s.client_id AS site_client_id
        FROM room_runs rr JOIN rooms r ON r.id = rr.room_id JOIN sites s ON s.id = r.site_id WHERE rr.id = ?`
     )
     .get(roomRunId);
@@ -73,6 +74,15 @@ function getRoomRunScoped(roomRunId, user) {
 // mutation routes below need this extra check.
 function requireCustomerOwnsRoom(user, responsible) {
   if (user.role === "customer" && responsible !== "customer") return { status: 403, error: "Not allowed" };
+  return null;
+}
+
+// Guards the new approval endpoints below: a customer may only approve a room explicitly flagged
+// requires_approval (never an ordinary room, even one at their own site) — admin/manager pass
+// through unconditionally, since they're allowed to approve on a customer's behalf (see
+// POST /runs/:runId/approve's own comment for why that escape hatch exists).
+function requireCustomerApprovalRoom(user, requiresApproval) {
+  if (user.role === "customer" && !requiresApproval) return { status: 403, error: "Dette rommet krever ikke kundegodkjenning." };
   return null;
 }
 
@@ -503,7 +513,7 @@ siteRoomsRouter.post("/import-confirm", requireAuth, requireRole("admin", "manag
 
 // --- Room-scoped: /rooms/:id ---
 
-const ROOM_PATCH_FIELDS = ["name", "interval_days", "monthly_weekday", "monthly_occurrence", "responsible"];
+const ROOM_PATCH_FIELDS = ["name", "interval_days", "monthly_weekday", "monthly_occurrence", "responsible", "requires_approval"];
 
 roomsRouter.patch("/:id", requireAuth, requireRole("admin", "manager"), (req, res) => {
   const { status: scopeStatus, error: scopeError } = getRoomScoped(req.params.id, req.user);
@@ -512,13 +522,18 @@ roomsRouter.patch("/:id", requireAuth, requireRole("admin", "manager"), (req, re
   if ("responsible" in req.body && !isValidResponsible(req.body.responsible)) {
     return res.status(400).json({ error: "responsible must be 'company' or 'customer'" });
   }
+  if ("requires_approval" in req.body && typeof req.body.requires_approval !== "boolean") {
+    return res.status(400).json({ error: "requires_approval must be true or false" });
+  }
 
   const fields = ROOM_PATCH_FIELDS.filter((f) => f in req.body);
   if (fields.length === 0) return res.status(400).json({ error: "No valid fields to update" });
 
   const updateRoom = db.transaction(() => {
     const setClause = fields.map((f) => `${f} = ?`).join(", ");
-    const values = fields.map((f) => req.body[f]);
+    // better-sqlite3 can't bind a raw JS boolean — requires_approval is the one boolean field in
+    // this allowlist, every other field here is already a string/number/null.
+    const values = fields.map((f) => (f === "requires_approval" ? (req.body[f] ? 1 : 0) : req.body[f]));
     db.prepare(`UPDATE rooms SET ${setClause} WHERE id = ?`).run(...values, req.params.id);
 
     // Three schedule modes (room_schedules rows / interval_days / monthly_*) are mutually
@@ -718,9 +733,13 @@ roomsRouter.post("/:id/reopen", requireAuth, requireRole("cleaner", "admin", "ma
   const run = findRoomRunForDate(req.params.id, todayInOslo());
   if (!run) return res.status(404).json({ error: "Ingen fullført besøk å angre i dag" });
 
-  db.prepare("UPDATE room_runs SET completed_at = NULL, signed_initials = NULL WHERE id = ?").run(run.id);
+  // Also clears any approval-gate state — an undone room goes all the way back to "in progress",
+  // not left stuck with a stale ready_for_approval_at/approved_at from before the undo.
+  db.prepare(
+    "UPDATE room_runs SET completed_at = NULL, signed_initials = NULL, ready_for_approval_at = NULL, approved_at = NULL, approved_by_initials = NULL WHERE id = ?"
+  ).run(run.id);
   if (req.body?.resetItems) {
-    db.prepare("UPDATE room_run_items SET done = 0 WHERE room_run_id = ?").run(run.id);
+    db.prepare("UPDATE room_run_items SET done = 0, approved = 0 WHERE room_run_id = ?").run(run.id);
   }
   res.json({ ok: true });
 });
@@ -751,6 +770,21 @@ roomsRouter.patch("/runs/:runId/items/:itemId", requireAuth, requireRole("cleane
   res.json({ ok: true });
 });
 
+// A separate route from the item-PATCH above (rather than one endpoint handling both `done` and
+// `approved`) so a customer reviewing a requires_approval room can never reach the cleaner's own
+// `done` field through this path — only their own `approved` column.
+roomsRouter.patch("/runs/:runId/items/:itemId/approve", requireAuth, requireRole("customer", "admin", "manager"), (req, res) => {
+  const { roomRun, status, error } = getRoomRunScoped(req.params.runId, req.user);
+  if (error) return res.status(status).json({ error });
+  const approvalError = requireCustomerApprovalRoom(req.user, roomRun.room_requires_approval);
+  if (approvalError) return res.status(approvalError.status).json({ error: approvalError.error });
+
+  const { approved } = req.body;
+  const result = db.prepare("UPDATE room_run_items SET approved = ? WHERE id = ? AND room_run_id = ?").run(approved ? 1 : 0, req.params.itemId, req.params.runId);
+  if (result.changes === 0) return res.status(404).json({ error: "Not found" });
+  res.json({ ok: true });
+});
+
 // A free-text note for the whole room's visit — same granularity as its photos (one shared
 // list for the room, not per checklist item).
 roomsRouter.patch("/runs/:runId/note", requireAuth, requireRole("cleaner", "admin", "manager", "customer"), (req, res) => {
@@ -777,6 +811,11 @@ roomsRouter.post("/runs/:runId/items/complete-all", requireAuth, requireRole("cl
   res.json({ ok: true });
 });
 
+// For a requires_approval room, this is the cleaner's OWN sign-off, not the room's real
+// completion — completed_at stays null (so every existing reader of it: reports, vaskeplan,
+// history, dashboard, keeps treating the room as not-yet-done) until the customer's approver
+// finishes the gate in POST /runs/:runId/approve below. A non-gated room behaves exactly as
+// before this feature existed.
 roomsRouter.post("/runs/:runId/complete", requireAuth, requireRole("cleaner", "admin", "manager", "customer"), (req, res) => {
   const { roomRun, status, error } = getRoomRunScoped(req.params.runId, req.user);
   if (error) return res.status(status).json({ error });
@@ -786,7 +825,34 @@ roomsRouter.post("/runs/:runId/complete", requireAuth, requireRole("cleaner", "a
   const initials = (req.body?.initials || "").trim();
   if (!initials) return res.status(400).json({ error: "Navn er påkrevd for å fullføre rommet." });
 
+  if (roomRun.room_requires_approval) {
+    db.prepare("UPDATE room_runs SET ready_for_approval_at = datetime('now'), signed_initials = ? WHERE id = ?").run(initials, roomRun.id);
+    return res.json({ ok: true, awaitingApproval: true });
+  }
+
   db.prepare("UPDATE room_runs SET completed_at = datetime('now'), signed_initials = ? WHERE id = ?").run(initials, roomRun.id);
+  res.json({ ok: true });
+});
+
+// The customer's (or, as a fallback if the customer is unreachable, an admin/manager's) sign-off
+// on a requires_approval room — this is what actually opens the completed_at gate. Deliberately
+// separate from the cleaner's own /complete above rather than one endpoint with different
+// behavior per role, so each side's required fields/validation stay simple and legible.
+roomsRouter.post("/runs/:runId/approve", requireAuth, requireRole("customer", "admin", "manager"), (req, res) => {
+  const { roomRun, status, error } = getRoomRunScoped(req.params.runId, req.user);
+  if (error) return res.status(status).json({ error });
+  const approvalError = requireCustomerApprovalRoom(req.user, roomRun.room_requires_approval);
+  if (approvalError) return res.status(approvalError.status).json({ error: approvalError.error });
+
+  if (!roomRun.ready_for_approval_at) return res.status(409).json({ error: "Renholder har ikke fullført rommet ennå." });
+  if (roomRun.approved_at) return res.status(409).json({ error: "Rommet er allerede godkjent." });
+
+  const initials = (req.body?.initials || "").trim();
+  if (!initials) return res.status(400).json({ error: "Navn er påkrevd for å godkjenne rommet." });
+
+  db.prepare(
+    "UPDATE room_runs SET approved_at = datetime('now'), approved_by_initials = ?, completed_at = datetime('now') WHERE id = ?"
+  ).run(initials, roomRun.id);
   res.json({ ok: true });
 });
 

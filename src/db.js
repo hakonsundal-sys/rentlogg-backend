@@ -129,6 +129,23 @@ ensureColumn("users", "department_id", "department_id INTEGER REFERENCES departm
 // app) — that session just keeps working until its own 12h expiry.
 ensureColumn("users", "active", "active INTEGER NOT NULL DEFAULT 1");
 
+// Customer approval gate: a room can be flagged so a customer-side user must approve the
+// cleaner's checklist before the room counts as complete (distinct from rooms.responsible, where
+// the customer does the cleaning themselves — here OKV still cleans, the customer just signs off
+// on it afterward). See room_runs'/room_run_items' own comments below for how the gate works.
+ensureColumn("rooms", "requires_approval", "requires_approval INTEGER DEFAULT 0");
+// Set when a cleaner finishes a requires_approval room instead of completed_at (which stays
+// unset until the customer actually approves — every existing completed_at reader in the app,
+// reports/vaskeplan/history/dashboard, keeps meaning exactly what it always has: "genuinely
+// done"). signed_initials is reused for the cleaner's own name at this point, same column as a
+// non-gated room's completion already uses.
+ensureColumn("room_runs", "ready_for_approval_at", "ready_for_approval_at TEXT");
+ensureColumn("room_runs", "approved_at", "approved_at TEXT");
+ensureColumn("room_runs", "approved_by_initials", "approved_by_initials TEXT");
+// Parallel to room_run_items.done — the customer approver's own per-item sign-off, checked while
+// reviewing the exact same list the cleaner just went through.
+ensureColumn("room_run_items", "approved", "approved INTEGER DEFAULT 0");
+
 // Departments started out (2026-09-07) as a per-client sub-grouping with a NOT NULL client_id,
 // before it turned out the actual need was an internal, company-wide region tag (Vest/Sør/Øst/
 // Midt) independent of client — see schema.sql's comment on the table. A database created
