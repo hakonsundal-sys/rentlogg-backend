@@ -107,6 +107,9 @@ const STAFF_FIELDS = "id, name, email, role, phone, department_id, active, creat
 // Same fields, plus which company each row belongs to — only meaningful for super_admin's
 // cross-company view (an admin/manager's own rows are all their own company already).
 const STAFF_LIST_FIELDS = "u.id, u.name, u.email, u.role, u.phone, u.department_id, u.active, u.created_at, u.company_id, c.name AS company_name";
+// The roles this file is willing to create or move an account between — never 'customer'
+// (client-scoped, invite-only) or 'super_admin' (Rentlogg's own operator account).
+const STAFF_ROLES = ["admin", "manager", "cleaner"];
 
 authRouter.get("/users", requireAuth, requireRole("admin", "manager", "super_admin"), (req, res) => {
   const { role, company_id } = req.query;
@@ -132,6 +135,71 @@ authRouter.get("/users", requireAuth, requireRole("admin", "manager", "super_adm
     .prepare(`SELECT ${STAFF_LIST_FIELDS} FROM users u LEFT JOIN companies c ON c.id = u.company_id WHERE ${conditions.join(" AND ")} ORDER BY u.name`)
     .all(...params);
   res.json(rows);
+});
+
+// Creates a staff account directly, with a password the admin sets on the spot. The invite flow
+// (POST /invitations) stays the right tool when the new user has a work email they actually read
+// and can pick their own password from a link — but that's not how OKV onboards a cleaner, who is
+// typically handed a username and a standard password on their first shift, often at a site, from
+// someone else's phone. Before this existed, the only way to get such an account created was to
+// issue an invitation and then accept it on the person's behalf. Admin-only (same as invitations
+// and the password reset below); deliberately can't create a 'customer' account, which is tied to
+// a client_id and belongs to the invite flow.
+authRouter.post("/users", requireAuth, requireRole("admin", "super_admin"), (req, res) => {
+  const { name, password, role } = req.body;
+  // Stored lower-cased: POST /login looks the email up with a plain "=" (SQLite compares TEXT
+  // case-sensitively by default), so a stray capital typed at creation time would silently lock
+  // the account to exactly that spelling. The duplicate check below is case-insensitive for the
+  // same reason — older rows created via the invite flow keep whatever case was typed there.
+  const email = typeof req.body.email === "string" ? req.body.email.trim().toLowerCase() : "";
+  if (!name || !name.trim() || !email) return res.status(400).json({ error: "Navn og e-post er påkrevd." });
+  if (!STAFF_ROLES.includes(role)) return res.status(400).json({ error: "Ugyldig rolle" });
+  // 6, not the password reset's 8 — confirmed with Håkon 2026-09-18: OKV's standard starting
+  // password for a new cleaner is 7 characters, and the accounts created before this endpoint
+  // existed (via invite-accept, which has no minimum at all) already use it. An 8-char minimum
+  // here would just push staff creation back out of the app again.
+  if (!password || password.length < 6) return res.status(400).json({ error: "Passordet må være minst 6 tegn." });
+
+  // Same shape as POST /invitations: a super_admin has no company of its own, so it has to say
+  // which company the account lands in; for everyone else the body is never trusted for this.
+  let companyId = req.user.company_id;
+  if (req.user.role === "super_admin") {
+    companyId = req.body.company_id;
+    if (!companyId) return res.status(400).json({ error: "company_id er påkrevd når du oppretter som super_admin" });
+    if (!db.prepare("SELECT 1 FROM companies WHERE id = ?").get(companyId)) {
+      return res.status(400).json({ error: "Ukjent firma" });
+    }
+  }
+
+  const departmentId = req.body.department_id ?? null;
+  if (departmentId != null) {
+    const department = db.prepare("SELECT company_id FROM departments WHERE id = ?").get(departmentId);
+    if (!department || department.company_id !== companyId) {
+      return res.status(400).json({ error: "Ukjent avdeling" });
+    }
+  }
+
+  if (db.prepare("SELECT 1 FROM users WHERE email = ? COLLATE NOCASE").get(email)) {
+    return res.status(409).json({ error: "En konto med denne e-posten finnes allerede" });
+  }
+
+  const password_hash = bcrypt.hashSync(password, 10);
+  const info = db
+    .prepare("INSERT INTO users (name, email, password_hash, role, company_id, department_id) VALUES (?, ?, ?, ?, ?, ?)")
+    .run(name.trim(), email, password_hash, role, companyId, departmentId);
+
+  // Any invitation still pending for this address is now moot — the account it would have created
+  // exists. Mirrors the "one valid link per email at a time" rule POST /invitations already keeps.
+  db.prepare("UPDATE invitations SET status = 'revoked' WHERE email = ? AND status = 'pending'").run(email);
+
+  // Same row shape GET /users returns (company_id/company_name included), so "Ansatte" can drop
+  // the new account straight into the list it already has without a refetch — STAFF_FIELDS alone
+  // would leave a super_admin's row with no company, and its department <select> empty.
+  res.status(201).json(
+    db
+      .prepare(`SELECT ${STAFF_LIST_FIELDS} FROM users u LEFT JOIN companies c ON c.id = u.company_id WHERE u.id = ?`)
+      .get(info.lastInsertRowid)
+  );
 });
 
 // Shared by every /users/:id/* route below: same company (unless the requester is super_admin,
@@ -198,8 +266,6 @@ authRouter.patch("/users/:id/password", requireAuth, requireRole("admin", "super
   db.prepare("UPDATE users SET password_hash = ? WHERE id = ?").run(password_hash, req.params.id);
   res.json({ ok: true });
 });
-
-const STAFF_ROLES = ["admin", "manager", "cleaner"];
 
 // Reassigns a staff member between admin/manager/cleaner — deliberately can't convert to/from
 // 'customer' (a different account shape entirely, tied to a client_id this endpoint knows nothing
