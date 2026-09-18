@@ -217,29 +217,66 @@ function getStaffTarget(id, requester) {
   return { target };
 }
 
-// Assigns/clears which department a staff member belongs to — the one field "Ansatte" lets an
-// admin/manager (or super_admin, across companies) edit inline from the list, everything else
-// about a user (name, email, role) stays managed via the invite flow. Same allowlist-of-one shape
-// as every other PATCH_FIELDS route in this app, just not worth naming a constant for a single
-// field.
+// Edits a staff member's own details from "Ansatte" — department, and (since the accounts are
+// created by an admin rather than by the person themselves, so a typo lands in the account and
+// stays there) name, email and phone too. Role, password and active status each have their own
+// endpoint below, with their own stricter guards. Every field is optional: the list sends
+// department_id alone when the inline <select> changes, and name/email/phone together when the
+// edit row is saved.
+const USER_PATCH_FIELDS = ["name", "email", "phone", "department_id"];
+
 authRouter.patch("/users/:id", requireAuth, requireRole("admin", "manager", "super_admin"), (req, res) => {
   const { target, status, error } = getStaffTarget(req.params.id, req.user);
   if (error) return res.status(status).json({ error });
-  if (!("department_id" in req.body)) return res.status(400).json({ error: "No valid fields to update" });
 
-  const departmentId = req.body.department_id;
-  if (departmentId != null) {
-    // Validated against the target user's own company, not the requester's — the two are always
-    // the same for admin/manager (getStaffTarget already enforced that), but a super_admin has no
-    // company of their own, so the department has to match whoever is actually being edited.
-    const department = db.prepare("SELECT company_id FROM departments WHERE id = ?").get(departmentId);
-    if (!department || department.company_id !== target.company_id) {
-      return res.status(400).json({ error: "Ukjent avdeling" });
+  const updates = {};
+
+  if ("department_id" in req.body) {
+    const departmentId = req.body.department_id;
+    if (departmentId != null) {
+      // Validated against the target user's own company, not the requester's — the two are always
+      // the same for admin/manager (getStaffTarget already enforced that), but a super_admin has no
+      // company of their own, so the department has to match whoever is actually being edited.
+      const department = db.prepare("SELECT company_id FROM departments WHERE id = ?").get(departmentId);
+      if (!department || department.company_id !== target.company_id) {
+        return res.status(400).json({ error: "Ukjent avdeling" });
+      }
     }
+    updates.department_id = departmentId ?? null;
   }
 
-  db.prepare("UPDATE users SET department_id = ? WHERE id = ?").run(departmentId ?? null, req.params.id);
-  res.json(db.prepare(`SELECT ${STAFF_FIELDS} FROM users WHERE id = ?`).get(req.params.id));
+  if ("name" in req.body) {
+    const name = typeof req.body.name === "string" ? req.body.name.trim() : "";
+    if (!name) return res.status(400).json({ error: "Navn kan ikke være tomt." });
+    updates.name = name;
+  }
+
+  if ("email" in req.body) {
+    // Lower-cased and uniqueness-checked exactly like POST /users — this is the login itself, so a
+    // duplicate would make one of the two accounts unreachable (POST /login takes the first match).
+    const email = typeof req.body.email === "string" ? req.body.email.trim().toLowerCase() : "";
+    if (!email) return res.status(400).json({ error: "E-post kan ikke være tom." });
+    const clash = db.prepare("SELECT id FROM users WHERE email = ? COLLATE NOCASE AND id != ?").get(email, target.id);
+    if (clash) return res.status(409).json({ error: "En annen konto bruker allerede denne e-posten" });
+    updates.email = email;
+  }
+
+  if ("phone" in req.body) {
+    const phone = typeof req.body.phone === "string" ? req.body.phone.trim() : "";
+    updates.phone = phone || null;
+  }
+
+  const fields = USER_PATCH_FIELDS.filter((f) => f in updates);
+  if (fields.length === 0) return res.status(400).json({ error: "No valid fields to update" });
+
+  db.prepare(`UPDATE users SET ${fields.map((f) => `${f} = ?`).join(", ")} WHERE id = ?`)
+    .run(...fields.map((f) => updates[f]), req.params.id);
+
+  res.json(
+    db
+      .prepare(`SELECT ${STAFF_LIST_FIELDS} FROM users u LEFT JOIN companies c ON c.id = u.company_id WHERE u.id = ?`)
+      .get(req.params.id)
+  );
 });
 
 // Lets an admin (or super_admin, across companies) set a new password for a locked-out/forgotten-
