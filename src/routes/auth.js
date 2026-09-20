@@ -105,8 +105,11 @@ authRouter.post("/login", loginLimiter, (req, res) => {
 // of it.
 const STAFF_FIELDS = "id, name, email, role, phone, department_id, active, created_at";
 // Same fields, plus which company each row belongs to — only meaningful for super_admin's
-// cross-company view (an admin/manager's own rows are all their own company already).
-const STAFF_LIST_FIELDS = "u.id, u.name, u.email, u.role, u.phone, u.department_id, u.active, u.created_at, u.company_id, c.name AS company_name";
+// cross-company view (an admin/manager's own rows are all their own company already). client_id/
+// client_name are only populated for role='customer' rows ("Kundebrukere") — null for staff.
+const STAFF_LIST_FIELDS =
+  "u.id, u.name, u.email, u.role, u.phone, u.department_id, u.active, u.created_at, u.company_id, c.name AS company_name, u.client_id, cl.name AS client_name";
+const STAFF_LIST_JOIN = "LEFT JOIN companies c ON c.id = u.company_id LEFT JOIN clients cl ON cl.id = u.client_id";
 // The roles this file is willing to create or move an account between — never 'customer'
 // (client-scoped, invite-only) or 'super_admin' (Rentlogg's own operator account).
 const STAFF_ROLES = ["admin", "manager", "cleaner"];
@@ -132,7 +135,7 @@ authRouter.get("/users", requireAuth, requireRole("admin", "manager", "super_adm
     params.push(req.user.company_id);
   }
   const rows = db
-    .prepare(`SELECT ${STAFF_LIST_FIELDS} FROM users u LEFT JOIN companies c ON c.id = u.company_id WHERE ${conditions.join(" AND ")} ORDER BY u.name`)
+    .prepare(`SELECT ${STAFF_LIST_FIELDS} FROM users u ${STAFF_LIST_JOIN} WHERE ${conditions.join(" AND ")} ORDER BY u.name`)
     .all(...params);
   res.json(rows);
 });
@@ -197,20 +200,22 @@ authRouter.post("/users", requireAuth, requireRole("admin", "super_admin"), (req
   // would leave a super_admin's row with no company, and its department <select> empty.
   res.status(201).json(
     db
-      .prepare(`SELECT ${STAFF_LIST_FIELDS} FROM users u LEFT JOIN companies c ON c.id = u.company_id WHERE u.id = ?`)
+      .prepare(`SELECT ${STAFF_LIST_FIELDS} FROM users u ${STAFF_LIST_JOIN} WHERE u.id = ?`)
       .get(info.lastInsertRowid)
   );
 });
 
 // Shared by every /users/:id/* route below: same company (unless the requester is super_admin,
-// who manages every company's staff and so is exempt from that check), and never a customer/
-// super_admin target — a customer has no role hierarchy here, and a super_admin account is
-// Rentlogg's own operator surface, not something even another super_admin edits from this staff
-// list.
-function getStaffTarget(id, requester) {
+// who manages every company's staff and so is exempt from that check), and never a super_admin
+// target — that account is Rentlogg's own operator surface, not something even another
+// super_admin edits from this list. A customer target is refused too UNLESS the caller opts in
+// with allowCustomer (only the routes that make sense for a customer account — details, password,
+// active, delete — pass that; role reassignment never does, since STAFF_ROLES has no 'customer').
+function getStaffTarget(id, requester, { allowCustomer = false } = {}) {
   const target = db.prepare("SELECT id, company_id, role FROM users WHERE id = ?").get(id);
   if (!target) return { status: 404, error: "Not found" };
-  if (target.role === "customer" || target.role === "super_admin") return { status: 403, error: "Not allowed" };
+  if (target.role === "super_admin") return { status: 403, error: "Not allowed" };
+  if (target.role === "customer" && !allowCustomer) return { status: 403, error: "Not allowed" };
   if (requester.role !== "super_admin" && target.company_id !== requester.company_id) {
     return { status: 403, error: "Not allowed" };
   }
@@ -222,12 +227,17 @@ function getStaffTarget(id, requester) {
 // stays there) name, email and phone too. Role, password and active status each have their own
 // endpoint below, with their own stricter guards. Every field is optional: the list sends
 // department_id alone when the inline <select> changes, and name/email/phone together when the
-// edit row is saved.
+// edit row is saved. Also doubles as "Kundebrukere"'s edit-details route (name/email/phone only
+// — department_id is staff-only and rejected below for a customer target) since the two lists
+// share this same shape of inline edit.
 const USER_PATCH_FIELDS = ["name", "email", "phone", "department_id"];
 
 authRouter.patch("/users/:id", requireAuth, requireRole("admin", "manager", "super_admin"), (req, res) => {
-  const { target, status, error } = getStaffTarget(req.params.id, req.user);
+  const { target, status, error } = getStaffTarget(req.params.id, req.user, { allowCustomer: true });
   if (error) return res.status(status).json({ error });
+  if (target.role === "customer" && "department_id" in req.body) {
+    return res.status(400).json({ error: "Kundebrukere har ingen avdeling." });
+  }
 
   const updates = {};
 
@@ -274,7 +284,7 @@ authRouter.patch("/users/:id", requireAuth, requireRole("admin", "manager", "sup
 
   res.json(
     db
-      .prepare(`SELECT ${STAFF_LIST_FIELDS} FROM users u LEFT JOIN companies c ON c.id = u.company_id WHERE u.id = ?`)
+      .prepare(`SELECT ${STAFF_LIST_FIELDS} FROM users u ${STAFF_LIST_JOIN} WHERE u.id = ?`)
       .get(req.params.id)
   );
 });
@@ -283,15 +293,16 @@ authRouter.patch("/users/:id", requireAuth, requireRole("admin", "manager", "sup
 // password staff member without routing them through the invite flow again (which would need a
 // fresh email invite + link click — impractical for a cleaner who's just standing there on
 // shift). Deliberately admin-only (not manager, unlike the rest of this file) and deliberately
-// can't target another admin — this stays a recovery tool for regular staff accounts, not a way
-// to take over a co-admin's (or, for super_admin, any company's admin's) login. If Rentlogg
-// support ever needs to unlock a company admin directly, that's a deliberately separate decision
-// from this endpoint, not an accidental side effect of it.
+// can't target another admin — this stays a recovery tool for regular staff (and, since
+// "Kundebrukere" reuses this same route, customer) accounts, not a way to take over a co-admin's
+// (or, for super_admin, any company's admin's) login. If Rentlogg support ever needs to unlock a
+// company admin directly, that's a deliberately separate decision from this endpoint, not an
+// accidental side effect of it.
 authRouter.patch("/users/:id/password", requireAuth, requireRole("admin", "super_admin"), (req, res) => {
-  const { target, status, error } = getStaffTarget(req.params.id, req.user);
+  const { target, status, error } = getStaffTarget(req.params.id, req.user, { allowCustomer: true });
   if (error) return res.status(status).json({ error });
-  if (!["cleaner", "manager"].includes(target.role)) {
-    return res.status(403).json({ error: "Kan bare tilbakestille passord for renholdere og driftsledere." });
+  if (!["cleaner", "manager", "customer"].includes(target.role)) {
+    return res.status(403).json({ error: "Kan bare tilbakestille passord for renholdere, driftsledere og kundebrukere." });
   }
 
   const { password } = req.body;
@@ -329,9 +340,10 @@ authRouter.patch("/users/:id/role", requireAuth, requireRole("admin", "super_adm
 // every company); can't target yourself for the same lockout reason as the role endpoint above.
 // Doesn't force out a session already issued before deactivation (no token-revocation in this app
 // — see db.js's comment on the column) so this takes effect on that person's *next* login attempt,
-// not necessarily immediately.
+// not necessarily immediately. Also "Kundebrukere"'s deactivate/reactivate — the same reversible
+// block-login concept applies just as well to a customer account.
 authRouter.patch("/users/:id/active", requireAuth, requireRole("admin", "super_admin"), (req, res) => {
-  const { target, status, error } = getStaffTarget(req.params.id, req.user);
+  const { target, status, error } = getStaffTarget(req.params.id, req.user, { allowCustomer: true });
   if (error) return res.status(status).json({ error });
   if (target.id === req.user.id) return res.status(403).json({ error: "Du kan ikke deaktivere din egen konto." });
   if (typeof req.body.active !== "boolean") return res.status(400).json({ error: "active må være true eller false" });
@@ -345,12 +357,13 @@ authRouter.patch("/users/:id/active", requireAuth, requireRole("admin", "super_a
 // (checklist_runs.cleaner_id, room_runs.cleaner_id, deviations.reported_by, or invitations.
 // invited_by all NOT NULL FKs — the delete would fail on any of them anyway with foreign_keys=ON,
 // this just gives a clear reason instead of a raw SQLite constraint error) and points at
-// deactivating instead, which is almost always the right call for a real former employee.
+// deactivating instead, which is almost always the right call for a real former employee (or, for
+// a customer account, one from a contact who's left that company).
 // site_schedules/room_schedules.assigned_cleaner_id are nullable scheduling metadata, not history
 // — cleared automatically as part of the delete rather than also blocking on those. Admin-only
 // (or super_admin, across every company).
 authRouter.delete("/users/:id", requireAuth, requireRole("admin", "super_admin"), (req, res) => {
-  const { target, status, error } = getStaffTarget(req.params.id, req.user);
+  const { target, status, error } = getStaffTarget(req.params.id, req.user, { allowCustomer: true });
   if (error) return res.status(status).json({ error });
   if (target.id === req.user.id) return res.status(403).json({ error: "Du kan ikke slette din egen konto." });
 
