@@ -103,11 +103,18 @@ ensureColumn("room_runs", "note", "note TEXT");
 // Per-item schedule override: null (the common case) means "due every time the room is
 // cleaned" — same default as before this existed. Set only for a task that's less frequent
 // than the room itself (e.g. a daily-cleaned room with one monthly task). Reuses the same
-// "Nth weekday of month" shape as rooms.monthly_weekday/monthly_occurrence, deliberately
-// without an interval_days mode — items have no per-item completion history to compute
-// "days since last done" from, so only the pure-calendar monthly mode is supported for now.
+// "Nth weekday of month" shape as rooms.monthly_weekday/monthly_occurrence. monthly_weekday set
+// with monthly_occurrence null means "weekly, every occurrence of that weekday" instead of a
+// specific month-occurrence (2026-09-21, for tasks pulled out of a merged room that need their
+// own day back — see "Kontorrenhold"/"Konditorirenhold").
 ensureColumn("room_checklist_items", "monthly_weekday", "monthly_weekday INTEGER");
 ensureColumn("room_checklist_items", "monthly_occurrence", "monthly_occurrence INTEGER");
+// interval_days ("annenhver uke" etc): mutually exclusive with monthly_weekday/monthly_occurrence
+// (routes/rooms.js's PATCH clears one when the other is set, same as rooms.interval_days already
+// does for room-level schedules). Originally left unbuilt because items had no reliable per-item
+// completion history to measure "days since last done" against — resolved by the
+// room_run_items.room_checklist_item_id link added below, which this reuses.
+ensureColumn("room_checklist_items", "interval_days", "interval_days INTEGER");
 // Stable link back to the template item a given day's room_run_item was snapshotted from —
 // room_run_items previously only carried a copy of the label, with no way to reliably tell
 // "was this specific monthly task done this month" from history (a renamed item would silently

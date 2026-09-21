@@ -619,9 +619,17 @@ roomsRouter.patch("/:id/items/:itemId", requireAuth, requireRole("admin", "manag
     if (!label) return res.status(400).json({ error: "Oppgavenavn kan ikke være tomt." });
     updates.label = label;
   }
-  if ("monthly_weekday" in req.body || "monthly_occurrence" in req.body) {
+  // interval_days ("annenhver uke" etc) and monthly_weekday/monthly_occurrence are mutually
+  // exclusive schedule modes — same pairing rooms already enforce for their own interval_days
+  // vs monthly_* fields — so setting one explicitly clears the other.
+  if ("interval_days" in req.body && req.body.interval_days != null) {
+    updates.interval_days = req.body.interval_days;
+    updates.monthly_weekday = null;
+    updates.monthly_occurrence = null;
+  } else if ("monthly_weekday" in req.body || "monthly_occurrence" in req.body) {
     updates.monthly_weekday = req.body.monthly_weekday ?? null;
     updates.monthly_occurrence = req.body.monthly_occurrence ?? null;
+    updates.interval_days = null;
   }
   const fields = Object.keys(updates);
   if (fields.length === 0) return res.status(400).json({ error: "No valid fields to update" });

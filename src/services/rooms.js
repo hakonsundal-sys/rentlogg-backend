@@ -90,17 +90,33 @@ export function isRoomDueOn(room, dateStr) {
   return weekdays.has(weekdayOf(dateStr));
 }
 
-// Three modes, distinguished by which of the two fields is set:
-// - both null: due every time the room is (the pre-existing default, unrestricted).
+const lastCompletedItemStmt = db.prepare(
+  `SELECT rr.started_at FROM room_run_items rri JOIN room_runs rr ON rr.id = rri.room_run_id
+   WHERE rri.room_checklist_item_id = ? AND rri.done = 1
+   ORDER BY rr.started_at DESC LIMIT 1`
+);
+
+// Four modes:
+// - interval_days set (mutually exclusive with the two fields below — see the PATCH route):
+//   due if never completed, or if it's been >= interval_days since the last time this specific
+//   item was checked off — same "days since last done" logic as isRoomDueOn's interval mode,
+//   just scoped to one item's own history via the room_checklist_item_id link on room_run_items.
+//   "Annenhver uke" (every other week, 2026-09-21) is interval_days=14 under the hood.
+// - both weekday/occurrence null: due every time the room is (the pre-existing default,
+//   unrestricted).
 // - weekday set, occurrence null: due weekly, every occurrence of that weekday — e.g. a task
 //   merged out of a room that used to have its own weekly schedule (see "Kontorrenhold"/
 //   "Konditorirenhold", 2026-09-21) and needs its own day now that the room's tasks all share
 //   one room-level schedule.
 // - both set: due only on the Nth occurrence of that weekday in the current calendar month
 //   (the original meaning) — same "Nth weekday of month" check as isRoomDueOn's monthly mode.
-// No interval_days mode here (unlike rooms): an item has no completion history of its own to
-// measure "days since last done" against, so only these two weekday-based modes exist.
 export function isItemDueOn(item, dateStr) {
+  if (item.interval_days != null) {
+    const last = lastCompletedItemStmt.get(item.id);
+    if (!last) return true;
+    const lastOsloDay = toOsloDateStr(last.started_at);
+    return daysBetween(lastOsloDay, dateStr) >= item.interval_days;
+  }
   if (item.monthly_weekday == null) return true;
   if (item.monthly_occurrence == null) return weekdayOf(dateStr) === item.monthly_weekday;
   const [year, month, day] = dateStr.split("-").map(Number);
