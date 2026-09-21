@@ -602,16 +602,33 @@ roomsRouter.post("/:id/items", requireAuth, requireRole("admin", "manager"), (re
   res.status(201).json(db.prepare("SELECT * FROM room_checklist_items WHERE id = ?").get(info.lastInsertRowid));
 });
 
-// Per-item schedule override (see db.js's migration comment). The frontend always sends both
-// monthly fields together — either a weekday+occurrence pair to switch into monthly mode, or
-// both null to go back to "every time the room is cleaned" — so no partial-pair validation.
+// Renaming a task (label) and its schedule override are independent, optional edits — the
+// frontend sends whichever one changed, never both at once, so each is only touched when present
+// in the body (an earlier version always wrote both monthly fields unconditionally, defaulting
+// absent ones to null — a label-only edit would have silently wiped any existing weekly/monthly
+// override). The frontend still always sends both monthly fields together when it does send them
+// (either a weekday+occurrence pair, or both null to go back to "every time the room is cleaned"),
+// so no partial-pair validation is needed there.
 roomsRouter.patch("/:id/items/:itemId", requireAuth, requireRole("admin", "manager"), (req, res) => {
   const { status, error } = getRoomScoped(req.params.id, req.user);
   if (error) return res.status(status).json({ error });
 
+  const updates = {};
+  if ("label" in req.body) {
+    const label = typeof req.body.label === "string" ? req.body.label.trim() : "";
+    if (!label) return res.status(400).json({ error: "Oppgavenavn kan ikke være tomt." });
+    updates.label = label;
+  }
+  if ("monthly_weekday" in req.body || "monthly_occurrence" in req.body) {
+    updates.monthly_weekday = req.body.monthly_weekday ?? null;
+    updates.monthly_occurrence = req.body.monthly_occurrence ?? null;
+  }
+  const fields = Object.keys(updates);
+  if (fields.length === 0) return res.status(400).json({ error: "No valid fields to update" });
+
   const result = db
-    .prepare("UPDATE room_checklist_items SET monthly_weekday = ?, monthly_occurrence = ? WHERE id = ? AND room_id = ?")
-    .run(req.body?.monthly_weekday ?? null, req.body?.monthly_occurrence ?? null, req.params.itemId, req.params.id);
+    .prepare(`UPDATE room_checklist_items SET ${fields.map((f) => `${f} = ?`).join(", ")} WHERE id = ? AND room_id = ?`)
+    .run(...fields.map((f) => updates[f]), req.params.itemId, req.params.id);
   if (result.changes === 0) return res.status(404).json({ error: "Not found" });
 
   res.json(db.prepare("SELECT * FROM room_checklist_items WHERE id = ?").get(req.params.itemId));
