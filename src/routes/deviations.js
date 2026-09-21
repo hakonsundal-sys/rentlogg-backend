@@ -236,10 +236,40 @@ deviationsRouter.patch("/:id/approve", requireAuth, requireRole("customer"), (re
 
   const { initials } = req.body;
   if (!initials || !initials.trim()) return res.status(400).json({ error: "Initialer/navn er påkrevd" });
+  const trimmedInitials = initials.trim();
 
-  db.prepare(
-    "UPDATE deviations SET customer_approved_at = datetime('now'), customer_approved_by_initials = ? WHERE id = ?"
-  ).run(initials.trim(), req.params.id);
+  db.transaction(() => {
+    db.prepare(
+      "UPDATE deviations SET customer_approved_at = datetime('now'), customer_approved_by_initials = ? WHERE id = ?"
+    ).run(trimmedInitials, req.params.id);
+
+    // Approving the last open (or not-yet-customer-approved) avvik tied to a room that's
+    // currently waiting on the customer's own checklist sign-off closes that gate too — the
+    // customer just told us the fix is good, so a separate "Godkjenn rom" click on top of that
+    // would be pure friction. Skipped while another deviation on the same room is still
+    // unresolved, so a room never silently completes while a known issue is still open.
+    if (deviation.room_id) {
+      const otherOpenDeviation = db
+        .prepare(
+          `SELECT 1 FROM deviations WHERE room_id = ? AND id != ?
+           AND (status != 'resolved' OR customer_approved_at IS NULL) LIMIT 1`
+        )
+        .get(deviation.room_id, req.params.id);
+      if (!otherOpenDeviation) {
+        const pendingRun = db
+          .prepare(
+            `SELECT id FROM room_runs WHERE room_id = ? AND ready_for_approval_at IS NOT NULL AND approved_at IS NULL
+             ORDER BY started_at DESC LIMIT 1`
+          )
+          .get(deviation.room_id);
+        if (pendingRun) {
+          db.prepare(
+            "UPDATE room_runs SET approved_at = datetime('now'), approved_by_initials = ?, completed_at = datetime('now') WHERE id = ?"
+          ).run(trimmedInitials, pendingRun.id);
+        }
+      }
+    }
+  })();
 
   res.json(db.prepare("SELECT * FROM deviations WHERE id = ?").get(req.params.id));
 });
