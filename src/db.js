@@ -103,10 +103,12 @@ ensureColumn("room_runs", "note", "note TEXT");
 // Per-item schedule override: null (the common case) means "due every time the room is
 // cleaned" — same default as before this existed. Set only for a task that's less frequent
 // than the room itself (e.g. a daily-cleaned room with one monthly task). Reuses the same
-// "Nth weekday of month" shape as rooms.monthly_weekday/monthly_occurrence. monthly_weekday set
-// with monthly_occurrence null means "weekly, every occurrence of that weekday" instead of a
-// specific month-occurrence (2026-09-21, for tasks pulled out of a merged room that need their
-// own day back — see "Kontorrenhold"/"Konditorirenhold").
+// "Nth weekday of month" shape as rooms.monthly_weekday/monthly_occurrence: both set together
+// means "only the Nth occurrence of that weekday in the month" ("Månedlig" mode). The weekly
+// mode (one or more specific weekdays, every week) used to be encoded here too as
+// monthly_weekday set with monthly_occurrence null (2026-09-21) — superseded below by
+// room_checklist_item_weekdays, which supports more than one day per item; monthly_weekday is
+// now null whenever an item is in weekly mode.
 ensureColumn("room_checklist_items", "monthly_weekday", "monthly_weekday INTEGER");
 ensureColumn("room_checklist_items", "monthly_occurrence", "monthly_occurrence INTEGER");
 // interval_days ("annenhver uke" etc): mutually exclusive with monthly_weekday/monthly_occurrence
@@ -195,4 +197,23 @@ if (db.prepare("SELECT COUNT(*) AS n FROM companies").get().n === 0) {
     db.prepare("UPDATE sites SET company_id = ? WHERE company_id IS NULL").run(companyId);
     db.prepare("UPDATE checklist_templates SET company_id = ? WHERE company_id IS NULL").run(companyId);
   }
+}
+
+// One-time: items using the old single-day "weekly" mode (monthly_weekday set, monthly_occurrence
+// null — see room_checklist_items.monthly_weekday's comment above) move that one day into the new
+// room_checklist_item_weekdays table, freeing monthly_weekday to mean only the true "Nth weekday of
+// month" mode from here on. Naturally idempotent: once migrated, monthly_weekday is null, so the
+// SELECT below finds nothing on later boots.
+const oldWeeklyItems = db
+  .prepare("SELECT id, monthly_weekday FROM room_checklist_items WHERE monthly_weekday IS NOT NULL AND monthly_occurrence IS NULL")
+  .all();
+if (oldWeeklyItems.length > 0) {
+  const insertItemWeekday = db.prepare("INSERT OR IGNORE INTO room_checklist_item_weekdays (item_id, weekday) VALUES (?, ?)");
+  const clearMonthlyWeekday = db.prepare("UPDATE room_checklist_items SET monthly_weekday = NULL WHERE id = ?");
+  db.transaction(() => {
+    for (const item of oldWeeklyItems) {
+      insertItemWeekday.run(item.id, item.monthly_weekday);
+      clearMonthlyWeekday.run(item.id);
+    }
+  })();
 }

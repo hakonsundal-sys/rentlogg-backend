@@ -183,6 +183,15 @@ CREATE TABLE IF NOT EXISTS room_schedules (
   UNIQUE(room_id, weekday)
 );
 
+-- A checklist item's "weekly" schedule mode (see room_checklist_items.monthly_weekday) can name
+-- more than one weekday (e.g. "man+tor") — one row per selected day, mirroring room_schedules.
+CREATE TABLE IF NOT EXISTS room_checklist_item_weekdays (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  item_id INTEGER NOT NULL REFERENCES room_checklist_items(id),
+  weekday INTEGER NOT NULL CHECK (weekday BETWEEN 0 AND 6),
+  UNIQUE(item_id, weekday)
+);
+
 CREATE TABLE IF NOT EXISTS room_runs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   room_id INTEGER NOT NULL REFERENCES rooms(id),

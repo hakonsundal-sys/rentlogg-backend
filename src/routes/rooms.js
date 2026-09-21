@@ -584,7 +584,16 @@ roomsRouter.get("/:id/items", requireAuth, (req, res) => {
   const { status, error } = getRoomScoped(req.params.id, req.user);
   if (error) return res.status(status).json({ error });
 
-  res.json(db.prepare("SELECT * FROM room_checklist_items WHERE room_id = ? ORDER BY sort_order").all(req.params.id));
+  const items = db.prepare("SELECT * FROM room_checklist_items WHERE room_id = ? ORDER BY sort_order").all(req.params.id);
+  const weekdayRows = db
+    .prepare(
+      `SELECT item_id, weekday FROM room_checklist_item_weekdays
+       WHERE item_id IN (SELECT id FROM room_checklist_items WHERE room_id = ?) ORDER BY weekday`
+    )
+    .all(req.params.id);
+  const weekdaysByItem = {};
+  weekdayRows.forEach((r) => { (weekdaysByItem[r.item_id] ||= []).push(r.weekday); });
+  res.json(items.map((item) => ({ ...item, weekly_days: weekdaysByItem[item.id] || [] })));
 });
 
 roomsRouter.post("/:id/items", requireAuth, requireRole("admin", "manager"), (req, res) => {
@@ -606,40 +615,70 @@ roomsRouter.post("/:id/items", requireAuth, requireRole("admin", "manager"), (re
 // frontend sends whichever one changed, never both at once, so each is only touched when present
 // in the body (an earlier version always wrote both monthly fields unconditionally, defaulting
 // absent ones to null — a label-only edit would have silently wiped any existing weekly/monthly
-// override). The frontend still always sends both monthly fields together when it does send them
-// (either a weekday+occurrence pair, or both null to go back to "every time the room is cleaned"),
-// so no partial-pair validation is needed there.
+// override). The frontend still always sends the full set of fields for whichever schedule mode
+// it does send, so no partial-pair validation is needed there.
 roomsRouter.patch("/:id/items/:itemId", requireAuth, requireRole("admin", "manager"), (req, res) => {
   const { status, error } = getRoomScoped(req.params.id, req.user);
   if (error) return res.status(status).json({ error });
 
+  const existing = db.prepare("SELECT id FROM room_checklist_items WHERE id = ? AND room_id = ?").get(req.params.itemId, req.params.id);
+  if (!existing) return res.status(404).json({ error: "Not found" });
+
   const updates = {};
+  // null = leave room_checklist_item_weekdays untouched; [] or a day list = replace its rows.
+  let weeklyDays = null;
   if ("label" in req.body) {
     const label = typeof req.body.label === "string" ? req.body.label.trim() : "";
     if (!label) return res.status(400).json({ error: "Oppgavenavn kan ikke være tomt." });
     updates.label = label;
   }
-  // interval_days ("annenhver uke" etc) and monthly_weekday/monthly_occurrence are mutually
-  // exclusive schedule modes — same pairing rooms already enforce for their own interval_days
-  // vs monthly_* fields — so setting one explicitly clears the other.
+  // interval_days ("annenhver uke" etc), monthly_weekday/monthly_occurrence ("Månedlig"), and
+  // weekly_days ("Ukentlig", one or more specific weekdays — see room_checklist_item_weekdays) are
+  // three mutually exclusive schedule modes, plus a fourth implicit "every time" (none of them
+  // set) — setting one explicitly clears the other two, same pairing rooms already enforce for
+  // their own interval_days vs monthly_* fields.
   if ("interval_days" in req.body && req.body.interval_days != null) {
     updates.interval_days = req.body.interval_days;
     updates.monthly_weekday = null;
     updates.monthly_occurrence = null;
+    weeklyDays = [];
+  } else if ("weekly_days" in req.body) {
+    const days = Array.isArray(req.body.weekly_days)
+      ? [...new Set(req.body.weekly_days.filter((w) => Number.isInteger(w) && w >= 0 && w <= 6))]
+      : [];
+    if (days.length === 0) return res.status(400).json({ error: "weekly_days må ha minst én dag" });
+    weeklyDays = days;
+    updates.monthly_weekday = null;
+    updates.monthly_occurrence = null;
+    updates.interval_days = null;
   } else if ("monthly_weekday" in req.body || "monthly_occurrence" in req.body) {
     updates.monthly_weekday = req.body.monthly_weekday ?? null;
     updates.monthly_occurrence = req.body.monthly_occurrence ?? null;
     updates.interval_days = null;
+    weeklyDays = [];
   }
   const fields = Object.keys(updates);
-  if (fields.length === 0) return res.status(400).json({ error: "No valid fields to update" });
+  if (fields.length === 0 && weeklyDays === null) return res.status(400).json({ error: "No valid fields to update" });
 
-  const result = db
-    .prepare(`UPDATE room_checklist_items SET ${fields.map((f) => `${f} = ?`).join(", ")} WHERE id = ? AND room_id = ?`)
-    .run(...fields.map((f) => updates[f]), req.params.itemId, req.params.id);
-  if (result.changes === 0) return res.status(404).json({ error: "Not found" });
+  db.transaction(() => {
+    if (fields.length > 0) {
+      db.prepare(`UPDATE room_checklist_items SET ${fields.map((f) => `${f} = ?`).join(", ")} WHERE id = ?`)
+        .run(...fields.map((f) => updates[f]), req.params.itemId);
+    }
+    if (weeklyDays !== null) {
+      db.prepare("DELETE FROM room_checklist_item_weekdays WHERE item_id = ?").run(req.params.itemId);
+      const insertItemWeekday = db.prepare("INSERT INTO room_checklist_item_weekdays (item_id, weekday) VALUES (?, ?)");
+      weeklyDays.forEach((weekday) => insertItemWeekday.run(req.params.itemId, weekday));
+    }
+  })();
 
-  res.json(db.prepare("SELECT * FROM room_checklist_items WHERE id = ?").get(req.params.itemId));
+  res.json({
+    ...db.prepare("SELECT * FROM room_checklist_items WHERE id = ?").get(req.params.itemId),
+    weekly_days: db
+      .prepare("SELECT weekday FROM room_checklist_item_weekdays WHERE item_id = ? ORDER BY weekday")
+      .all(req.params.itemId)
+      .map((r) => r.weekday),
+  });
 });
 
 roomsRouter.delete("/:id/items/:itemId", requireAuth, requireRole("admin", "manager"), (req, res) => {
@@ -653,6 +692,7 @@ roomsRouter.delete("/:id/items/:itemId", requireAuth, requireRole("admin", "mana
   // deleting the historical row itself) is enough to unblock the delete without touching history.
   const deleteItem = db.transaction((itemId, roomId) => {
     db.prepare("UPDATE room_run_items SET room_checklist_item_id = NULL WHERE room_checklist_item_id = ?").run(itemId);
+    db.prepare("DELETE FROM room_checklist_item_weekdays WHERE item_id = ?").run(itemId);
     db.prepare("DELETE FROM room_checklist_items WHERE id = ? AND room_id = ?").run(itemId, roomId);
   });
   deleteItem(req.params.itemId, req.params.id);
