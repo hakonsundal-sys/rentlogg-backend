@@ -11,7 +11,7 @@ clientsRouter.get("/", requireAuth, requireRole("admin", "manager"), (req, res) 
 
 clientsRouter.post("/", requireAuth, requireRole("admin"), (req, res) => {
   const { name, contact_email, contact_name, phone, address } = req.body;
-  if (!name) return res.status(400).json({ error: "name is required" });
+  if (!name) return res.status(400).json({ code: "name_required", error: "name is required" });
   const info = db
     .prepare("INSERT INTO clients (name, contact_email, contact_name, phone, address, company_id) VALUES (?, ?, ?, ?, ?, ?)")
     .run(name, contact_email || null, contact_name || null, phone || null, address || null, req.user.company_id);
@@ -20,8 +20,8 @@ clientsRouter.post("/", requireAuth, requireRole("admin"), (req, res) => {
 
 clientsRouter.get("/:id", requireAuth, requireRole("admin", "manager"), (req, res) => {
   const client = db.prepare("SELECT * FROM clients WHERE id = ?").get(req.params.id);
-  if (!client) return res.status(404).json({ error: "Not found" });
-  if (client.company_id !== req.user.company_id) return res.status(403).json({ error: "Not allowed" });
+  if (!client) return res.status(404).json({ code: "not_found", error: "Not found" });
+  if (client.company_id !== req.user.company_id) return res.status(403).json({ code: "not_allowed", error: "Not allowed" });
   res.json(client);
 });
 
@@ -29,11 +29,11 @@ const CLIENT_PATCH_FIELDS = ["name", "contact_email", "contact_name", "phone", "
 
 clientsRouter.patch("/:id", requireAuth, requireRole("admin"), (req, res) => {
   const client = db.prepare("SELECT id, company_id FROM clients WHERE id = ?").get(req.params.id);
-  if (!client) return res.status(404).json({ error: "Not found" });
-  if (client.company_id !== req.user.company_id) return res.status(403).json({ error: "Not allowed" });
+  if (!client) return res.status(404).json({ code: "not_found", error: "Not found" });
+  if (client.company_id !== req.user.company_id) return res.status(403).json({ code: "not_allowed", error: "Not allowed" });
 
   const fields = CLIENT_PATCH_FIELDS.filter((f) => f in req.body);
-  if (fields.length === 0) return res.status(400).json({ error: "No valid fields to update" });
+  if (fields.length === 0) return res.status(400).json({ code: "no_valid_fields", error: "No valid fields to update" });
 
   const setClause = fields.map((f) => `${f} = ?`).join(", ");
   const values = fields.map((f) => req.body[f]);
@@ -44,8 +44,8 @@ clientsRouter.patch("/:id", requireAuth, requireRole("admin"), (req, res) => {
 
 clientsRouter.delete("/:id", requireAuth, requireRole("admin"), (req, res) => {
   const client = db.prepare("SELECT id, company_id FROM clients WHERE id = ?").get(req.params.id);
-  if (!client) return res.status(404).json({ error: "Not found" });
-  if (client.company_id !== req.user.company_id) return res.status(403).json({ error: "Not allowed" });
+  if (!client) return res.status(404).json({ code: "not_found", error: "Not found" });
+  if (client.company_id !== req.user.company_id) return res.status(403).json({ code: "not_allowed", error: "Not allowed" });
 
   const siteCount = db.prepare("SELECT COUNT(*) AS n FROM sites WHERE client_id = ?").get(req.params.id).n;
   const userCount = db.prepare("SELECT COUNT(*) AS n FROM users WHERE client_id = ?").get(req.params.id).n;

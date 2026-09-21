@@ -20,7 +20,7 @@ departmentsRouter.get("/", requireAuth, requireRole("admin", "manager", "super_a
 
 departmentsRouter.post("/", requireAuth, requireRole("admin", "manager"), (req, res) => {
   const { name } = req.body;
-  if (!name) return res.status(400).json({ error: "name is required" });
+  if (!name) return res.status(400).json({ code: "name_required", error: "name is required" });
 
   const info = db
     .prepare("INSERT INTO departments (name, company_id) VALUES (?, ?)")
@@ -31,11 +31,11 @@ departmentsRouter.post("/", requireAuth, requireRole("admin", "manager"), (req, 
 
 departmentsRouter.patch("/:id", requireAuth, requireRole("admin", "manager"), (req, res) => {
   const department = db.prepare("SELECT id, company_id FROM departments WHERE id = ?").get(req.params.id);
-  if (!department) return res.status(404).json({ error: "Not found" });
-  if (department.company_id !== req.user.company_id) return res.status(403).json({ error: "Not allowed" });
+  if (!department) return res.status(404).json({ code: "not_found", error: "Not found" });
+  if (department.company_id !== req.user.company_id) return res.status(403).json({ code: "not_allowed", error: "Not allowed" });
 
   const { name } = req.body;
-  if (!name) return res.status(400).json({ error: "name is required" });
+  if (!name) return res.status(400).json({ code: "name_required", error: "name is required" });
 
   db.prepare("UPDATE departments SET name = ? WHERE id = ?").run(name, req.params.id);
   res.json(db.prepare("SELECT * FROM departments WHERE id = ?").get(req.params.id));
@@ -43,8 +43,8 @@ departmentsRouter.patch("/:id", requireAuth, requireRole("admin", "manager"), (r
 
 departmentsRouter.delete("/:id", requireAuth, requireRole("admin", "manager"), (req, res) => {
   const department = db.prepare("SELECT id, company_id FROM departments WHERE id = ?").get(req.params.id);
-  if (!department) return res.status(404).json({ error: "Not found" });
-  if (department.company_id !== req.user.company_id) return res.status(403).json({ error: "Not allowed" });
+  if (!department) return res.status(404).json({ code: "not_found", error: "Not found" });
+  if (department.company_id !== req.user.company_id) return res.status(403).json({ code: "not_allowed", error: "Not allowed" });
 
   const siteCount = db.prepare("SELECT COUNT(*) AS n FROM sites WHERE department_id = ?").get(req.params.id).n;
   if (siteCount > 0) {

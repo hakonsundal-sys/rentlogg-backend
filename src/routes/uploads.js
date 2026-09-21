@@ -17,7 +17,7 @@ const uploadsDir = process.env.UPLOADS_DIR || "uploads";
 function sendStoredFile(res, subdir, filePath) {
   const absolutePath = path.resolve(uploadsDir, ...(subdir ? [subdir] : []), path.basename(filePath));
   res.sendFile(absolutePath, (err) => {
-    if (err && !res.headersSent) res.status(404).json({ error: "Not found" });
+    if (err && !res.headersSent) res.status(404).json({ code: "not_found", error: "Not found" });
   });
 }
 
@@ -30,10 +30,10 @@ uploadsRouter.get("/avatars/:filename", requireAuthQueryOrHeader, (req, res) => 
     .prepare("SELECT id, company_id, avatar_url FROM users WHERE instr(avatar_url, ?) > 0")
     .get(req.params.filename);
   if (!owner || path.basename(owner.avatar_url) !== req.params.filename) {
-    return res.status(404).json({ error: "Not found" });
+    return res.status(404).json({ code: "not_found", error: "Not found" });
   }
   const sameCompany = req.user.role !== "customer" && owner.company_id === req.user.company_id;
-  if (owner.id !== req.user.id && !sameCompany) return res.status(403).json({ error: "Not allowed" });
+  if (owner.id !== req.user.id && !sameCompany) return res.status(403).json({ code: "not_allowed", error: "Not allowed" });
 
   sendStoredFile(res, "avatars", owner.avatar_url);
 });
@@ -65,7 +65,7 @@ uploadsRouter.get("/:filename", requireAuthQueryOrHeader, (req, res) => {
       req.user.role === "customer"
         ? photo.site_client_id === req.user.client_id
         : photo.site_company_id === req.user.company_id;
-    if (!allowed) return res.status(403).json({ error: "Not allowed" });
+    if (!allowed) return res.status(403).json({ code: "not_allowed", error: "Not allowed" });
     return sendStoredFile(res, null, photo.file_path);
   }
 
@@ -83,9 +83,9 @@ uploadsRouter.get("/:filename", requireAuthQueryOrHeader, (req, res) => {
     // Mirrors GET /sites/:id/documents' own visibility filter — a staff-only document shouldn't
     // become fetchable by a customer just because they learned its filename some other way.
     const visibleTo = req.user.role === "customer" ? ["customer", "both"] : ["staff", "both"];
-    if (!allowed || !visibleTo.includes(doc.visibility)) return res.status(403).json({ error: "Not allowed" });
+    if (!allowed || !visibleTo.includes(doc.visibility)) return res.status(403).json({ code: "not_allowed", error: "Not allowed" });
     return sendStoredFile(res, null, doc.file_path);
   }
 
-  res.status(404).json({ error: "Not found" });
+  res.status(404).json({ code: "not_found", error: "Not found" });
 });

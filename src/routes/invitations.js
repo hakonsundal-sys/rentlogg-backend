@@ -16,18 +16,18 @@ const VALID_ROLES = ["admin", "manager", "cleaner", "customer"];
 invitationsRouter.post("/", requireAuth, requireRole("admin", "super_admin"), (req, res) => {
   const { email, role, client_id } = req.body;
   if (!email || !VALID_ROLES.includes(role)) {
-    return res.status(400).json({ error: "email and a valid role are required" });
+    return res.status(400).json({ code: "email_and_role_required", error: "email and a valid role are required" });
   }
   if (role === "customer" && !client_id) {
-    return res.status(400).json({ error: "client_id is required for customer invitations" });
+    return res.status(400).json({ code: "client_id_required", error: "client_id is required for customer invitations" });
   }
 
   let companyId = req.user.company_id;
   if (req.user.role === "super_admin") {
     companyId = req.body.company_id;
-    if (!companyId) return res.status(400).json({ error: "company_id er påkrevd når du inviterer som super_admin" });
+    if (!companyId) return res.status(400).json({ code: "company_id_required", error: "company_id er påkrevd når du inviterer som super_admin" });
     if (!db.prepare("SELECT 1 FROM companies WHERE id = ?").get(companyId)) {
-      return res.status(400).json({ error: "Ukjent firma" });
+      return res.status(400).json({ code: "unknown_company", error: "Ukjent firma" });
     }
   }
 
@@ -39,12 +39,12 @@ invitationsRouter.post("/", requireAuth, requireRole("admin", "super_admin"), (r
   if (role === "customer") {
     const client = db.prepare("SELECT company_id FROM clients WHERE id = ?").get(client_id);
     if (!client || client.company_id !== companyId) {
-      return res.status(400).json({ error: "Ukjent kunde" });
+      return res.status(400).json({ code: "unknown_client", error: "Ukjent kunde" });
     }
   }
 
   const existingUser = db.prepare("SELECT id FROM users WHERE email = ?").get(email);
-  if (existingUser) return res.status(409).json({ error: "En konto med denne e-posten finnes allerede" });
+  if (existingUser) return res.status(409).json({ code: "email_taken", error: "En konto med denne e-posten finnes allerede" });
 
   // One valid link per email at a time, so there's never ambiguity about which link works.
   db.prepare("UPDATE invitations SET status = 'revoked' WHERE email = ? AND status = 'pending'").run(email);
@@ -85,9 +85,9 @@ invitationsRouter.get("/", requireAuth, requireRole("admin", "super_admin"), (re
 
 invitationsRouter.delete("/:id", requireAuth, requireRole("admin"), (req, res) => {
   const invitation = db.prepare("SELECT * FROM invitations WHERE id = ?").get(req.params.id);
-  if (!invitation) return res.status(404).json({ error: "Not found" });
-  if (invitation.company_id !== req.user.company_id) return res.status(403).json({ error: "Not allowed" });
-  if (invitation.status !== "pending") return res.status(409).json({ error: "Invitation already used or revoked" });
+  if (!invitation) return res.status(404).json({ code: "not_found", error: "Not found" });
+  if (invitation.company_id !== req.user.company_id) return res.status(403).json({ code: "not_allowed", error: "Not allowed" });
+  if (invitation.status !== "pending") return res.status(409).json({ code: "invitation_used", error: "Invitation already used or revoked" });
 
   db.prepare("UPDATE invitations SET status = 'revoked' WHERE id = ?").run(req.params.id);
   res.json({ ok: true });
@@ -95,9 +95,9 @@ invitationsRouter.delete("/:id", requireAuth, requireRole("admin"), (req, res) =
 
 function findValidInvitation(token) {
   const invitation = db.prepare("SELECT * FROM invitations WHERE token = ?").get(token);
-  if (!invitation) return { error: "not_found" };
-  if (invitation.status !== "pending") return { error: "already_used" };
-  if (invitation.expires_at <= new Date().toISOString().replace("T", " ").slice(0, 19)) return { error: "expired" };
+  if (!invitation) return { code: "not_found", error: "not_found" };
+  if (invitation.status !== "pending") return { code: "invitation_used", error: "already_used" };
+  if (invitation.expires_at <= new Date().toISOString().replace("T", " ").slice(0, 19)) return { code: "invitation_expired", error: "expired" };
   return { invitation };
 }
 
@@ -111,13 +111,13 @@ invitationsRouter.get("/:token", (req, res) => {
 // Public: no auth, creates the account and logs the new user in immediately.
 invitationsRouter.post("/:token/accept", (req, res) => {
   const { invitation, error } = findValidInvitation(req.params.token);
-  if (error) return res.status(error === "not_found" ? 404 : 410).json({ error: "Invitasjonen er ikke gyldig" });
+  if (error) return res.status(error === "not_found" ? 404 : 410).json({ code: "invitation_invalid", error: "Invitasjonen er ikke gyldig" });
 
   const { name, password } = req.body;
-  if (!name || !password) return res.status(400).json({ error: "name and password are required" });
+  if (!name || !password) return res.status(400).json({ code: "name_and_password_required", error: "name and password are required" });
 
   const existingUser = db.prepare("SELECT id FROM users WHERE email = ?").get(invitation.email);
-  if (existingUser) return res.status(409).json({ error: "En konto med denne e-posten finnes allerede" });
+  if (existingUser) return res.status(409).json({ code: "email_taken", error: "En konto med denne e-posten finnes allerede" });
 
   const password_hash = bcrypt.hashSync(password, 10);
   const info = db

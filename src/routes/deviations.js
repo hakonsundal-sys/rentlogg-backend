@@ -27,9 +27,9 @@ function getDeviationScoped(deviationId, user) {
        FROM deviations d JOIN sites s ON s.id = d.site_id WHERE d.id = ?`
     )
     .get(deviationId);
-  if (!deviation) return { status: 404, error: "Not found" };
-  if (user.role === "customer" && deviation.site_client_id !== user.client_id) return { status: 403, error: "Not allowed" };
-  if (user.role !== "customer" && deviation.site_company_id !== user.company_id) return { status: 403, error: "Not allowed" };
+  if (!deviation) return { status: 404, code: "not_found", error: "Not found" };
+  if (user.role === "customer" && deviation.site_client_id !== user.client_id) return { status: 403, code: "not_allowed", error: "Not allowed" };
+  if (user.role !== "customer" && deviation.site_company_id !== user.company_id) return { status: 403, code: "not_allowed", error: "Not allowed" };
   return { deviation };
 }
 
@@ -95,16 +95,16 @@ deviationsRouter.get("/", requireAuth, (req, res) => {
 
 deviationsRouter.post("/", requireAuth, requireRole("admin", "cleaner", "manager", "customer"), (req, res) => {
   const { site_id, run_id, room_id, room_task_label, title, description, priority, initials } = req.body;
-  if (!site_id || !description) return res.status(400).json({ error: "site_id and description are required" });
-  if (!initials || !initials.trim()) return res.status(400).json({ error: "Initialer/navn er påkrevd" });
+  if (!site_id || !description) return res.status(400).json({ code: "site_and_description_required", error: "site_id and description are required" });
+  if (!initials || !initials.trim()) return res.status(400).json({ code: "initials_required", error: "Initialer/navn er påkrevd" });
 
   const site = db.prepare("SELECT * FROM sites WHERE id = ?").get(site_id);
-  if (!site) return res.status(404).json({ error: "Not found" });
+  if (!site) return res.status(404).json({ code: "not_found", error: "Not found" });
   if (req.user.role === "customer" && site.client_id !== req.user.client_id) {
-    return res.status(403).json({ error: "Not allowed" });
+    return res.status(403).json({ code: "not_allowed", error: "Not allowed" });
   }
   if (req.user.role !== "customer" && site.company_id !== req.user.company_id) {
-    return res.status(403).json({ error: "Not allowed" });
+    return res.status(403).json({ code: "not_allowed", error: "Not allowed" });
   }
 
   // run_id/room_id are trusted input from here on — both must actually belong to this site, or a
@@ -112,11 +112,11 @@ deviationsRouter.post("/", requireAuth, requireRole("admin", "cleaner", "manager
   // getRunDetail) a foreign run/room's started_at or name from a different site or tenant.
   if (run_id) {
     const run = db.prepare("SELECT site_id FROM checklist_runs WHERE id = ?").get(run_id);
-    if (!run || run.site_id !== Number(site_id)) return res.status(400).json({ error: "Ukjent besøk" });
+    if (!run || run.site_id !== Number(site_id)) return res.status(400).json({ code: "unknown_run", error: "Ukjent besøk" });
   }
   if (room_id) {
     const room = db.prepare("SELECT site_id FROM rooms WHERE id = ?").get(room_id);
-    if (!room || room.site_id !== Number(site_id)) return res.status(400).json({ error: "Ukjent rom" });
+    if (!room || room.site_id !== Number(site_id)) return res.status(400).json({ code: "unknown_room", error: "Ukjent rom" });
   }
 
   // Cleaners report during their active visit and already know its run_id; customers report
@@ -145,9 +145,9 @@ deviationsRouter.post("/", requireAuth, requireRole("admin", "cleaner", "manager
 });
 
 deviationsRouter.post("/:id/photos", requireAuth, requireRole("admin", "cleaner", "manager", "customer"), upload.single("photo"), async (req, res) => {
-  const { status, error } = getDeviationScoped(req.params.id, req.user);
-  if (error) return res.status(status).json({ error });
-  if (!req.file) return res.status(400).json({ error: "No file uploaded (field name must be 'photo')" });
+  const { status, code, error } = getDeviationScoped(req.params.id, req.user);
+  if (error) return res.status(status).json({ code, error });
+  if (!req.file) return res.status(400).json({ code: "no_file_uploaded", error: "No file uploaded (field name must be 'photo')" });
   await normalizeImageOrientation(path.join(process.env.UPLOADS_DIR || "uploads", req.file.filename));
   const info = db
     .prepare("INSERT INTO photos (deviation_id, file_path, kind) VALUES (?, ?, 'general')")
@@ -164,8 +164,8 @@ function recomputeSiteStatus(siteId) {
 const DEVIATION_PATCH_FIELDS = ["title", "description", "priority"];
 
 deviationsRouter.patch("/:id", requireAuth, requireRole("admin", "manager"), (req, res) => {
-  const { deviation, status, error } = getDeviationScoped(req.params.id, req.user);
-  if (error) return res.status(status).json({ error });
+  const { deviation, status, code, error } = getDeviationScoped(req.params.id, req.user);
+  if (error) return res.status(status).json({ code, error });
 
   const fields = DEVIATION_PATCH_FIELDS.filter((f) => f in req.body);
   if (fields.length) {
@@ -177,7 +177,7 @@ deviationsRouter.patch("/:id", requireAuth, requireRole("admin", "manager"), (re
   if ("status" in req.body) {
     const { status } = req.body;
     if (!["open", "in_progress", "resolved"].includes(status)) {
-      return res.status(400).json({ error: "Invalid status" });
+      return res.status(400).json({ code: "invalid_status", error: "Invalid status" });
     }
     db.prepare(
       "UPDATE deviations SET status = ?, resolved_at = CASE WHEN ? = 'resolved' THEN datetime('now') ELSE resolved_at END WHERE id = ?"
@@ -196,13 +196,13 @@ const REPLY_ACTIONS = ["resolve", "assign_manager", "assign_customer"];
 // (see canAccessRun in runDetail.js), so whichever cleaner is actually on site today needs to be
 // able to reply, not just whoever happened to check in first.
 deviationsRouter.patch("/:id/reply", requireAuth, requireRole("cleaner", "manager"), (req, res) => {
-  const { deviation, status, error } = getDeviationScoped(req.params.id, req.user);
-  if (error) return res.status(status).json({ error });
+  const { deviation, status, code, error } = getDeviationScoped(req.params.id, req.user);
+  if (error) return res.status(status).json({ code, error });
 
   const { reply_text, initials, action } = req.body;
-  if (!reply_text || !reply_text.trim()) return res.status(400).json({ error: "Svar er påkrevd" });
-  if (!initials || !initials.trim()) return res.status(400).json({ error: "Initialer/navn er påkrevd" });
-  if (!REPLY_ACTIONS.includes(action)) return res.status(400).json({ error: "Invalid action" });
+  if (!reply_text || !reply_text.trim()) return res.status(400).json({ code: "reply_required", error: "Svar er påkrevd" });
+  if (!initials || !initials.trim()) return res.status(400).json({ code: "initials_required", error: "Initialer/navn er påkrevd" });
+  if (!REPLY_ACTIONS.includes(action)) return res.status(400).json({ code: "invalid_action", error: "Invalid action" });
 
   db.prepare(
     "UPDATE deviations SET reply_text = ?, replied_by_initials = ?, replied_at = datetime('now') WHERE id = ?"
@@ -227,15 +227,15 @@ deviationsRouter.patch("/:id/reply", requireAuth, requireRole("cleaner", "manage
 // fixed") instead of just passively seeing it disappear — stronger documentation for both
 // sides than a status flip nobody outside the cleaner/admin ever explicitly agreed to.
 deviationsRouter.patch("/:id/approve", requireAuth, requireRole("customer"), (req, res) => {
-  const { deviation, status, error } = getDeviationScoped(req.params.id, req.user);
-  if (error) return res.status(status).json({ error });
+  const { deviation, status, code, error } = getDeviationScoped(req.params.id, req.user);
+  if (error) return res.status(status).json({ code, error });
 
   if (deviation.status !== "resolved") {
-    return res.status(400).json({ error: "Avviket er ikke løst ennå." });
+    return res.status(400).json({ code: "deviation_not_resolved", error: "Avviket er ikke løst ennå." });
   }
 
   const { initials } = req.body;
-  if (!initials || !initials.trim()) return res.status(400).json({ error: "Initialer/navn er påkrevd" });
+  if (!initials || !initials.trim()) return res.status(400).json({ code: "initials_required", error: "Initialer/navn er påkrevd" });
   const trimmedInitials = initials.trim();
 
   db.transaction(() => {
@@ -275,8 +275,8 @@ deviationsRouter.patch("/:id/approve", requireAuth, requireRole("customer"), (re
 });
 
 deviationsRouter.delete("/:id", requireAuth, requireRole("admin", "manager"), (req, res) => {
-  const { deviation, status, error } = getDeviationScoped(req.params.id, req.user);
-  if (error) return res.status(status).json({ error });
+  const { deviation, status, code, error } = getDeviationScoped(req.params.id, req.user);
+  if (error) return res.status(status).json({ code, error });
 
   db.prepare("SELECT file_path FROM photos WHERE deviation_id = ?").all(req.params.id).forEach((p) => removeUploadedFile(p.file_path));
   db.prepare("DELETE FROM photos WHERE deviation_id = ?").run(req.params.id);

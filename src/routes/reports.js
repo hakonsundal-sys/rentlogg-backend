@@ -17,13 +17,13 @@ export const reportsRouter = Router();
 
 reportsRouter.get("/sites/:id/pdf", requireAuth, requireRole("admin", "manager", "customer"), (req, res) => {
   const site = db.prepare("SELECT * FROM sites WHERE id = ?").get(req.params.id);
-  if (!site) return res.status(404).json({ error: "Not found" });
+  if (!site) return res.status(404).json({ code: "not_found", error: "Not found" });
 
   if (req.user.role === "customer" && site.client_id !== req.user.client_id) {
-    return res.status(403).json({ error: "Not allowed" });
+    return res.status(403).json({ code: "not_allowed", error: "Not allowed" });
   }
   if (req.user.role !== "customer" && site.company_id !== req.user.company_id) {
-    return res.status(403).json({ error: "Not allowed" });
+    return res.status(403).json({ code: "not_allowed", error: "Not allowed" });
   }
 
   const client = db.prepare("SELECT * FROM clients WHERE id = ?").get(site.client_id);
@@ -84,20 +84,20 @@ reportsRouter.get("/sites/:id/pdf", requireAuth, requireRole("admin", "manager",
 
 reportsRouter.get("/sites/:id/photos.zip", requireAuth, requireRole("admin", "manager", "customer"), (req, res) => {
   const site = db.prepare("SELECT * FROM sites WHERE id = ?").get(req.params.id);
-  if (!site) return res.status(404).json({ error: "Not found" });
+  if (!site) return res.status(404).json({ code: "not_found", error: "Not found" });
 
   if (req.user.role === "customer" && site.client_id !== req.user.client_id) {
-    return res.status(403).json({ error: "Not allowed" });
+    return res.status(403).json({ code: "not_allowed", error: "Not allowed" });
   }
   if (req.user.role !== "customer" && site.company_id !== req.user.company_id) {
-    return res.status(403).json({ error: "Not allowed" });
+    return res.status(403).json({ code: "not_allowed", error: "Not allowed" });
   }
 
   const runs = db
     .prepare("SELECT * FROM checklist_runs WHERE site_id = ? ORDER BY started_at DESC LIMIT 20")
     .all(site.id);
   const photos = gatherReportPhotos(runs);
-  if (photos.length === 0) return res.status(404).json({ error: "Ingen bilder tilgjengelig." });
+  if (photos.length === 0) return res.status(404).json({ code: "no_photos", error: "Ingen bilder tilgjengelig." });
 
   streamPhotosZip(res, photos, `bilder-${site.id}.zip`);
 });
@@ -108,8 +108,8 @@ reportsRouter.get("/sites/:id/photos.zip", requireAuth, requireRole("admin", "ma
 // access-scoping as GET /checklists/runs/:id via runDetail.js.
 reportsRouter.get("/runs/:id/html", requireAuth, async (req, res) => {
   const detail = getRunDetail(req.params.id);
-  if (!detail) return res.status(404).json({ error: "Not found" });
-  if (!canAccessRun(detail, req.user)) return res.status(403).json({ error: "Not allowed" });
+  if (!detail) return res.status(404).json({ code: "not_found", error: "Not found" });
+  if (!canAccessRun(detail, req.user)) return res.status(403).json({ code: "not_allowed", error: "Not allowed" });
 
   res.setHeader("Content-Type", "text/html; charset=utf-8");
   res.send(await buildReportHtml(detail));
@@ -117,8 +117,8 @@ reportsRouter.get("/runs/:id/html", requireAuth, async (req, res) => {
 
 reportsRouter.get("/runs/:id/pdf", requireAuth, (req, res) => {
   const detail = getRunDetail(req.params.id);
-  if (!detail) return res.status(404).json({ error: "Not found" });
-  if (!canAccessRun(detail, req.user)) return res.status(403).json({ error: "Not allowed" });
+  if (!detail) return res.status(404).json({ code: "not_found", error: "Not found" });
+  if (!canAccessRun(detail, req.user)) return res.status(403).json({ code: "not_allowed", error: "Not allowed" });
 
   res.setHeader("Content-Type", "application/pdf");
   res.setHeader("Content-Disposition", `attachment; filename=rapport-besok-${detail.id}.pdf`);

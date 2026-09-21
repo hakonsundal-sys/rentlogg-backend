@@ -39,9 +39,9 @@ function scopeSitesForUser(user) {
 // client's sites, every staff role is scoped to their own company's sites.
 function getSiteScoped(siteId, user) {
   const site = db.prepare("SELECT * FROM sites WHERE id = ?").get(siteId);
-  if (!site) return { status: 404, error: "Not found" };
-  if (user.role === "customer" && site.client_id !== user.client_id) return { status: 403, error: "Not allowed" };
-  if (user.role !== "customer" && site.company_id !== user.company_id) return { status: 403, error: "Not allowed" };
+  if (!site) return { status: 404, code: "not_found", error: "Not found" };
+  if (user.role === "customer" && site.client_id !== user.client_id) return { status: 403, code: "not_allowed", error: "Not allowed" };
+  if (user.role !== "customer" && site.company_id !== user.company_id) return { status: 403, code: "not_allowed", error: "Not allowed" };
   return { site };
 }
 
@@ -56,23 +56,23 @@ function isValidSendHour(value) {
 
 sitesRouter.post("/", requireAuth, requireRole("admin", "manager"), (req, res) => {
   const { name, client_id, department_id, address, checklist_template_id, latitude, longitude, gps_radius_meters, room_count, report_recipients, report_send_hour } = req.body;
-  if (!name || !client_id) return res.status(400).json({ error: "name and client_id are required" });
-  if (!isValidSendHour(report_send_hour)) return res.status(400).json({ error: "report_send_hour må være et heltall 0–23" });
+  if (!name || !client_id) return res.status(400).json({ code: "name_and_client_required", error: "name and client_id are required" });
+  if (!isValidSendHour(report_send_hour)) return res.status(400).json({ code: "invalid_report_hour", error: "report_send_hour må være et heltall 0–23" });
 
   const client = db.prepare("SELECT company_id FROM clients WHERE id = ?").get(client_id);
   if (!client || client.company_id !== req.user.company_id) {
-    return res.status(400).json({ error: "Ukjent kunde" });
+    return res.status(400).json({ code: "unknown_client", error: "Ukjent kunde" });
   }
   if (department_id) {
     const department = db.prepare("SELECT company_id FROM departments WHERE id = ?").get(department_id);
     if (!department || department.company_id !== req.user.company_id) {
-      return res.status(400).json({ error: "Ukjent avdeling" });
+      return res.status(400).json({ code: "unknown_department", error: "Ukjent avdeling" });
     }
   }
   if (checklist_template_id) {
     const template = db.prepare("SELECT company_id FROM checklist_templates WHERE id = ?").get(checklist_template_id);
     if (!template || template.company_id !== req.user.company_id) {
-      return res.status(400).json({ error: "Ukjent sjekklistemal" });
+      return res.status(400).json({ code: "unknown_checklist_template", error: "Ukjent sjekklistemal" });
     }
   }
 
@@ -90,32 +90,32 @@ sitesRouter.post("/", requireAuth, requireRole("admin", "manager"), (req, res) =
 const SITE_PATCH_FIELDS = ["name", "client_id", "department_id", "address", "checklist_template_id", "latitude", "longitude", "gps_radius_meters", "room_count", "report_recipients", "report_send_hour"];
 
 sitesRouter.patch("/:id", requireAuth, requireRole("admin", "manager"), (req, res) => {
-  const { site, status, error } = getSiteScoped(req.params.id, req.user);
-  if (error) return res.status(status).json({ error });
+  const { site, status, code, error } = getSiteScoped(req.params.id, req.user);
+  if (error) return res.status(status).json({ code, error });
 
   if ("report_send_hour" in req.body && !isValidSendHour(req.body.report_send_hour)) {
-    return res.status(400).json({ error: "report_send_hour må være et heltall 0–23" });
+    return res.status(400).json({ code: "invalid_report_hour", error: "report_send_hour må være et heltall 0–23" });
   }
 
   const fields = SITE_PATCH_FIELDS.filter((f) => f in req.body);
-  if (fields.length === 0) return res.status(400).json({ error: "No valid fields to update" });
+  if (fields.length === 0) return res.status(400).json({ code: "no_valid_fields", error: "No valid fields to update" });
 
   if (req.body.client_id) {
     const client = db.prepare("SELECT company_id FROM clients WHERE id = ?").get(req.body.client_id);
     if (!client || client.company_id !== req.user.company_id) {
-      return res.status(400).json({ error: "Ukjent kunde" });
+      return res.status(400).json({ code: "unknown_client", error: "Ukjent kunde" });
     }
   }
   if (req.body.checklist_template_id) {
     const template = db.prepare("SELECT company_id FROM checklist_templates WHERE id = ?").get(req.body.checklist_template_id);
     if (!template || template.company_id !== req.user.company_id) {
-      return res.status(400).json({ error: "Ukjent sjekklistemal" });
+      return res.status(400).json({ code: "unknown_checklist_template", error: "Ukjent sjekklistemal" });
     }
   }
   if (req.body.department_id) {
     const department = db.prepare("SELECT company_id FROM departments WHERE id = ?").get(req.body.department_id);
     if (!department || department.company_id !== req.user.company_id) {
-      return res.status(400).json({ error: "Ukjent avdeling" });
+      return res.status(400).json({ code: "unknown_department", error: "Ukjent avdeling" });
     }
   }
 
@@ -127,8 +127,8 @@ sitesRouter.patch("/:id", requireAuth, requireRole("admin", "manager"), (req, re
 });
 
 sitesRouter.delete("/:id", requireAuth, requireRole("admin", "manager"), (req, res) => {
-  const { site, status, error } = getSiteScoped(req.params.id, req.user);
-  if (error) return res.status(status).json({ error });
+  const { site, status, code, error } = getSiteScoped(req.params.id, req.user);
+  if (error) return res.status(status).json({ code, error });
 
   // Collected up front so every underlying file (not just the DB rows) is actually removed —
   // previously this cascade deleted photos/site_documents rows but left the files themselves on
@@ -205,8 +205,8 @@ sitesRouter.delete("/:id", requireAuth, requireRole("admin", "manager"), (req, r
 // --- Recurring weekly schedule ---
 
 sitesRouter.get("/:id/schedule", requireAuth, requireRole("admin", "manager"), (req, res) => {
-  const { status, error } = getSiteScoped(req.params.id, req.user);
-  if (error) return res.status(status).json({ error });
+  const { status, code, error } = getSiteScoped(req.params.id, req.user);
+  if (error) return res.status(status).json({ code, error });
 
   const rows = db
     .prepare(
@@ -226,7 +226,7 @@ sitesRouter.post("/:id/schedule", requireAuth, requireRole("admin", "manager"), 
 
   const { weekday, assigned_cleaner_id } = req.body;
   if (weekday === undefined || weekday === null || weekday < 0 || weekday > 6) {
-    return res.status(400).json({ error: "weekday (0-6) is required" });
+    return res.status(400).json({ code: "weekday_required", error: "weekday (0-6) is required" });
   }
 
   db.prepare(
@@ -245,8 +245,8 @@ sitesRouter.post("/:id/schedule", requireAuth, requireRole("admin", "manager"), 
 });
 
 sitesRouter.delete("/:id/schedule/:weekday", requireAuth, requireRole("admin", "manager"), (req, res) => {
-  const { status, error } = getSiteScoped(req.params.id, req.user);
-  if (error) return res.status(status).json({ error });
+  const { status, code, error } = getSiteScoped(req.params.id, req.user);
+  if (error) return res.status(status).json({ code, error });
 
   db.prepare("DELETE FROM site_schedules WHERE site_id = ? AND weekday = ?").run(req.params.id, req.params.weekday);
   res.json({ ok: true });
@@ -257,8 +257,8 @@ sitesRouter.delete("/:id/schedule/:weekday", requireAuth, requireRole("admin", "
 // Staff (admin/manager/cleaner) see 'staff'/'both'; customer sees 'customer'/'both' and only
 // for their own client's site — same scoping every other customer-facing route already uses.
 sitesRouter.get("/:id/documents", requireAuth, (req, res) => {
-  const { site, status, error } = getSiteScoped(req.params.id, req.user);
-  if (error) return res.status(status).json({ error });
+  const { site, status, code, error } = getSiteScoped(req.params.id, req.user);
+  if (error) return res.status(status).json({ code, error });
 
   const visibleTo = req.user.role === "customer" ? ["customer", "both"] : ["staff", "both"];
   const docs = db
@@ -270,9 +270,9 @@ sitesRouter.get("/:id/documents", requireAuth, (req, res) => {
 });
 
 sitesRouter.post("/:id/documents", requireAuth, requireRole("admin", "manager"), docUpload.single("file"), async (req, res) => {
-  const { site, status, error } = getSiteScoped(req.params.id, req.user);
-  if (error) return res.status(status).json({ error });
-  if (!req.file) return res.status(400).json({ error: "Ingen fil valgt." });
+  const { site, status, code, error } = getSiteScoped(req.params.id, req.user);
+  if (error) return res.status(status).json({ code, error });
+  if (!req.file) return res.status(400).json({ code: "no_file_selected", error: "Ingen fil valgt." });
   if (req.file.mimetype.startsWith("image/")) {
     await normalizeImageOrientation(path.join(process.env.UPLOADS_DIR || "uploads", req.file.filename));
   }
@@ -291,7 +291,7 @@ sitesRouter.delete("/:id/documents/:docId", requireAuth, requireRole("admin", "m
   if (scopeError) return res.status(scopeStatus).json({ error: scopeError });
 
   const doc = db.prepare("SELECT * FROM site_documents WHERE id = ? AND site_id = ?").get(req.params.docId, req.params.id);
-  if (!doc) return res.status(404).json({ error: "Not found" });
+  if (!doc) return res.status(404).json({ code: "not_found", error: "Not found" });
 
   removeUploadedFile(doc.file_path);
   db.prepare("DELETE FROM site_documents WHERE id = ?").run(doc.id);
@@ -300,8 +300,8 @@ sitesRouter.delete("/:id/documents/:docId", requireAuth, requireRole("admin", "m
 
 // Returns a scannable QR image (data URL) that encodes the check-in link for this site.
 sitesRouter.get("/:id/qr", requireAuth, requireRole("admin", "manager"), async (req, res) => {
-  const { site, status, error } = getSiteScoped(req.params.id, req.user);
-  if (error) return res.status(status).json({ error });
+  const { site, status, code, error } = getSiteScoped(req.params.id, req.user);
+  if (error) return res.status(status).json({ code, error });
 
   const baseUrl = process.env.PUBLIC_BASE_URL || process.env.RENDER_EXTERNAL_URL || "http://localhost:4000";
   const checkInUrl = `${baseUrl}/checkin/${site.qr_token}`;
@@ -310,7 +310,7 @@ sitesRouter.get("/:id/qr", requireAuth, requireRole("admin", "manager"), async (
     res.json({ checkInUrl, qrImage: dataUrl });
   } catch (err) {
     console.error("QR generation error:", err);
-    res.status(500).json({ error: "Kunne ikke generere QR-kode." });
+    res.status(500).json({ code: "qr_generation_failed", error: "Kunne ikke generere QR-kode." });
   }
 });
 
@@ -323,7 +323,7 @@ sitesRouter.post("/checkin/:qrToken", requireAuth, requireRole("cleaner"), (req,
   const site = db.prepare("SELECT * FROM sites WHERE qr_token = ?").get(req.params.qrToken);
   // Same "unknown QR code" message for a genuinely unknown token and one belonging to another
   // company — a cleaner scanning a foreign QR shouldn't learn that a matching site exists.
-  if (!site || site.company_id !== req.user.company_id) return res.status(404).json({ error: "Unknown QR code" });
+  if (!site || site.company_id !== req.user.company_id) return res.status(404).json({ code: "unknown_qr_code", error: "Unknown QR code" });
 
   const { latitude, longitude } = req.body;
   let gps_verified = 0;
@@ -360,7 +360,7 @@ sitesRouter.get("/checkin/:qrToken", requireAuth, requireRole("customer"), (req,
   const site = db.prepare("SELECT * FROM sites WHERE qr_token = ?").get(req.params.qrToken);
   // Same "unknown QR code" message for a genuinely unknown token and one belonging to another
   // client's site — a customer scanning a foreign QR shouldn't learn that a matching site exists.
-  if (!site || site.client_id !== req.user.client_id) return res.status(404).json({ error: "Unknown QR code" });
+  if (!site || site.client_id !== req.user.client_id) return res.status(404).json({ code: "unknown_qr_code", error: "Unknown QR code" });
   res.json({ site: { ...site, has_customer_rooms: !!siteHasCustomerRoomsStmt.get(site.id) } });
 });
 

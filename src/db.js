@@ -63,6 +63,11 @@ ensureColumn("clients", "address", "address TEXT");
 ensureColumn("sites", "room_count", "room_count INTEGER DEFAULT 0");
 ensureColumn("users", "avatar_url", "avatar_url TEXT");
 ensureColumn("users", "phone", "phone TEXT");
+// Preferred UI language ('no'/'en'/'lt'/'lv'/'ru' — see utils/languages.js). NULL means the
+// account never chose one and gets Norwegian; kept distinct from an explicit 'no' so a future
+// "pick your language" prompt can tell the two apart. No CHECK constraint, matching every other
+// ensureColumn'd field here — validated in the route instead.
+ensureColumn("users", "language", "language TEXT");
 ensureColumn("deviations", "title", "title TEXT");
 ensureColumn("photos", "room_run_id", "room_run_id INTEGER REFERENCES room_runs(id)");
 ensureColumn("rooms", "monthly_weekday", "monthly_weekday INTEGER");

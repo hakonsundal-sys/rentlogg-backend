@@ -79,9 +79,9 @@ app.use("/departments", departmentsRouter);
 app.use((err, req, res, next) => {
   if (err instanceof multer.MulterError) {
     if (err.code === "LIMIT_FILE_SIZE") {
-      return res.status(413).json({ error: "Bildet er for stort. Prøv et bilde under 20 MB." });
+      return res.status(413).json({ code: "photo_too_large", error: "Bildet er for stort. Prøv et bilde under 20 MB." });
     }
-    return res.status(400).json({ error: "Kunne ikke laste opp filen." });
+    return res.status(400).json({ code: "upload_failed", error: "Kunne ikke laste opp filen." });
   }
   // A fileFilter rejection (wrong MIME/extension) reaches here as a plain error, not a
   // MulterError — without this it fell through to the generic 500 below.
@@ -89,7 +89,7 @@ app.use((err, req, res, next) => {
     return res.status(400).json({ error: err.message });
   }
   console.error(err);
-  res.status(500).json({ error: "Internal server error" });
+  res.status(500).json({ code: "internal_error", error: "Internal server error" });
 });
 
 const port = process.env.PORT || 4000;

@@ -21,9 +21,9 @@ function getRunScoped(runId, user) {
        FROM checklist_runs r JOIN sites s ON s.id = r.site_id WHERE r.id = ?`
     )
     .get(runId);
-  if (!run) return { status: 404, error: "Not found" };
-  if (user.role === "customer" && run.site_client_id !== user.client_id) return { status: 403, error: "Not allowed" };
-  if (user.role !== "customer" && run.site_company_id !== user.company_id) return { status: 403, error: "Not allowed" };
+  if (!run) return { status: 404, code: "not_found", error: "Not found" };
+  if (user.role === "customer" && run.site_client_id !== user.client_id) return { status: 403, code: "not_allowed", error: "Not allowed" };
+  if (user.role !== "customer" && run.site_company_id !== user.company_id) return { status: 403, code: "not_allowed", error: "Not allowed" };
   return { run };
 }
 
@@ -48,7 +48,7 @@ checklistsRouter.get("/templates", requireAuth, requireRole("admin", "manager"),
 
 checklistsRouter.post("/templates", requireAuth, requireRole("admin", "manager"), (req, res) => {
   const { name, items } = req.body; // items: string[]
-  if (!name || !Array.isArray(items)) return res.status(400).json({ error: "name and items[] are required" });
+  if (!name || !Array.isArray(items)) return res.status(400).json({ code: "name_and_items_required", error: "name and items[] are required" });
 
   const info = db.prepare("INSERT INTO checklist_templates (name, company_id) VALUES (?, ?)").run(name, req.user.company_id);
   const insertItem = db.prepare("INSERT INTO checklist_template_items (template_id, label, sort_order) VALUES (?, ?, ?)");
@@ -85,12 +85,12 @@ checklistsRouter.get("/my-runs", requireAuth, requireRole("cleaner"), (req, res)
 // cursor is simpler and immune to same-timestamp ties that a date cursor could skip or repeat.
 checklistsRouter.get("/site-runs/:siteId", requireAuth, requireRole("admin", "manager", "customer"), (req, res) => {
   const site = db.prepare("SELECT * FROM sites WHERE id = ?").get(req.params.siteId);
-  if (!site) return res.status(404).json({ error: "Not found" });
+  if (!site) return res.status(404).json({ code: "not_found", error: "Not found" });
   if (req.user.role === "customer" && site.client_id !== req.user.client_id) {
-    return res.status(403).json({ error: "Not allowed" });
+    return res.status(403).json({ code: "not_allowed", error: "Not allowed" });
   }
   if (req.user.role !== "customer" && site.company_id !== req.user.company_id) {
-    return res.status(403).json({ error: "Not allowed" });
+    return res.status(403).json({ code: "not_allowed", error: "Not allowed" });
   }
 
   const limit = Math.min(Number(req.query.limit) || 20, 50);
@@ -161,8 +161,8 @@ checklistsRouter.get("/runs", requireAuth, requireRole("admin", "manager"), (req
 
 checklistsRouter.get("/runs/:id", requireAuth, (req, res) => {
   const detail = getRunDetail(req.params.id);
-  if (!detail) return res.status(404).json({ error: "Not found" });
-  if (!canAccessRun(detail, req.user)) return res.status(403).json({ error: "Not allowed" });
+  if (!detail) return res.status(404).json({ code: "not_found", error: "Not found" });
+  if (!canAccessRun(detail, req.user)) return res.status(403).json({ code: "not_allowed", error: "Not allowed" });
   res.json(detail);
 });
 
@@ -172,16 +172,16 @@ checklistsRouter.get("/runs/:id", requireAuth, (req, res) => {
 // ANY day up to today, real run or not — falling back to a synthesized detail (id: null) built
 // straight from whatever room_runs actually exist for that date.
 checklistsRouter.get("/site/:siteId/date/:date", requireAuth, (req, res) => {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(req.params.date)) return res.status(400).json({ error: "date must be YYYY-MM-DD" });
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(req.params.date)) return res.status(400).json({ code: "invalid_date", error: "date must be YYYY-MM-DD" });
 
   const site = db.prepare("SELECT * FROM sites WHERE id = ?").get(req.params.siteId);
-  if (!site) return res.status(404).json({ error: "Not found" });
-  if (req.user.role === "customer" && site.client_id !== req.user.client_id) return res.status(403).json({ error: "Not allowed" });
-  if (req.user.role !== "customer" && site.company_id !== req.user.company_id) return res.status(403).json({ error: "Not allowed" });
+  if (!site) return res.status(404).json({ code: "not_found", error: "Not found" });
+  if (req.user.role === "customer" && site.client_id !== req.user.client_id) return res.status(403).json({ code: "not_allowed", error: "Not allowed" });
+  if (req.user.role !== "customer" && site.company_id !== req.user.company_id) return res.status(403).json({ code: "not_allowed", error: "Not allowed" });
 
   const existingRun = findRunForSiteDate(site.id, req.params.date);
   const detail = existingRun ? getRunDetail(existingRun.id) : getVirtualDayDetail(site, req.params.date);
-  if (!detail) return res.status(404).json({ error: "Ingen rom å vise for denne datoen." });
+  if (!detail) return res.status(404).json({ code: "no_rooms_for_date", error: "Ingen rom å vise for denne datoen." });
 
   res.json(detail);
 });
@@ -195,12 +195,12 @@ checklistsRouter.get("/site/:siteId/date/:date", requireAuth, (req, res) => {
 // check-in. Idempotent: if a real run already showed up for this day in the meantime, returns
 // that instead of creating a second one.
 checklistsRouter.post("/site/:siteId/date/:date", requireAuth, requireRole("cleaner", "admin", "manager"), (req, res) => {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(req.params.date)) return res.status(400).json({ error: "date must be YYYY-MM-DD" });
-  if (req.params.date > todayInOslo()) return res.status(400).json({ error: "Kan ikke sjekke inn på en fremtidig dato." });
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(req.params.date)) return res.status(400).json({ code: "invalid_date", error: "date must be YYYY-MM-DD" });
+  if (req.params.date > todayInOslo()) return res.status(400).json({ code: "cannot_checkin_future", error: "Kan ikke sjekke inn på en fremtidig dato." });
 
   const site = db.prepare("SELECT * FROM sites WHERE id = ?").get(req.params.siteId);
-  if (!site) return res.status(404).json({ error: "Not found" });
-  if (site.company_id !== req.user.company_id) return res.status(403).json({ error: "Not allowed" });
+  if (!site) return res.status(404).json({ code: "not_found", error: "Not found" });
+  if (site.company_id !== req.user.company_id) return res.status(403).json({ code: "not_allowed", error: "Not allowed" });
 
   const existingRun = findRunForSiteDate(site.id, req.params.date);
   if (existingRun) return res.json(getRunDetail(existingRun.id));
@@ -219,11 +219,11 @@ checklistsRouter.post("/site/:siteId/date/:date", requireAuth, requireRole("clea
 });
 
 checklistsRouter.get("/runs/:id/photos.zip", requireAuth, requireRole("admin", "manager"), (req, res) => {
-  const { run, status, error } = getRunScoped(req.params.id, req.user);
-  if (error) return res.status(status).json({ error });
+  const { run, status, code, error } = getRunScoped(req.params.id, req.user);
+  if (error) return res.status(status).json({ code, error });
 
   const photos = gatherReportPhotos([run]);
-  if (photos.length === 0) return res.status(404).json({ error: "Ingen bilder funnet for dette besøket." });
+  if (photos.length === 0) return res.status(404).json({ code: "no_photos_for_run", error: "Ingen bilder funnet for dette besøket." });
 
   streamPhotosZip(res, photos, `bilder-besok-${run.id}.zip`);
 });
@@ -240,12 +240,12 @@ function stampChecklistRunEdit(runId, initials) {
 }
 
 checklistsRouter.patch("/runs/:id/items/:itemId", requireAuth, requireRole("cleaner", "admin", "manager"), (req, res) => {
-  const { status, error } = getRunScoped(req.params.id, req.user);
-  if (error) return res.status(status).json({ error });
+  const { status, code, error } = getRunScoped(req.params.id, req.user);
+  if (error) return res.status(status).json({ code, error });
 
   const { done, initials } = req.body;
   const result = db.prepare("UPDATE checklist_run_items SET done = ? WHERE id = ? AND run_id = ?").run(done ? 1 : 0, req.params.itemId, req.params.id);
-  if (result.changes === 0) return res.status(404).json({ error: "Not found" });
+  if (result.changes === 0) return res.status(404).json({ code: "not_found", error: "Not found" });
   stampChecklistRunEdit(req.params.id, initials);
   res.json({ ok: true });
 });
@@ -254,8 +254,8 @@ checklistsRouter.patch("/runs/:id/items/:itemId", requireAuth, requireRole("clea
 // the run, not per checklist item). Only used by room-less (flat checklist) sites; room-based
 // sites use PATCH /rooms/runs/:runId/note per room instead.
 checklistsRouter.patch("/runs/:id/note", requireAuth, requireRole("cleaner", "admin", "manager"), (req, res) => {
-  const { status, error } = getRunScoped(req.params.id, req.user);
-  if (error) return res.status(status).json({ error });
+  const { status, code, error } = getRunScoped(req.params.id, req.user);
+  if (error) return res.status(status).json({ code, error });
 
   db.prepare("UPDATE checklist_runs SET note = ? WHERE id = ?").run(req.body?.note || null, req.params.id);
   stampChecklistRunEdit(req.params.id, req.body?.initials);
@@ -263,11 +263,11 @@ checklistsRouter.patch("/runs/:id/note", requireAuth, requireRole("cleaner", "ad
 });
 
 checklistsRouter.post("/runs/:id/complete", requireAuth, requireRole("cleaner", "admin", "manager"), (req, res) => {
-  const { run, status, error } = getRunScoped(req.params.id, req.user);
-  if (error) return res.status(status).json({ error });
+  const { run, status, code, error } = getRunScoped(req.params.id, req.user);
+  if (error) return res.status(status).json({ code, error });
 
   const initials = (req.body?.initials || "").trim();
-  if (!initials) return res.status(400).json({ error: "Navn er påkrevd for å fullføre besøket." });
+  if (!initials) return res.status(400).json({ code: "initials_required_visit", error: "Navn er påkrevd for å fullføre besøket." });
 
   db.prepare("UPDATE checklist_runs SET completed_at = datetime('now'), signed_initials = ? WHERE id = ?").run(initials, run.id);
 
@@ -284,9 +284,9 @@ checklistsRouter.post("/runs/:id/complete", requireAuth, requireRole("cleaner", 
 });
 
 checklistsRouter.post("/runs/:id/photos", requireAuth, requireRole("cleaner", "admin", "manager"), upload.single("photo"), async (req, res) => {
-  const { status, error } = getRunScoped(req.params.id, req.user);
-  if (error) return res.status(status).json({ error });
-  if (!req.file) return res.status(400).json({ error: "No file uploaded (field name must be 'photo')" });
+  const { status, code, error } = getRunScoped(req.params.id, req.user);
+  if (error) return res.status(status).json({ code, error });
+  if (!req.file) return res.status(400).json({ code: "no_file_uploaded", error: "No file uploaded (field name must be 'photo')" });
   await normalizeImageOrientation(path.join(process.env.UPLOADS_DIR || "uploads", req.file.filename));
   const kind = req.body.kind || "general";
   const info = db
@@ -301,7 +301,7 @@ checklistsRouter.delete("/runs/:id/photos/:photoId", requireAuth, requireRole("c
   if (scopeError) return res.status(scopeStatus).json({ error: scopeError });
 
   const photo = db.prepare("SELECT * FROM photos WHERE id = ? AND run_id = ?").get(req.params.photoId, req.params.id);
-  if (!photo) return res.status(404).json({ error: "Not found" });
+  if (!photo) return res.status(404).json({ code: "not_found", error: "Not found" });
 
   removeUploadedFile(photo.file_path);
   db.prepare("DELETE FROM photos WHERE id = ?").run(photo.id);
@@ -314,8 +314,8 @@ checklistsRouter.delete("/runs/:id/photos/:photoId", requireAuth, requireRole("c
 // endpoint) — refuses to delete a run that has deviations attached rather than silently
 // orphaning them, since those represent real reports that shouldn't quietly disappear.
 checklistsRouter.delete("/runs/:id", requireAuth, requireRole("admin", "manager"), (req, res) => {
-  const { status, error } = getRunScoped(req.params.id, req.user);
-  if (error) return res.status(status).json({ error });
+  const { status, code, error } = getRunScoped(req.params.id, req.user);
+  if (error) return res.status(status).json({ code, error });
 
   const deviationCount = db.prepare("SELECT COUNT(*) AS n FROM deviations WHERE run_id = ?").get(req.params.id).n;
   if (deviationCount > 0) {

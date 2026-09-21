@@ -34,9 +34,9 @@ const pdfUpload = multer({ storage: multer.memoryStorage(), fileFilter: pdfFileF
 // this file operates at (site, room, room_run) since a room-run's site is two joins away.
 function getSiteScopedForRooms(siteId, user) {
   const site = db.prepare("SELECT * FROM sites WHERE id = ?").get(siteId);
-  if (!site) return { status: 404, error: "Not found" };
-  if (user.role === "customer" && site.client_id !== user.client_id) return { status: 403, error: "Not allowed" };
-  if (user.role !== "customer" && site.company_id !== user.company_id) return { status: 403, error: "Not allowed" };
+  if (!site) return { status: 404, code: "not_found", error: "Not found" };
+  if (user.role === "customer" && site.client_id !== user.client_id) return { status: 403, code: "not_allowed", error: "Not allowed" };
+  if (user.role !== "customer" && site.company_id !== user.company_id) return { status: 403, code: "not_allowed", error: "Not allowed" };
   return { site };
 }
 
@@ -47,9 +47,9 @@ function getRoomScoped(roomId, user) {
        FROM rooms r JOIN sites s ON s.id = r.site_id WHERE r.id = ?`
     )
     .get(roomId);
-  if (!room) return { status: 404, error: "Not found" };
-  if (user.role === "customer" && room.site_client_id !== user.client_id) return { status: 403, error: "Not allowed" };
-  if (user.role !== "customer" && room.site_company_id !== user.company_id) return { status: 403, error: "Not allowed" };
+  if (!room) return { status: 404, code: "not_found", error: "Not found" };
+  if (user.role === "customer" && room.site_client_id !== user.client_id) return { status: 403, code: "not_allowed", error: "Not allowed" };
+  if (user.role !== "customer" && room.site_company_id !== user.company_id) return { status: 403, code: "not_allowed", error: "Not allowed" };
   return { room };
 }
 
@@ -61,9 +61,9 @@ function getRoomRunScoped(roomRunId, user) {
        FROM room_runs rr JOIN rooms r ON r.id = rr.room_id JOIN sites s ON s.id = r.site_id WHERE rr.id = ?`
     )
     .get(roomRunId);
-  if (!roomRun) return { status: 404, error: "Not found" };
-  if (user.role === "customer" && roomRun.site_client_id !== user.client_id) return { status: 403, error: "Not allowed" };
-  if (user.role !== "customer" && roomRun.site_company_id !== user.company_id) return { status: 403, error: "Not allowed" };
+  if (!roomRun) return { status: 404, code: "not_found", error: "Not found" };
+  if (user.role === "customer" && roomRun.site_client_id !== user.client_id) return { status: 403, code: "not_allowed", error: "Not allowed" };
+  if (user.role !== "customer" && roomRun.site_company_id !== user.company_id) return { status: 403, code: "not_allowed", error: "Not allowed" };
   return { roomRun };
 }
 
@@ -73,7 +73,7 @@ function getRoomRunScoped(roomRunId, user) {
 // to reach ANY room at their site regardless of who's responsible for cleaning it, only the
 // mutation routes below need this extra check.
 function requireCustomerOwnsRoom(user, responsible) {
-  if (user.role === "customer" && responsible !== "customer") return { status: 403, error: "Not allowed" };
+  if (user.role === "customer" && responsible !== "customer") return { status: 403, code: "not_allowed", error: "Not allowed" };
   return null;
 }
 
@@ -82,7 +82,7 @@ function requireCustomerOwnsRoom(user, responsible) {
 // through unconditionally, since they're allowed to approve on a customer's behalf (see
 // POST /runs/:runId/approve's own comment for why that escape hatch exists).
 function requireCustomerApprovalRoom(user, requiresApproval) {
-  if (user.role === "customer" && !requiresApproval) return { status: 403, error: "Dette rommet krever ikke kundegodkjenning." };
+  if (user.role === "customer" && !requiresApproval) return { status: 403, code: "room_needs_no_approval", error: "Dette rommet krever ikke kundegodkjenning." };
   return null;
 }
 
@@ -207,8 +207,8 @@ function coerceRoomsShape(raw) {
 // --- Site-scoped: /sites/:siteId/rooms ---
 
 siteRoomsRouter.get("/", requireAuth, (req, res) => {
-  const { status, error } = getSiteScopedForRooms(req.params.siteId, req.user);
-  if (error) return res.status(status).json({ error });
+  const { status, code, error } = getSiteScopedForRooms(req.params.siteId, req.user);
+  if (error) return res.status(status).json({ code, error });
 
   const rooms = getRoomsForSite(req.params.siteId, todayInOslo());
   // A cleaner's live checklist only ever shows the cleaning company's own rooms — a
@@ -240,8 +240,8 @@ siteRoomsRouter.post("/", requireAuth, requireRole("admin", "manager"), (req, re
   if (scopeError) return res.status(scopeStatus).json({ error: scopeError });
 
   const { name, interval_days, responsible } = req.body;
-  if (!name) return res.status(400).json({ error: "name is required" });
-  if (!isValidResponsible(responsible)) return res.status(400).json({ error: "responsible must be 'company' or 'customer'" });
+  if (!name) return res.status(400).json({ code: "name_required", error: "name is required" });
+  if (!isValidResponsible(responsible)) return res.status(400).json({ code: "invalid_responsible", error: "responsible must be 'company' or 'customer'" });
 
   const nextSort = db.prepare("SELECT COALESCE(MAX(sort_order), -1) + 1 AS n FROM rooms WHERE site_id = ?").get(req.params.siteId).n;
   const info = db
@@ -305,7 +305,7 @@ siteRoomsRouter.get("/monthly-items", requireAuth, requireRole("admin", "manager
   if (scopeError) return res.status(scopeStatus).json({ error: scopeError });
 
   const month = req.query.month || todayInOslo().slice(0, 7);
-  if (!/^\d{4}-\d{2}$/.test(month)) return res.status(400).json({ error: "month must be YYYY-MM" });
+  if (!/^\d{4}-\d{2}$/.test(month)) return res.status(400).json({ code: "invalid_month", error: "month must be YYYY-MM" });
 
   res.json(getMonthlyItemsForSite(req.params.siteId, month));
 });
@@ -319,7 +319,7 @@ siteRoomsRouter.get("/monthly-grid", requireAuth, requireRole("admin", "manager"
   if (scopeError) return res.status(scopeStatus).json({ error: scopeError });
 
   const month = req.query.month || todayInOslo().slice(0, 7);
-  if (!/^\d{4}-\d{2}$/.test(month)) return res.status(400).json({ error: "month must be YYYY-MM" });
+  if (!/^\d{4}-\d{2}$/.test(month)) return res.status(400).json({ code: "invalid_month", error: "month must be YYYY-MM" });
   const [year, mon] = month.split("-").map(Number);
 
   res.json(getRoomGridForSiteMonth(req.params.siteId, year, mon));
@@ -330,7 +330,7 @@ siteRoomsRouter.post("/complete-all-due", requireAuth, requireRole("cleaner", "a
   if (scopeError) return res.status(scopeStatus).json({ error: scopeError });
 
   const initials = (req.body?.initials || "").trim();
-  if (!initials) return res.status(400).json({ error: "Navn er påkrevd for å fullføre oppgavene." });
+  if (!initials) return res.status(400).json({ code: "initials_required_tasks", error: "Navn er påkrevd for å fullføre oppgavene." });
 
   const today = todayInOslo();
   // A customer's bulk-complete is scoped to only their own (responsible='customer') rooms;
@@ -376,9 +376,9 @@ siteRoomsRouter.post("/import-pdf", requireAuth, requireRole("admin", "manager")
   const { status: scopeStatus, error: scopeError } = getSiteScopedForRooms(req.params.siteId, req.user);
   if (scopeError) return res.status(scopeStatus).json({ error: scopeError });
   if (!process.env.ANTHROPIC_API_KEY) {
-    return res.status(503).json({ error: "AI-import er ikke konfigurert ennå." });
+    return res.status(503).json({ code: "ai_import_not_configured", error: "AI-import er ikke konfigurert ennå." });
   }
-  if (!req.file) return res.status(400).json({ error: "No file uploaded (field name must be 'pdf')" });
+  if (!req.file) return res.status(400).json({ code: "no_file_uploaded", error: "No file uploaded (field name must be 'pdf')" });
 
   let text;
   try {
@@ -387,12 +387,12 @@ siteRoomsRouter.post("/import-pdf", requireAuth, requireRole("admin", "manager")
     await parser.destroy();
     text = (result.text || "").trim();
   } catch {
-    return res.status(422).json({ error: "Kunne ikke lese PDF-en. Sjekk at filen ikke er skadet." });
+    return res.status(422).json({ code: "pdf_unreadable", error: "Kunne ikke lese PDF-en. Sjekk at filen ikke er skadet." });
   }
 
   if (text.length < 20) {
     return res.status(422).json({
-      error: "Fant ingen lesbar tekst i PDF-en. Prøv en tekstbasert PDF, eller legg til rom manuelt.",
+      code: "pdf_no_text", error: "Fant ingen lesbar tekst i PDF-en. Prøv en tekstbasert PDF, eller legg til rom manuelt.",
     });
   }
   text = text.slice(0, MAX_EXTRACTED_TEXT_CHARS);
@@ -481,7 +481,7 @@ siteRoomsRouter.post("/import-pdf", requireAuth, requireRole("admin", "manager")
       });
     } catch (err) {
       console.error("Anthropic API error:", err);
-      return res.status(502).json({ error: "Kunne ikke kontakte AI-tjenesten. Prøv igjen senere." });
+      return res.status(502).json({ code: "ai_service_unavailable", error: "Kunne ikke kontakte AI-tjenesten. Prøv igjen senere." });
     }
 
     const toolUse = message.content.find((block) => block.type === "tool_use" && block.name === "submit_rooms");
@@ -499,7 +499,7 @@ siteRoomsRouter.post("/import-pdf", requireAuth, requireRole("admin", "manager")
   }
 
   if (!rooms) {
-    return res.status(502).json({ error: "Kunne ikke tolke resultatet fra AI-analysen. Prøv å laste opp PDF-en på nytt." });
+    return res.status(502).json({ code: "ai_response_unparseable", error: "Kunne ikke tolke resultatet fra AI-analysen. Prøv å laste opp PDF-en på nytt." });
   }
 
   res.json({ rooms: rooms.map((r) => ({ ...r, schedule: sanitizeSchedule(r.schedule) })) });
@@ -510,7 +510,7 @@ siteRoomsRouter.post("/import-confirm", requireAuth, requireRole("admin", "manag
   if (scopeError) return res.status(scopeStatus).json({ error: scopeError });
 
   const { rooms } = req.body;
-  if (!isValidRoomsShape(rooms)) return res.status(400).json({ error: "rooms[] with name/tasks[] is required" });
+  if (!isValidRoomsShape(rooms)) return res.status(400).json({ code: "rooms_required", error: "rooms[] with name/tasks[] is required" });
 
   const siteId = req.params.siteId;
   const insertRoom = db.prepare(
@@ -554,14 +554,14 @@ roomsRouter.patch("/:id", requireAuth, requireRole("admin", "manager"), (req, re
   if (scopeError) return res.status(scopeStatus).json({ error: scopeError });
 
   if ("responsible" in req.body && !isValidResponsible(req.body.responsible)) {
-    return res.status(400).json({ error: "responsible must be 'company' or 'customer'" });
+    return res.status(400).json({ code: "invalid_responsible", error: "responsible must be 'company' or 'customer'" });
   }
   if ("requires_approval" in req.body && typeof req.body.requires_approval !== "boolean") {
-    return res.status(400).json({ error: "requires_approval must be true or false" });
+    return res.status(400).json({ code: "invalid_requires_approval", error: "requires_approval must be true or false" });
   }
 
   const fields = ROOM_PATCH_FIELDS.filter((f) => f in req.body);
-  if (fields.length === 0) return res.status(400).json({ error: "No valid fields to update" });
+  if (fields.length === 0) return res.status(400).json({ code: "no_valid_fields", error: "No valid fields to update" });
 
   const updateRoom = db.transaction(() => {
     const setClause = fields.map((f) => `${f} = ?`).join(", ");
@@ -586,8 +586,8 @@ roomsRouter.patch("/:id", requireAuth, requireRole("admin", "manager"), (req, re
 });
 
 roomsRouter.delete("/:id", requireAuth, requireRole("admin", "manager"), (req, res) => {
-  const { status, error } = getRoomScoped(req.params.id, req.user);
-  if (error) return res.status(status).json({ error });
+  const { status, code, error } = getRoomScoped(req.params.id, req.user);
+  if (error) return res.status(status).json({ code, error });
 
   const filesToRemove = [];
   const deleteCascade = db.transaction((roomId) => {
@@ -625,8 +625,8 @@ roomsRouter.delete("/:id", requireAuth, requireRole("admin", "manager"), (req, r
 // --- Room task template ---
 
 roomsRouter.get("/:id/items", requireAuth, (req, res) => {
-  const { status, error } = getRoomScoped(req.params.id, req.user);
-  if (error) return res.status(status).json({ error });
+  const { status, code, error } = getRoomScoped(req.params.id, req.user);
+  if (error) return res.status(status).json({ code, error });
 
   const items = db.prepare("SELECT * FROM room_checklist_items WHERE room_id = ? ORDER BY sort_order").all(req.params.id);
   const weekdayRows = db
@@ -658,7 +658,7 @@ roomsRouter.post("/:id/items", requireAuth, requireRole("admin", "manager"), (re
   if (scopeError) return res.status(scopeStatus).json({ error: scopeError });
 
   const { label } = req.body;
-  if (!label) return res.status(400).json({ error: "label is required" });
+  if (!label) return res.status(400).json({ code: "label_required", error: "label is required" });
 
   const nextSort = db.prepare("SELECT COALESCE(MAX(sort_order), -1) + 1 AS n FROM room_checklist_items WHERE room_id = ?").get(req.params.id).n;
   const info = db
@@ -675,18 +675,18 @@ roomsRouter.post("/:id/items", requireAuth, requireRole("admin", "manager"), (re
 // override). The frontend still always sends the full set of fields for whichever schedule mode
 // it does send, so no partial-pair validation is needed there.
 roomsRouter.patch("/:id/items/:itemId", requireAuth, requireRole("admin", "manager"), (req, res) => {
-  const { status, error } = getRoomScoped(req.params.id, req.user);
-  if (error) return res.status(status).json({ error });
+  const { status, code, error } = getRoomScoped(req.params.id, req.user);
+  if (error) return res.status(status).json({ code, error });
 
   const existing = db.prepare("SELECT id FROM room_checklist_items WHERE id = ? AND room_id = ?").get(req.params.itemId, req.params.id);
-  if (!existing) return res.status(404).json({ error: "Not found" });
+  if (!existing) return res.status(404).json({ code: "not_found", error: "Not found" });
 
   const updates = {};
   // null = leave room_checklist_item_weekdays untouched; [] or a day list = replace its rows.
   let weeklyDays = null;
   if ("label" in req.body) {
     const label = typeof req.body.label === "string" ? req.body.label.trim() : "";
-    if (!label) return res.status(400).json({ error: "Oppgavenavn kan ikke være tomt." });
+    if (!label) return res.status(400).json({ code: "task_label_required", error: "Oppgavenavn kan ikke være tomt." });
     updates.label = label;
   }
   // interval_days ("annenhver uke" etc), monthly_weekday/monthly_occurrence ("Månedlig"), and
@@ -703,7 +703,7 @@ roomsRouter.patch("/:id/items/:itemId", requireAuth, requireRole("admin", "manag
     const days = Array.isArray(req.body.weekly_days)
       ? [...new Set(req.body.weekly_days.filter((w) => Number.isInteger(w) && w >= 0 && w <= 6))]
       : [];
-    if (days.length === 0) return res.status(400).json({ error: "weekly_days må ha minst én dag" });
+    if (days.length === 0) return res.status(400).json({ code: "weekly_days_required", error: "weekly_days må ha minst én dag" });
     weeklyDays = days;
     updates.monthly_weekday = null;
     updates.monthly_occurrence = null;
@@ -715,7 +715,7 @@ roomsRouter.patch("/:id/items/:itemId", requireAuth, requireRole("admin", "manag
     weeklyDays = [];
   }
   const fields = Object.keys(updates);
-  if (fields.length === 0 && weeklyDays === null) return res.status(400).json({ error: "No valid fields to update" });
+  if (fields.length === 0 && weeklyDays === null) return res.status(400).json({ code: "no_valid_fields", error: "No valid fields to update" });
 
   db.transaction(() => {
     if (fields.length > 0) {
@@ -739,8 +739,8 @@ roomsRouter.patch("/:id/items/:itemId", requireAuth, requireRole("admin", "manag
 });
 
 roomsRouter.delete("/:id/items/:itemId", requireAuth, requireRole("admin", "manager"), (req, res) => {
-  const { status, error } = getRoomScoped(req.params.id, req.user);
-  if (error) return res.status(status).json({ error });
+  const { status, code, error } = getRoomScoped(req.params.id, req.user);
+  if (error) return res.status(status).json({ code, error });
 
   // room_run_items.room_checklist_item_id (added for the monthly-tasks overview, see services/
   // rooms.js) points back at this row with no ON DELETE clause, so a checklist item that's ever
@@ -772,19 +772,19 @@ roomsRouter.delete("/:id/items/:itemId", requireAuth, requireRole("admin", "mana
 // rewrites what an earlier visit recorded.
 
 function getItemScoped(roomId, itemId, user) {
-  const { status, error } = getRoomScoped(roomId, user);
-  if (error) return { status, error };
+  const { status, code, error } = getRoomScoped(roomId, user);
+  if (error) return { status, code, error };
   const item = db.prepare("SELECT * FROM room_checklist_items WHERE id = ? AND room_id = ?").get(itemId, roomId);
-  if (!item) return { status: 404, error: "Not found" };
+  if (!item) return { status: 404, code: "not_found", error: "Not found" };
   return { item };
 }
 
 roomsRouter.post("/:id/items/:itemId/options", requireAuth, requireRole("admin", "manager"), (req, res) => {
-  const { status, error } = getItemScoped(req.params.id, req.params.itemId, req.user);
-  if (error) return res.status(status).json({ error });
+  const { status, code, error } = getItemScoped(req.params.id, req.params.itemId, req.user);
+  if (error) return res.status(status).json({ code, error });
 
   const label = typeof req.body?.label === "string" ? req.body.label.trim() : "";
-  if (!label) return res.status(400).json({ error: "Valgnavn kan ikke være tomt." });
+  if (!label) return res.status(400).json({ code: "option_label_required", error: "Valgnavn kan ikke være tomt." });
 
   const nextSort = db
     .prepare("SELECT COALESCE(MAX(sort_order), -1) + 1 AS n FROM room_checklist_item_options WHERE item_id = ?")
@@ -797,23 +797,23 @@ roomsRouter.post("/:id/items/:itemId/options", requireAuth, requireRole("admin",
 });
 
 roomsRouter.patch("/:id/items/:itemId/options/:optionId", requireAuth, requireRole("admin", "manager"), (req, res) => {
-  const { status, error } = getItemScoped(req.params.id, req.params.itemId, req.user);
-  if (error) return res.status(status).json({ error });
+  const { status, code, error } = getItemScoped(req.params.id, req.params.itemId, req.user);
+  if (error) return res.status(status).json({ code, error });
 
   const label = typeof req.body?.label === "string" ? req.body.label.trim() : "";
-  if (!label) return res.status(400).json({ error: "Valgnavn kan ikke være tomt." });
+  if (!label) return res.status(400).json({ code: "option_label_required", error: "Valgnavn kan ikke være tomt." });
 
   const result = db
     .prepare("UPDATE room_checklist_item_options SET label = ? WHERE id = ? AND item_id = ?")
     .run(label, req.params.optionId, req.params.itemId);
-  if (result.changes === 0) return res.status(404).json({ error: "Not found" });
+  if (result.changes === 0) return res.status(404).json({ code: "not_found", error: "Not found" });
 
   res.json(db.prepare("SELECT * FROM room_checklist_item_options WHERE id = ?").get(req.params.optionId));
 });
 
 roomsRouter.delete("/:id/items/:itemId/options/:optionId", requireAuth, requireRole("admin", "manager"), (req, res) => {
-  const { status, error } = getItemScoped(req.params.id, req.params.itemId, req.user);
-  if (error) return res.status(status).json({ error });
+  const { status, code, error } = getItemScoped(req.params.id, req.params.itemId, req.user);
+  if (error) return res.status(status).json({ code, error });
 
   // Past runs keep their own snapshot of this option (label and all) — only the link back to the
   // template row is cleared, same as a deleted task does for room_run_items.
@@ -822,7 +822,7 @@ roomsRouter.delete("/:id/items/:itemId/options/:optionId", requireAuth, requireR
     return db.prepare("DELETE FROM room_checklist_item_options WHERE id = ? AND item_id = ?").run(optionId, itemId);
   });
   const result = deleteOption(req.params.optionId, req.params.itemId);
-  if (result.changes === 0) return res.status(404).json({ error: "Not found" });
+  if (result.changes === 0) return res.status(404).json({ code: "not_found", error: "Not found" });
 
   res.json({ ok: true });
 });
@@ -851,7 +851,7 @@ roomsRouter.post("/:id/schedule", requireAuth, requireRole("admin", "manager"), 
 
   const { weekday, assigned_cleaner_id } = req.body;
   if (weekday === undefined || weekday === null || weekday < 0 || weekday > 6) {
-    return res.status(400).json({ error: "weekday (0-6) is required" });
+    return res.status(400).json({ code: "weekday_required", error: "weekday (0-6) is required" });
   }
 
   const upsert = db.transaction(() => {
@@ -874,8 +874,8 @@ roomsRouter.post("/:id/schedule", requireAuth, requireRole("admin", "manager"), 
 });
 
 roomsRouter.delete("/:id/schedule/:weekday", requireAuth, requireRole("admin", "manager"), (req, res) => {
-  const { status, error } = getRoomScoped(req.params.id, req.user);
-  if (error) return res.status(status).json({ error });
+  const { status, code, error } = getRoomScoped(req.params.id, req.user);
+  if (error) return res.status(status).json({ code, error });
 
   db.prepare("DELETE FROM room_schedules WHERE room_id = ? AND weekday = ?").run(req.params.id, req.params.weekday);
   res.json({ ok: true });
@@ -884,8 +884,8 @@ roomsRouter.delete("/:id/schedule/:weekday", requireAuth, requireRole("admin", "
 // --- Room runs (a cleaner's cleaning instance for a room on a given day) ---
 
 roomsRouter.post("/:id/checkin", requireAuth, requireRole("cleaner"), (req, res) => {
-  const { status, error } = getRoomScoped(req.params.id, req.user);
-  if (error) return res.status(status).json({ error });
+  const { status, code, error } = getRoomScoped(req.params.id, req.user);
+  if (error) return res.status(status).json({ code, error });
 
   const run = findOrCreateTodayRoomRun(req.params.id, req.user.id);
   // Picks up any flervalg-option added to a task after this room was already opened today.
@@ -903,14 +903,14 @@ roomsRouter.post("/:id/checkin", requireAuth, requireRole("cleaner"), (req, res)
 // that does have data — and so can a customer, but only for a room marked as their own
 // responsibility (see requireCustomerOwnsRoom).
 roomsRouter.post("/:id/checkin-date", requireAuth, requireRole("cleaner", "admin", "manager", "customer"), (req, res) => {
-  const { room, status, error } = getRoomScoped(req.params.id, req.user);
-  if (error) return res.status(status).json({ error });
+  const { room, status, code, error } = getRoomScoped(req.params.id, req.user);
+  if (error) return res.status(status).json({ code, error });
   const ownError = requireCustomerOwnsRoom(req.user, room.responsible);
   if (ownError) return res.status(ownError.status).json({ error: ownError.error });
 
   const { date } = req.body;
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(date || "")) return res.status(400).json({ error: "date must be YYYY-MM-DD" });
-  if (date > todayInOslo()) return res.status(400).json({ error: "Kan ikke åpne en fremtidig dato." });
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date || "")) return res.status(400).json({ code: "invalid_date", error: "date must be YYYY-MM-DD" });
+  if (date > todayInOslo()) return res.status(400).json({ code: "cannot_open_future", error: "Kan ikke åpne en fremtidig dato." });
 
   const run = findOrCreateRoomRunForDate(req.params.id, date, req.user.id);
   ensureRunItemOptions(run.id);
@@ -930,7 +930,7 @@ roomsRouter.post("/:id/reopen", requireAuth, requireRole("cleaner", "admin", "ma
   if (scopeError) return res.status(scopeStatus).json({ error: scopeError });
 
   const run = findRoomRunForDate(req.params.id, todayInOslo());
-  if (!run) return res.status(404).json({ error: "Ingen fullført besøk å angre i dag" });
+  if (!run) return res.status(404).json({ code: "no_completed_run_to_undo", error: "Ingen fullført besøk å angre i dag" });
 
   // Also clears any approval-gate state — an undone room goes all the way back to "in progress",
   // not left stuck with a stale ready_for_approval_at/approved_at from before the undo.
@@ -957,8 +957,8 @@ function stampRoomRunEdit(runId, initials) {
 }
 
 roomsRouter.patch("/runs/:runId/items/:itemId", requireAuth, requireRole("cleaner", "admin", "manager", "customer"), (req, res) => {
-  const { roomRun, status, error } = getRoomRunScoped(req.params.runId, req.user);
-  if (error) return res.status(status).json({ error });
+  const { roomRun, status, code, error } = getRoomRunScoped(req.params.runId, req.user);
+  if (error) return res.status(status).json({ code, error });
   const ownError = requireCustomerOwnsRoom(req.user, roomRun.room_responsible);
   if (ownError) return res.status(ownError.status).json({ error: ownError.error });
 
@@ -967,10 +967,10 @@ roomsRouter.patch("/runs/:runId/items/:itemId", requireAuth, requireRole("cleane
   // used — ticking it off without naming one would record exactly the thing it exists to capture
   // as blank, so the answer is required before it can be marked done. Unticking is never blocked.
   if (done && !itemSelectionSatisfied(req.params.itemId)) {
-    return res.status(400).json({ error: "Velg minst ett alternativ for denne oppgaven først." });
+    return res.status(400).json({ code: "no_options_defined", error: "Velg minst ett alternativ for denne oppgaven først." });
   }
   const result = db.prepare("UPDATE room_run_items SET done = ? WHERE id = ? AND room_run_id = ?").run(done ? 1 : 0, req.params.itemId, req.params.runId);
-  if (result.changes === 0) return res.status(404).json({ error: "Not found" });
+  if (result.changes === 0) return res.status(404).json({ code: "not_found", error: "Not found" });
   stampRoomRunEdit(req.params.runId, initials);
   res.json({ ok: true });
 });
@@ -990,8 +990,8 @@ function itemSelectionSatisfied(runItemId) {
 // Clearing the last remaining choice also clears `done` — the task can't stay "utført" while the
 // answer it documents is blank (the same rule the PATCH above enforces, applied from this side).
 roomsRouter.patch("/runs/:runId/items/:itemId/options/:optionId", requireAuth, requireRole("cleaner", "admin", "manager", "customer"), (req, res) => {
-  const { roomRun, status, error } = getRoomRunScoped(req.params.runId, req.user);
-  if (error) return res.status(status).json({ error });
+  const { roomRun, status, code, error } = getRoomRunScoped(req.params.runId, req.user);
+  if (error) return res.status(status).json({ code, error });
   const ownError = requireCustomerOwnsRoom(req.user, roomRun.room_responsible);
   if (ownError) return res.status(ownError.status).json({ error: ownError.error });
 
@@ -1002,7 +1002,7 @@ roomsRouter.patch("/runs/:runId/items/:itemId/options/:optionId", requireAuth, r
        WHERE id = ? AND run_item_id = (SELECT id FROM room_run_items WHERE id = ? AND room_run_id = ?)`
     )
     .run(selected, req.params.optionId, req.params.itemId, req.params.runId);
-  if (result.changes === 0) return res.status(404).json({ error: "Not found" });
+  if (result.changes === 0) return res.status(404).json({ code: "not_found", error: "Not found" });
 
   if (!itemSelectionSatisfied(req.params.itemId)) {
     db.prepare("UPDATE room_run_items SET done = 0 WHERE id = ? AND room_run_id = ?").run(req.params.itemId, req.params.runId);
@@ -1015,22 +1015,22 @@ roomsRouter.patch("/runs/:runId/items/:itemId/options/:optionId", requireAuth, r
 // `approved`) so a customer reviewing a requires_approval room can never reach the cleaner's own
 // `done` field through this path — only their own `approved` column.
 roomsRouter.patch("/runs/:runId/items/:itemId/approve", requireAuth, requireRole("customer", "admin", "manager"), (req, res) => {
-  const { roomRun, status, error } = getRoomRunScoped(req.params.runId, req.user);
-  if (error) return res.status(status).json({ error });
+  const { roomRun, status, code, error } = getRoomRunScoped(req.params.runId, req.user);
+  if (error) return res.status(status).json({ code, error });
   const approvalError = requireCustomerApprovalRoom(req.user, roomRun.room_requires_approval);
   if (approvalError) return res.status(approvalError.status).json({ error: approvalError.error });
 
   const { approved } = req.body;
   const result = db.prepare("UPDATE room_run_items SET approved = ? WHERE id = ? AND room_run_id = ?").run(approved ? 1 : 0, req.params.itemId, req.params.runId);
-  if (result.changes === 0) return res.status(404).json({ error: "Not found" });
+  if (result.changes === 0) return res.status(404).json({ code: "not_found", error: "Not found" });
   res.json({ ok: true });
 });
 
 // A free-text note for the whole room's visit — same granularity as its photos (one shared
 // list for the room, not per checklist item).
 roomsRouter.patch("/runs/:runId/note", requireAuth, requireRole("cleaner", "admin", "manager", "customer"), (req, res) => {
-  const { roomRun, status, error } = getRoomRunScoped(req.params.runId, req.user);
-  if (error) return res.status(status).json({ error });
+  const { roomRun, status, code, error } = getRoomRunScoped(req.params.runId, req.user);
+  if (error) return res.status(status).json({ code, error });
   const ownError = requireCustomerOwnsRoom(req.user, roomRun.room_responsible);
   if (ownError) return res.status(ownError.status).json({ error: ownError.error });
 
@@ -1042,8 +1042,8 @@ roomsRouter.patch("/runs/:runId/note", requireAuth, requireRole("cleaner", "admi
 // Lets a cleaner clear a whole room's remaining tasks in one tap — for a routine room they
 // already know is fine, ticking every item individually is pure friction.
 roomsRouter.post("/runs/:runId/items/complete-all", requireAuth, requireRole("cleaner", "admin", "manager", "customer"), (req, res) => {
-  const { roomRun, status, error } = getRoomRunScoped(req.params.runId, req.user);
-  if (error) return res.status(status).json({ error });
+  const { roomRun, status, code, error } = getRoomRunScoped(req.params.runId, req.user);
+  if (error) return res.status(status).json({ code, error });
   const ownError = requireCustomerOwnsRoom(req.user, roomRun.room_responsible);
   if (ownError) return res.status(ownError.status).json({ error: ownError.error });
 
@@ -1060,13 +1060,13 @@ roomsRouter.post("/runs/:runId/items/complete-all", requireAuth, requireRole("cl
 // finishes the gate in POST /runs/:runId/approve below. A non-gated room behaves exactly as
 // before this feature existed.
 roomsRouter.post("/runs/:runId/complete", requireAuth, requireRole("cleaner", "admin", "manager", "customer"), (req, res) => {
-  const { roomRun, status, error } = getRoomRunScoped(req.params.runId, req.user);
-  if (error) return res.status(status).json({ error });
+  const { roomRun, status, code, error } = getRoomRunScoped(req.params.runId, req.user);
+  if (error) return res.status(status).json({ code, error });
   const ownError = requireCustomerOwnsRoom(req.user, roomRun.room_responsible);
   if (ownError) return res.status(ownError.status).json({ error: ownError.error });
 
   const initials = (req.body?.initials || "").trim();
-  if (!initials) return res.status(400).json({ error: "Navn er påkrevd for å fullføre rommet." });
+  if (!initials) return res.status(400).json({ code: "initials_required_room", error: "Navn er påkrevd for å fullføre rommet." });
 
   if (roomRun.room_requires_approval) {
     db.prepare("UPDATE room_runs SET ready_for_approval_at = datetime('now'), signed_initials = ? WHERE id = ?").run(initials, roomRun.id);
@@ -1082,16 +1082,16 @@ roomsRouter.post("/runs/:runId/complete", requireAuth, requireRole("cleaner", "a
 // separate from the cleaner's own /complete above rather than one endpoint with different
 // behavior per role, so each side's required fields/validation stay simple and legible.
 roomsRouter.post("/runs/:runId/approve", requireAuth, requireRole("customer", "admin", "manager"), (req, res) => {
-  const { roomRun, status, error } = getRoomRunScoped(req.params.runId, req.user);
-  if (error) return res.status(status).json({ error });
+  const { roomRun, status, code, error } = getRoomRunScoped(req.params.runId, req.user);
+  if (error) return res.status(status).json({ code, error });
   const approvalError = requireCustomerApprovalRoom(req.user, roomRun.room_requires_approval);
   if (approvalError) return res.status(approvalError.status).json({ error: approvalError.error });
 
-  if (!roomRun.ready_for_approval_at) return res.status(409).json({ error: "Renholder har ikke fullført rommet ennå." });
-  if (roomRun.approved_at) return res.status(409).json({ error: "Rommet er allerede godkjent." });
+  if (!roomRun.ready_for_approval_at) return res.status(409).json({ code: "room_not_ready_for_approval", error: "Renholder har ikke fullført rommet ennå." });
+  if (roomRun.approved_at) return res.status(409).json({ code: "room_already_approved", error: "Rommet er allerede godkjent." });
 
   const initials = (req.body?.initials || "").trim();
-  if (!initials) return res.status(400).json({ error: "Navn er påkrevd for å godkjenne rommet." });
+  if (!initials) return res.status(400).json({ code: "initials_required_approve_room", error: "Navn er påkrevd for å godkjenne rommet." });
 
   db.prepare(
     "UPDATE room_runs SET approved_at = datetime('now'), approved_by_initials = ?, completed_at = datetime('now') WHERE id = ?"
@@ -1100,11 +1100,11 @@ roomsRouter.post("/runs/:runId/approve", requireAuth, requireRole("customer", "a
 });
 
 roomsRouter.post("/runs/:runId/photos", requireAuth, requireRole("cleaner", "admin", "manager", "customer"), upload.single("photo"), async (req, res) => {
-  const { roomRun, status, error } = getRoomRunScoped(req.params.runId, req.user);
-  if (error) return res.status(status).json({ error });
+  const { roomRun, status, code, error } = getRoomRunScoped(req.params.runId, req.user);
+  if (error) return res.status(status).json({ code, error });
   const ownError = requireCustomerOwnsRoom(req.user, roomRun.room_responsible);
   if (ownError) return res.status(ownError.status).json({ error: ownError.error });
-  if (!req.file) return res.status(400).json({ error: "No file uploaded (field name must be 'photo')" });
+  if (!req.file) return res.status(400).json({ code: "no_file_uploaded", error: "No file uploaded (field name must be 'photo')" });
   await normalizeImageOrientation(path.join(process.env.UPLOADS_DIR || "uploads", req.file.filename));
   const kind = req.body.kind || "general";
   const info = db
@@ -1121,7 +1121,7 @@ roomsRouter.delete("/runs/:runId/photos/:photoId", requireAuth, requireRole("cle
   if (ownError) return res.status(ownError.status).json({ error: ownError.error });
 
   const photo = db.prepare("SELECT * FROM photos WHERE id = ? AND room_run_id = ?").get(req.params.photoId, req.params.runId);
-  if (!photo) return res.status(404).json({ error: "Not found" });
+  if (!photo) return res.status(404).json({ code: "not_found", error: "Not found" });
 
   removeUploadedFile(photo.file_path);
   db.prepare("DELETE FROM photos WHERE id = ?").run(photo.id);

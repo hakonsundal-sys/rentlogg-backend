@@ -7,6 +7,7 @@ import rateLimit from "express-rate-limit";
 import { db } from "../db.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 import { safeOriginalName, normalizeImageOrientation, imageFileFilter } from "../utils/uploads.js";
+import { normalizeLanguage } from "../utils/languages.js";
 
 export const authRouter = Router();
 
@@ -27,7 +28,7 @@ const loginLimiter = rateLimit({
   limit: 10,
   standardHeaders: true,
   legacyHeaders: false,
-  message: { error: "For mange innloggingsforsøk. Prøv igjen om litt." },
+  message: { code: "too_many_login_attempts", error: "For mange innloggingsforsøk. Prøv igjen om litt." },
 });
 
 // Used only to keep bcrypt.compareSync's timing constant when the email doesn't exist at all —
@@ -43,14 +44,14 @@ authRouter.post("/register", (req, res) => {
   const { name, email, password, role } = req.body;
   const superAdminExists = db.prepare("SELECT 1 FROM users WHERE role = 'super_admin'").get();
   if (superAdminExists) {
-    return res.status(403).json({ error: "Registrering er stengt. Kontakt en administrator for tilgang." });
+    return res.status(403).json({ code: "signup_closed", error: "Registrering er stengt. Kontakt en administrator for tilgang." });
   }
   if (!name || !email || !password || role !== "super_admin") {
-    return res.status(400).json({ error: "name, email, password er påkrevd, og role må være 'super_admin'." });
+    return res.status(400).json({ code: "superadmin_fields_required", error: "name, email, password er påkrevd, og role må være 'super_admin'." });
   }
 
   const existing = db.prepare("SELECT id FROM users WHERE email = ?").get(email);
-  if (existing) return res.status(409).json({ error: "Email already registered" });
+  if (existing) return res.status(409).json({ code: "email_taken", error: "Email already registered" });
 
   const password_hash = bcrypt.hashSync(password, 10);
   const info = db
@@ -69,14 +70,14 @@ authRouter.post("/login", loginLimiter, (req, res) => {
   // `!user ||` short-circuited before bcrypt ever ran).
   const passwordOk = bcrypt.compareSync(password, user?.password_hash || DUMMY_PASSWORD_HASH);
   if (!user || !passwordOk) {
-    return res.status(401).json({ error: "Invalid email or password" });
+    return res.status(401).json({ code: "invalid_credentials", error: "Invalid email or password" });
   }
   // Checked only after the password is confirmed correct — telling someone who doesn't even know
   // the right password that the account exists but is deactivated would leak more than a plain
   // "Invalid email or password" does, and a check placed *before* the bcrypt compare above would
   // also reopen exactly the timing side-channel that comment is guarding against.
   if (!user.active) {
-    return res.status(403).json({ error: "Denne kontoen er deaktivert. Kontakt en administrator." });
+    return res.status(403).json({ code: "account_deactivated", error: "Denne kontoen er deaktivert. Kontakt en administrator." });
   }
 
   const token = jwt.sign(
@@ -87,7 +88,13 @@ authRouter.post("/login", loginLimiter, (req, res) => {
 
   res.json({
     token,
-    user: { id: user.id, name: user.name, role: user.role, client_id: user.client_id, company_id: user.company_id },
+    // language rides in the user object, deliberately not in the JWT — it isn't an authorization
+    // claim, and a token minted before someone switched language would keep serving the stale
+    // value for the rest of its 12h life.
+    user: {
+      id: user.id, name: user.name, role: user.role,
+      client_id: user.client_id, company_id: user.company_id, language: user.language ?? null,
+    },
   });
 });
 
@@ -103,12 +110,12 @@ authRouter.post("/login", loginLimiter, (req, res) => {
 // unfiltered form doesn't exist (the only current caller always passes ?role=cleaner), so this
 // default was always somewhat accidental; tightened here since "Ansatte" is the first real user
 // of it.
-const STAFF_FIELDS = "id, name, email, role, phone, department_id, active, created_at";
+const STAFF_FIELDS = "id, name, email, role, phone, department_id, active, created_at, language";
 // Same fields, plus which company each row belongs to — only meaningful for super_admin's
 // cross-company view (an admin/manager's own rows are all their own company already). client_id/
 // client_name are only populated for role='customer' rows ("Kundebrukere") — null for staff.
 const STAFF_LIST_FIELDS =
-  "u.id, u.name, u.email, u.role, u.phone, u.department_id, u.active, u.created_at, u.company_id, c.name AS company_name, u.client_id, cl.name AS client_name";
+  "u.id, u.name, u.email, u.role, u.phone, u.department_id, u.active, u.created_at, u.company_id, c.name AS company_name, u.client_id, cl.name AS client_name, u.language";
 const STAFF_LIST_JOIN = "LEFT JOIN companies c ON c.id = u.company_id LEFT JOIN clients cl ON cl.id = u.client_id";
 // The roles this file is willing to create or move an account between — never 'customer'
 // (client-scoped, invite-only) or 'super_admin' (Rentlogg's own operator account).
@@ -155,41 +162,49 @@ authRouter.post("/users", requireAuth, requireRole("admin", "super_admin"), (req
   // the account to exactly that spelling. The duplicate check below is case-insensitive for the
   // same reason — older rows created via the invite flow keep whatever case was typed there.
   const email = typeof req.body.email === "string" ? req.body.email.trim().toLowerCase() : "";
-  if (!name || !name.trim() || !email) return res.status(400).json({ error: "Navn og e-post er påkrevd." });
-  if (!STAFF_ROLES.includes(role)) return res.status(400).json({ error: "Ugyldig rolle" });
+  if (!name || !name.trim() || !email) return res.status(400).json({ code: "name_and_email_required", error: "Navn og e-post er påkrevd." });
+  if (!STAFF_ROLES.includes(role)) return res.status(400).json({ code: "invalid_role", error: "Ugyldig rolle" });
   // 6, not the password reset's 8 — confirmed with Håkon 2026-09-18: OKV's standard starting
   // password for a new cleaner is 7 characters, and the accounts created before this endpoint
   // existed (via invite-accept, which has no minimum at all) already use it. An 8-char minimum
   // here would just push staff creation back out of the app again.
-  if (!password || password.length < 6) return res.status(400).json({ error: "Passordet må være minst 6 tegn." });
+  if (!password || password.length < 6) return res.status(400).json({ code: "password_too_short_6", error: "Passordet må være minst 6 tegn." });
 
   // Same shape as POST /invitations: a super_admin has no company of its own, so it has to say
   // which company the account lands in; for everyone else the body is never trusted for this.
   let companyId = req.user.company_id;
   if (req.user.role === "super_admin") {
     companyId = req.body.company_id;
-    if (!companyId) return res.status(400).json({ error: "company_id er påkrevd når du oppretter som super_admin" });
+    if (!companyId) return res.status(400).json({ code: "company_id_required", error: "company_id er påkrevd når du oppretter som super_admin" });
     if (!db.prepare("SELECT 1 FROM companies WHERE id = ?").get(companyId)) {
-      return res.status(400).json({ error: "Ukjent firma" });
+      return res.status(400).json({ code: "unknown_company", error: "Ukjent firma" });
     }
   }
+
+  // Set by whoever creates the account, not by the account holder: a cleaner who doesn't read
+  // Norwegian can't realistically find a Norwegian-labelled language picker on their own. Optional
+  // — omitted means NULL, which renders as Norwegian and can still be changed later.
+  const language = normalizeLanguage(req.body.language);
+  if (language === undefined) return res.status(400).json({ code: "unsupported_language", error: "Ukjent språk." });
 
   const departmentId = req.body.department_id ?? null;
   if (departmentId != null) {
     const department = db.prepare("SELECT company_id FROM departments WHERE id = ?").get(departmentId);
     if (!department || department.company_id !== companyId) {
-      return res.status(400).json({ error: "Ukjent avdeling" });
+      return res.status(400).json({ code: "unknown_department", error: "Ukjent avdeling" });
     }
   }
 
   if (db.prepare("SELECT 1 FROM users WHERE email = ? COLLATE NOCASE").get(email)) {
-    return res.status(409).json({ error: "En konto med denne e-posten finnes allerede" });
+    return res.status(409).json({ code: "email_taken", error: "En konto med denne e-posten finnes allerede" });
   }
 
   const password_hash = bcrypt.hashSync(password, 10);
   const info = db
-    .prepare("INSERT INTO users (name, email, password_hash, role, company_id, department_id) VALUES (?, ?, ?, ?, ?, ?)")
-    .run(name.trim(), email, password_hash, role, companyId, departmentId);
+    .prepare(
+      "INSERT INTO users (name, email, password_hash, role, company_id, department_id, language) VALUES (?, ?, ?, ?, ?, ?, ?)"
+    )
+    .run(name.trim(), email, password_hash, role, companyId, departmentId, language);
 
   // Any invitation still pending for this address is now moot — the account it would have created
   // exists. Mirrors the "one valid link per email at a time" rule POST /invitations already keeps.
@@ -213,11 +228,11 @@ authRouter.post("/users", requireAuth, requireRole("admin", "super_admin"), (req
 // active, delete — pass that; role reassignment never does, since STAFF_ROLES has no 'customer').
 function getStaffTarget(id, requester, { allowCustomer = false } = {}) {
   const target = db.prepare("SELECT id, company_id, role FROM users WHERE id = ?").get(id);
-  if (!target) return { status: 404, error: "Not found" };
-  if (target.role === "super_admin") return { status: 403, error: "Not allowed" };
-  if (target.role === "customer" && !allowCustomer) return { status: 403, error: "Not allowed" };
+  if (!target) return { status: 404, code: "not_found", error: "Not found" };
+  if (target.role === "super_admin") return { status: 403, code: "not_allowed", error: "Not allowed" };
+  if (target.role === "customer" && !allowCustomer) return { status: 403, code: "not_allowed", error: "Not allowed" };
   if (requester.role !== "super_admin" && target.company_id !== requester.company_id) {
-    return { status: 403, error: "Not allowed" };
+    return { status: 403, code: "not_allowed", error: "Not allowed" };
   }
   return { target };
 }
@@ -230,13 +245,13 @@ function getStaffTarget(id, requester, { allowCustomer = false } = {}) {
 // edit row is saved. Also doubles as "Kundebrukere"'s edit-details route (name/email/phone only
 // — department_id is staff-only and rejected below for a customer target) since the two lists
 // share this same shape of inline edit.
-const USER_PATCH_FIELDS = ["name", "email", "phone", "department_id"];
+const USER_PATCH_FIELDS = ["name", "email", "phone", "department_id", "language"];
 
 authRouter.patch("/users/:id", requireAuth, requireRole("admin", "manager", "super_admin"), (req, res) => {
-  const { target, status, error } = getStaffTarget(req.params.id, req.user, { allowCustomer: true });
-  if (error) return res.status(status).json({ error });
+  const { target, status, code, error } = getStaffTarget(req.params.id, req.user, { allowCustomer: true });
+  if (error) return res.status(status).json({ code, error });
   if (target.role === "customer" && "department_id" in req.body) {
-    return res.status(400).json({ error: "Kundebrukere har ingen avdeling." });
+    return res.status(400).json({ code: "customer_has_no_department", error: "Kundebrukere har ingen avdeling." });
   }
 
   const updates = {};
@@ -249,7 +264,7 @@ authRouter.patch("/users/:id", requireAuth, requireRole("admin", "manager", "sup
       // company of their own, so the department has to match whoever is actually being edited.
       const department = db.prepare("SELECT company_id FROM departments WHERE id = ?").get(departmentId);
       if (!department || department.company_id !== target.company_id) {
-        return res.status(400).json({ error: "Ukjent avdeling" });
+        return res.status(400).json({ code: "unknown_department", error: "Ukjent avdeling" });
       }
     }
     updates.department_id = departmentId ?? null;
@@ -257,7 +272,7 @@ authRouter.patch("/users/:id", requireAuth, requireRole("admin", "manager", "sup
 
   if ("name" in req.body) {
     const name = typeof req.body.name === "string" ? req.body.name.trim() : "";
-    if (!name) return res.status(400).json({ error: "Navn kan ikke være tomt." });
+    if (!name) return res.status(400).json({ code: "name_required", error: "Navn kan ikke være tomt." });
     updates.name = name;
   }
 
@@ -265,9 +280,9 @@ authRouter.patch("/users/:id", requireAuth, requireRole("admin", "manager", "sup
     // Lower-cased and uniqueness-checked exactly like POST /users — this is the login itself, so a
     // duplicate would make one of the two accounts unreachable (POST /login takes the first match).
     const email = typeof req.body.email === "string" ? req.body.email.trim().toLowerCase() : "";
-    if (!email) return res.status(400).json({ error: "E-post kan ikke være tom." });
+    if (!email) return res.status(400).json({ code: "email_required", error: "E-post kan ikke være tom." });
     const clash = db.prepare("SELECT id FROM users WHERE email = ? COLLATE NOCASE AND id != ?").get(email, target.id);
-    if (clash) return res.status(409).json({ error: "En annen konto bruker allerede denne e-posten" });
+    if (clash) return res.status(409).json({ code: "email_taken", error: "En annen konto bruker allerede denne e-posten" });
     updates.email = email;
   }
 
@@ -276,8 +291,14 @@ authRouter.patch("/users/:id", requireAuth, requireRole("admin", "manager", "sup
     updates.phone = phone || null;
   }
 
+  if ("language" in req.body) {
+    const language = normalizeLanguage(req.body.language);
+    if (language === undefined) return res.status(400).json({ code: "unsupported_language", error: "Ukjent språk." });
+    updates.language = language;
+  }
+
   const fields = USER_PATCH_FIELDS.filter((f) => f in updates);
-  if (fields.length === 0) return res.status(400).json({ error: "No valid fields to update" });
+  if (fields.length === 0) return res.status(400).json({ code: "no_valid_fields", error: "No valid fields to update" });
 
   db.prepare(`UPDATE users SET ${fields.map((f) => `${f} = ?`).join(", ")} WHERE id = ?`)
     .run(...fields.map((f) => updates[f]), req.params.id);
@@ -299,15 +320,15 @@ authRouter.patch("/users/:id", requireAuth, requireRole("admin", "manager", "sup
 // company admin directly, that's a deliberately separate decision from this endpoint, not an
 // accidental side effect of it.
 authRouter.patch("/users/:id/password", requireAuth, requireRole("admin", "super_admin"), (req, res) => {
-  const { target, status, error } = getStaffTarget(req.params.id, req.user, { allowCustomer: true });
-  if (error) return res.status(status).json({ error });
+  const { target, status, code, error } = getStaffTarget(req.params.id, req.user, { allowCustomer: true });
+  if (error) return res.status(status).json({ code, error });
   if (!["cleaner", "manager", "customer"].includes(target.role)) {
-    return res.status(403).json({ error: "Kan bare tilbakestille passord for renholdere, driftsledere og kundebrukere." });
+    return res.status(403).json({ code: "password_reset_role_not_allowed", error: "Kan bare tilbakestille passord for renholdere, driftsledere og kundebrukere." });
   }
 
   const { password } = req.body;
   if (!password || password.length < 8) {
-    return res.status(400).json({ error: "Passordet må være minst 8 tegn." });
+    return res.status(400).json({ code: "password_too_short_8", error: "Passordet må være minst 8 tegn." });
   }
 
   const password_hash = bcrypt.hashSync(password, 10);
@@ -324,12 +345,12 @@ authRouter.patch("/users/:id/password", requireAuth, requireRole("admin", "super
 // co-admin is a legitimate "remove someone's access" action, and promoting a trusted manager to
 // admin is exactly what this exists to support in the first place.
 authRouter.patch("/users/:id/role", requireAuth, requireRole("admin", "super_admin"), (req, res) => {
-  const { target, status, error } = getStaffTarget(req.params.id, req.user);
-  if (error) return res.status(status).json({ error });
-  if (target.id === req.user.id) return res.status(403).json({ error: "Du kan ikke endre din egen rolle." });
+  const { target, status, code, error } = getStaffTarget(req.params.id, req.user);
+  if (error) return res.status(status).json({ code, error });
+  if (target.id === req.user.id) return res.status(403).json({ code: "cannot_change_own_role", error: "Du kan ikke endre din egen rolle." });
 
   const { role } = req.body;
-  if (!STAFF_ROLES.includes(role)) return res.status(400).json({ error: "Ugyldig rolle" });
+  if (!STAFF_ROLES.includes(role)) return res.status(400).json({ code: "invalid_role", error: "Ugyldig rolle" });
 
   db.prepare("UPDATE users SET role = ? WHERE id = ?").run(role, req.params.id);
   res.json(db.prepare(`SELECT ${STAFF_FIELDS} FROM users WHERE id = ?`).get(req.params.id));
@@ -343,10 +364,10 @@ authRouter.patch("/users/:id/role", requireAuth, requireRole("admin", "super_adm
 // not necessarily immediately. Also "Kundebrukere"'s deactivate/reactivate — the same reversible
 // block-login concept applies just as well to a customer account.
 authRouter.patch("/users/:id/active", requireAuth, requireRole("admin", "super_admin"), (req, res) => {
-  const { target, status, error } = getStaffTarget(req.params.id, req.user, { allowCustomer: true });
-  if (error) return res.status(status).json({ error });
-  if (target.id === req.user.id) return res.status(403).json({ error: "Du kan ikke deaktivere din egen konto." });
-  if (typeof req.body.active !== "boolean") return res.status(400).json({ error: "active må være true eller false" });
+  const { target, status, code, error } = getStaffTarget(req.params.id, req.user, { allowCustomer: true });
+  if (error) return res.status(status).json({ code, error });
+  if (target.id === req.user.id) return res.status(403).json({ code: "cannot_deactivate_self", error: "Du kan ikke deaktivere din egen konto." });
+  if (typeof req.body.active !== "boolean") return res.status(400).json({ code: "invalid_active_flag", error: "active må være true eller false" });
 
   db.prepare("UPDATE users SET active = ? WHERE id = ?").run(req.body.active ? 1 : 0, req.params.id);
   res.json(db.prepare(`SELECT ${STAFF_FIELDS} FROM users WHERE id = ?`).get(req.params.id));
@@ -363,9 +384,9 @@ authRouter.patch("/users/:id/active", requireAuth, requireRole("admin", "super_a
 // — cleared automatically as part of the delete rather than also blocking on those. Admin-only
 // (or super_admin, across every company).
 authRouter.delete("/users/:id", requireAuth, requireRole("admin", "super_admin"), (req, res) => {
-  const { target, status, error } = getStaffTarget(req.params.id, req.user, { allowCustomer: true });
-  if (error) return res.status(status).json({ error });
-  if (target.id === req.user.id) return res.status(403).json({ error: "Du kan ikke slette din egen konto." });
+  const { target, status, code, error } = getStaffTarget(req.params.id, req.user, { allowCustomer: true });
+  if (error) return res.status(status).json({ code, error });
+  if (target.id === req.user.id) return res.status(403).json({ code: "cannot_delete_self", error: "Du kan ikke slette din egen konto." });
 
   const counts = {
     besøk: db.prepare("SELECT COUNT(*) AS n FROM checklist_runs WHERE cleaner_id = ?").get(req.params.id).n,
@@ -391,27 +412,33 @@ authRouter.delete("/users/:id", requireAuth, requireRole("admin", "super_admin")
 
 authRouter.get("/me", requireAuth, (req, res) => {
   const user = db
-    .prepare("SELECT id, name, email, role, client_id, company_id, avatar_url, phone, created_at FROM users WHERE id = ?")
+    .prepare("SELECT id, name, email, role, client_id, company_id, avatar_url, phone, created_at, language FROM users WHERE id = ?")
     .get(req.user.id);
   res.json(user);
 });
 
 authRouter.patch("/me", requireAuth, (req, res) => {
-  const fields = ["name", "phone"].filter((f) => f in req.body);
-  if (fields.length === 0) return res.status(400).json({ error: "No valid fields to update" });
+  const fields = ["name", "phone", "language"].filter((f) => f in req.body);
+  if (fields.length === 0) return res.status(400).json({ code: "no_valid_fields", error: "No valid fields to update" });
+
+  // Validated rather than stored as typed: an unknown code would silently fall back to Norwegian
+  // on every render, which reads as "the language picker is broken" to whoever just set it.
+  if ("language" in req.body && normalizeLanguage(req.body.language) === undefined) {
+    return res.status(400).json({ code: "unsupported_language", error: "Ukjent språk." });
+  }
 
   const setClause = fields.map((f) => `${f} = ?`).join(", ");
-  const values = fields.map((f) => req.body[f]);
+  const values = fields.map((f) => (f === "language" ? normalizeLanguage(req.body[f]) : req.body[f]));
   db.prepare(`UPDATE users SET ${setClause} WHERE id = ?`).run(...values, req.user.id);
 
   const user = db
-    .prepare("SELECT id, name, email, role, client_id, company_id, avatar_url, phone, created_at FROM users WHERE id = ?")
+    .prepare("SELECT id, name, email, role, client_id, company_id, avatar_url, phone, created_at, language FROM users WHERE id = ?")
     .get(req.user.id);
   res.json(user);
 });
 
 authRouter.post("/me/avatar", requireAuth, avatarUpload.single("avatar"), async (req, res) => {
-  if (!req.file) return res.status(400).json({ error: "No file uploaded (field name must be 'avatar')" });
+  if (!req.file) return res.status(400).json({ code: "no_file_uploaded", error: "No file uploaded (field name must be 'avatar')" });
   await normalizeImageOrientation(path.join(`${process.env.UPLOADS_DIR || "uploads"}/avatars`, req.file.filename));
   const avatar_url = `/uploads/avatars/${req.file.filename}`;
   db.prepare("UPDATE users SET avatar_url = ? WHERE id = ?").run(avatar_url, req.user.id);
