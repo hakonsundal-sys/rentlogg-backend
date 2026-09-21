@@ -57,6 +57,15 @@ function responsibleSuffix(responsible) {
   return ` (${responsible === "customer" ? "Kunde" : "Renholder"})`;
 }
 
+// A flervalg task (see room_run_item_options) only means something in a report if it says which
+// alternatives were actually ticked — "✓ Utført" alone hides the very thing the task documents,
+// e.g. which soap was used that day. Returns null for an ordinary task.
+function chosenOptionsText(item) {
+  if (!item.options?.length) return null;
+  const chosen = item.options.filter((o) => o.selected).map((o) => o.label);
+  return chosen.length ? chosen.join(", ") : "ingen valgt";
+}
+
 function buildSections(detail) {
   if (detail.rooms?.length > 0) {
     const isMixed = isMixedResponsibility(detail.rooms);
@@ -100,11 +109,14 @@ export async function buildReportBody(detail) {
   const sectionsHtml = (await Promise.all(sections.map(async (section, sIdx) => {
       const num = sIdx + 1;
       const itemsHtml = section.items
-        .map((item, iIdx) => `
+        .map((item, iIdx) => {
+          const chosen = chosenOptionsText(item);
+          return `
           <div style="padding:8px 14px;border:1px solid #ddd;border-top:none;font-size:13px;display:flex;justify-content:space-between;gap:12px;">
-            <span>${num}.${iIdx + 1} ${escapeHtml(item.label)}</span>
+            <span>${num}.${iIdx + 1} ${escapeHtml(item.label)}${chosen ? `<br><span style="color:#555;font-size:12px;">Valgt: ${escapeHtml(chosen)}</span>` : ""}</span>
             <span style="white-space:nowrap;font-weight:600;color:${item.done ? "#0a7a2f" : "#c0392b"};">${item.done ? "✓ Utført" : "✗ Ikke utført"}</span>
-          </div>`)
+          </div>`;
+        })
         .join("");
 
       const photosHtml = await photosHtmlFor(section.photos, 180);
@@ -248,6 +260,8 @@ export function buildReportPdf(detail, res) {
       if (doc.y > doc.page.height - 80) doc.addPage();
       doc.fontSize(10).fillColor("black").text(`${num}.${iIdx + 1} ${item.label}`, { continued: true });
       doc.fillColor(item.done ? "green" : "red").text(item.done ? "  ✓ Utført" : "  ✗ Ikke utført");
+      const chosen = chosenOptionsText(item);
+      if (chosen) doc.fontSize(9).fillColor("gray").text(`    Valgt: ${chosen}`);
     });
 
     if (section.photos?.length) {

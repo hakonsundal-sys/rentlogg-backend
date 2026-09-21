@@ -217,6 +217,65 @@ const roomRunByIdStmt = db.prepare("SELECT * FROM room_runs WHERE id = ?");
 // as-is, never duplicated); otherwise creates one and snapshots the room's task list as of that
 // day — filtered to just that day's due items, so a monthly task in an otherwise-daily room only
 // shows up on its own day instead of nagging the cleaner about it every visit.
+const itemOptionsStmt = db.prepare(
+  "SELECT * FROM room_checklist_item_options WHERE item_id = ? ORDER BY sort_order, id"
+);
+const insertRunItemOptionStmt = db.prepare(
+  "INSERT INTO room_run_item_options (run_item_id, option_id, label, sort_order) VALUES (?, ?, ?, ?)"
+);
+const runItemOptionIdsStmt = db.prepare("SELECT option_id FROM room_run_item_options WHERE run_item_id = ?");
+const nextRunItemOptionSortStmt = db.prepare(
+  "SELECT COALESCE(MAX(sort_order), -1) + 1 AS n FROM room_run_item_options WHERE run_item_id = ?"
+);
+
+// Freezes a multi-choice item's option list into the run item, the same way its label is already
+// frozen — see room_run_item_options in schema.sql.
+function snapshotItemOptions(runItemId, templateItemId) {
+  itemOptionsStmt
+    .all(templateItemId)
+    .forEach((option, i) => insertRunItemOptionStmt.run(runItemId, option.id, option.label, i));
+}
+
+// Options added to a task AFTER a room was already opened that day (very much the normal case
+// while a site is still being set up, and while a cleaner has the room open) would otherwise be
+// invisible until tomorrow, since the snapshot above only runs when the run is created. This adds
+// whatever the template has gained since. Additive only: an option deleted from the template
+// stays on today's list rather than vanishing from under the cleaner mid-room, and an existing
+// row (with whatever the cleaner already ticked) is never touched.
+export function ensureRunItemOptions(runId) {
+  const runItems = db
+    .prepare("SELECT id, room_checklist_item_id FROM room_run_items WHERE room_run_id = ? AND room_checklist_item_id IS NOT NULL")
+    .all(runId);
+  for (const runItem of runItems) {
+    const known = new Set(runItemOptionIdsStmt.all(runItem.id).map((r) => r.option_id));
+    let sort = nextRunItemOptionSortStmt.get(runItem.id).n;
+    for (const option of itemOptionsStmt.all(runItem.room_checklist_item_id)) {
+      if (known.has(option.id)) continue;
+      insertRunItemOptionStmt.run(runItem.id, option.id, option.label, sort++);
+    }
+  }
+}
+
+const runItemsStmt = db.prepare(
+  `SELECT rri.*, rci.monthly_weekday IS NOT NULL AS monthly
+   FROM room_run_items rri LEFT JOIN room_checklist_items rci ON rci.id = rri.room_checklist_item_id
+   WHERE rri.room_run_id = ? ORDER BY rri.sort_order`
+);
+const runItemOptionsForRunStmt = db.prepare(
+  `SELECT o.* FROM room_run_item_options o
+   JOIN room_run_items rri ON rri.id = o.run_item_id
+   WHERE rri.room_run_id = ? ORDER BY o.sort_order, o.id`
+);
+
+// One place that reads a room run's checklist the way every surface needs it — with each
+// multi-choice item's own options attached (empty array for an ordinary task). Used by the
+// cleaner's live check-in and by runDetail's day view/report builder, so all three agree.
+export function getRoomRunItems(runId) {
+  const optionsByItem = {};
+  runItemOptionsForRunStmt.all(runId).forEach((o) => { (optionsByItem[o.run_item_id] ||= []).push({ ...o, selected: !!o.selected }); });
+  return runItemsStmt.all(runId).map((item) => ({ ...item, options: optionsByItem[item.id] || [] }));
+}
+
 export function findOrCreateRoomRunForDate(roomId, dateStr, cleanerId) {
   const existing = findRoomRunForDate(roomId, dateStr);
   if (existing) return existing;
@@ -226,7 +285,10 @@ export function findOrCreateRoomRunForDate(roomId, dateStr, cleanerId) {
       ? insertRoomRunStmt.run(roomId, cleanerId || null)
       : insertRoomRunForDateStmt.run(roomId, cleanerId || null, `${dateStr} 12:00:00`);
   const items = roomItemsStmt.all(roomId).filter((item) => isItemDueOn(item, dateStr));
-  items.forEach((item, i) => insertRoomRunItemStmt.run(info.lastInsertRowid, item.id, item.label, i));
+  items.forEach((item, i) => {
+    const runItemInfo = insertRoomRunItemStmt.run(info.lastInsertRowid, item.id, item.label, i);
+    snapshotItemOptions(runItemInfo.lastInsertRowid, item.id);
+  });
   return roomRunByIdStmt.get(info.lastInsertRowid);
 }
 

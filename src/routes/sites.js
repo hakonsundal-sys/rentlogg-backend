@@ -171,10 +171,22 @@ sitesRouter.delete("/:id", requireAuth, requireRole("admin", "manager"), (req, r
           ...db.prepare(`SELECT file_path FROM photos WHERE room_run_id IN (${runPlaceholders})`).all(...roomRunIds).map((p) => p.file_path)
         );
         db.prepare(`DELETE FROM photos WHERE room_run_id IN (${runPlaceholders})`).run(...roomRunIds);
+        db.prepare(
+          `DELETE FROM room_run_item_options WHERE run_item_id IN
+             (SELECT id FROM room_run_items WHERE room_run_id IN (${runPlaceholders}))`
+        ).run(...roomRunIds);
         db.prepare(`DELETE FROM room_run_items WHERE room_run_id IN (${runPlaceholders})`).run(...roomRunIds);
       }
       db.prepare(`DELETE FROM room_runs WHERE room_id IN (${roomPlaceholders})`).run(...roomIds);
       db.prepare(`DELETE FROM room_schedules WHERE room_id IN (${roomPlaceholders})`).run(...roomIds);
+      db.prepare(
+        `DELETE FROM room_checklist_item_options WHERE item_id IN
+           (SELECT id FROM room_checklist_items WHERE room_id IN (${roomPlaceholders}))`
+      ).run(...roomIds);
+      db.prepare(
+        `DELETE FROM room_checklist_item_weekdays WHERE item_id IN
+           (SELECT id FROM room_checklist_items WHERE room_id IN (${roomPlaceholders}))`
+      ).run(...roomIds);
       db.prepare(`DELETE FROM room_checklist_items WHERE room_id IN (${roomPlaceholders})`).run(...roomIds);
     }
     db.prepare("DELETE FROM rooms WHERE site_id = ?").run(siteId);

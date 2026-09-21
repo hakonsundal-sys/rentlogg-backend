@@ -68,6 +68,10 @@ const wipe = db.transaction(() => {
       const ph = roomRunIds.map(() => "?").join(",");
       filesToDelete.push(...db.prepare(`SELECT file_path FROM photos WHERE room_run_id IN (${ph})`).all(...roomRunIds));
       db.prepare(`DELETE FROM photos WHERE room_run_id IN (${ph})`).run(...roomRunIds);
+      db.prepare(
+        `DELETE FROM room_run_item_options WHERE run_item_id IN
+           (SELECT id FROM room_run_items WHERE room_run_id IN (${ph}))`
+      ).run(...roomRunIds);
       db.prepare(`DELETE FROM room_run_items WHERE room_run_id IN (${ph})`).run(...roomRunIds);
     }
     if (deviationIds.length) {
@@ -85,6 +89,14 @@ const wipe = db.transaction(() => {
       const ph = roomIds.map(() => "?").join(",");
       db.prepare(`DELETE FROM room_runs WHERE room_id IN (${ph})`).run(...roomIds);
       db.prepare(`DELETE FROM room_schedules WHERE room_id IN (${ph})`).run(...roomIds);
+      db.prepare(
+        `DELETE FROM room_checklist_item_options WHERE item_id IN
+           (SELECT id FROM room_checklist_items WHERE room_id IN (${ph}))`
+      ).run(...roomIds);
+      db.prepare(
+        `DELETE FROM room_checklist_item_weekdays WHERE item_id IN
+           (SELECT id FROM room_checklist_items WHERE room_id IN (${ph}))`
+      ).run(...roomIds);
       db.prepare(`DELETE FROM room_checklist_items WHERE room_id IN (${ph})`).run(...roomIds);
     }
     db.prepare(`DELETE FROM rooms WHERE site_id IN (${sitePh})`).run(...siteIds);

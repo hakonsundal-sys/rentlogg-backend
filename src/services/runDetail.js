@@ -1,12 +1,7 @@
 import { db } from "../db.js";
 import { toOsloDateStr } from "./schedule.js";
-import { findRoomRunForDate, isRoomDueOn } from "./rooms.js";
+import { findRoomRunForDate, getRoomRunItems, isRoomDueOn } from "./rooms.js";
 
-const roomRunItemsStmt = db.prepare(
-  `SELECT rri.*, rci.monthly_weekday IS NOT NULL AS monthly
-   FROM room_run_items rri LEFT JOIN room_checklist_items rci ON rci.id = rri.room_checklist_item_id
-   WHERE rri.room_run_id = ? ORDER BY rri.sort_order`
-);
 const roomRunPhotosStmt = db.prepare("SELECT * FROM photos WHERE room_run_id = ?");
 // SELECT * (not just id/name/responsible) — isRoomDueOn needs interval_days/monthly_weekday/
 // monthly_occurrence too, to compute `due` per room below.
@@ -36,7 +31,7 @@ function buildRoomsForDate(siteId, dateStr) {
       approved_at: roomRun?.approved_at || null,
       approved_by_initials: roomRun?.approved_by_initials || null,
       note: roomRun?.note || null,
-      items: roomRun ? roomRunItemsStmt.all(roomRun.id) : [],
+      items: roomRun ? getRoomRunItems(roomRun.id) : [],
       photos: roomRun ? roomRunPhotosStmt.all(roomRun.id) : [],
     };
   });

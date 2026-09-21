@@ -6,7 +6,7 @@ import { PDFParse } from "pdf-parse";
 import { db } from "../db.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 import { todayInOslo } from "../services/schedule.js";
-import { getRoomsForSite, findOrCreateTodayRoomRun, findOrCreateRoomRunForDate, findRoomRunForDate, getMonthlyItemsForSite, getRoomGridForSiteMonth } from "../services/rooms.js";
+import { getRoomsForSite, findOrCreateTodayRoomRun, findOrCreateRoomRunForDate, findRoomRunForDate, getMonthlyItemsForSite, getRoomGridForSiteMonth, getRoomRunItems, ensureRunItemOptions } from "../services/rooms.js";
 import { safeOriginalName, normalizeImageOrientation, imageFileFilter, removeUploadedFile, UploadRejectedError } from "../utils/uploads.js";
 
 export const siteRoomsRouter = Router({ mergeParams: true });
@@ -220,6 +220,17 @@ siteRoomsRouter.get("/", requireAuth, (req, res) => {
   res.json(visible);
 });
 
+// "Tick every task in this run that CAN be ticked" — everything except a flervalg task with no
+// alternative chosen yet, which needs a real answer rather than a bulk sweep (see
+// itemSelectionSatisfied). Shared by the per-room "Merk alle" and the site-wide bulk complete.
+const markAnswerableItemsDoneStmt = db.prepare(
+  `UPDATE room_run_items SET done = 1
+   WHERE room_run_id = ?
+     AND id NOT IN (
+       SELECT run_item_id FROM room_run_item_options GROUP BY run_item_id HAVING SUM(selected) = 0
+     )`
+);
+
 function isValidResponsible(value) {
   return value == null || value === "company" || value === "customer";
 }
@@ -264,10 +275,20 @@ siteRoomsRouter.delete("/", requireAuth, requireRole("admin", "manager"), (req, 
           ...db.prepare(`SELECT file_path FROM photos WHERE room_run_id IN (${placeholders})`).all(...runIds).map((p) => p.file_path)
         );
         db.prepare(`DELETE FROM photos WHERE room_run_id IN (${placeholders})`).run(...runIds);
+        db.prepare(
+          `DELETE FROM room_run_item_options WHERE run_item_id IN
+             (SELECT id FROM room_run_items WHERE room_run_id IN (${placeholders}))`
+        ).run(...runIds);
         db.prepare(`DELETE FROM room_run_items WHERE room_run_id IN (${placeholders})`).run(...runIds);
       }
       db.prepare("DELETE FROM room_runs WHERE room_id = ?").run(roomId);
       db.prepare("DELETE FROM room_schedules WHERE room_id = ?").run(roomId);
+      db.prepare(
+        "DELETE FROM room_checklist_item_options WHERE item_id IN (SELECT id FROM room_checklist_items WHERE room_id = ?)"
+      ).run(roomId);
+      db.prepare(
+        "DELETE FROM room_checklist_item_weekdays WHERE item_id IN (SELECT id FROM room_checklist_items WHERE room_id = ?)"
+      ).run(roomId);
       db.prepare("DELETE FROM room_checklist_items WHERE room_id = ?").run(roomId);
       db.prepare("DELETE FROM rooms WHERE id = ?").run(roomId);
     }
@@ -322,18 +343,31 @@ siteRoomsRouter.post("/complete-all-due", requireAuth, requireRole("cleaner", "a
     (r) => r.dueToday && r.status !== "completed" && (isCustomer ? r.responsible === "customer" : r.responsible !== "customer")
   );
 
+  // A room holding a flervalg task nobody has answered is deliberately left open rather than
+  // signed off — the whole point of such a task (which soap was used today) is that only the
+  // person who did the work can answer it, so a bulk sweep signing it off unanswered would make
+  // the requirement optional in practice. Those rooms are named back to the caller so the app can
+  // say which ones still need opening, instead of silently leaving them behind.
   const completeAll = db.transaction((rooms) => {
-    let completedCount = 0;
+    const completed = [];
+    const skipped = [];
     for (const room of rooms) {
       const run = findOrCreateTodayRoomRun(room.id, req.user.id);
-      db.prepare("UPDATE room_run_items SET done = 1 WHERE room_run_id = ?").run(run.id);
+      markAnswerableItemsDoneStmt.run(run.id);
+      const unanswered = db
+        .prepare("SELECT COUNT(*) AS n FROM room_run_items WHERE room_run_id = ? AND done = 0")
+        .get(run.id).n;
+      if (unanswered > 0) {
+        skipped.push(room.name);
+        continue;
+      }
       db.prepare("UPDATE room_runs SET completed_at = datetime('now'), signed_initials = ? WHERE id = ?").run(initials, run.id);
-      completedCount++;
+      completed.push(room.id);
     }
-    return completedCount;
+    return { completedCount: completed.length, skippedRooms: skipped };
   });
 
-  res.json({ completedCount: completeAll(dueIncomplete) });
+  res.json(completeAll(dueIncomplete));
 });
 
 // --- AI PDF import: proposes rooms/tasks without persisting them ---
@@ -565,10 +599,20 @@ roomsRouter.delete("/:id", requireAuth, requireRole("admin", "manager"), (req, r
         ...db.prepare(`SELECT file_path FROM photos WHERE room_run_id IN (${placeholders})`).all(...runIds).map((p) => p.file_path)
       );
       db.prepare(`DELETE FROM photos WHERE room_run_id IN (${placeholders})`).run(...runIds);
+      db.prepare(
+        `DELETE FROM room_run_item_options WHERE run_item_id IN
+           (SELECT id FROM room_run_items WHERE room_run_id IN (${placeholders}))`
+      ).run(...runIds);
       db.prepare(`DELETE FROM room_run_items WHERE room_run_id IN (${placeholders})`).run(...runIds);
     }
     db.prepare("DELETE FROM room_runs WHERE room_id = ?").run(roomId);
     db.prepare("DELETE FROM room_schedules WHERE room_id = ?").run(roomId);
+    db.prepare(
+      "DELETE FROM room_checklist_item_options WHERE item_id IN (SELECT id FROM room_checklist_items WHERE room_id = ?)"
+    ).run(roomId);
+    db.prepare(
+      "DELETE FROM room_checklist_item_weekdays WHERE item_id IN (SELECT id FROM room_checklist_items WHERE room_id = ?)"
+    ).run(roomId);
     db.prepare("DELETE FROM room_checklist_items WHERE room_id = ?").run(roomId);
     db.prepare("DELETE FROM rooms WHERE id = ?").run(roomId);
   });
@@ -593,7 +637,20 @@ roomsRouter.get("/:id/items", requireAuth, (req, res) => {
     .all(req.params.id);
   const weekdaysByItem = {};
   weekdayRows.forEach((r) => { (weekdaysByItem[r.item_id] ||= []).push(r.weekday); });
-  res.json(items.map((item) => ({ ...item, weekly_days: weekdaysByItem[item.id] || [] })));
+  // A task with options is a multi-choice ("flervalg") task — see room_checklist_item_options.
+  const optionRows = db
+    .prepare(
+      `SELECT * FROM room_checklist_item_options
+       WHERE item_id IN (SELECT id FROM room_checklist_items WHERE room_id = ?) ORDER BY sort_order, id`
+    )
+    .all(req.params.id);
+  const optionsByItem = {};
+  optionRows.forEach((o) => { (optionsByItem[o.item_id] ||= []).push(o); });
+  res.json(items.map((item) => ({
+    ...item,
+    weekly_days: weekdaysByItem[item.id] || [],
+    options: optionsByItem[item.id] || [],
+  })));
 });
 
 roomsRouter.post("/:id/items", requireAuth, requireRole("admin", "manager"), (req, res) => {
@@ -692,10 +749,81 @@ roomsRouter.delete("/:id/items/:itemId", requireAuth, requireRole("admin", "mana
   // deleting the historical row itself) is enough to unblock the delete without touching history.
   const deleteItem = db.transaction((itemId, roomId) => {
     db.prepare("UPDATE room_run_items SET room_checklist_item_id = NULL WHERE room_checklist_item_id = ?").run(itemId);
+    // Same treatment for the multi-choice options this task may have had: past runs keep their
+    // own snapshotted option rows (with their own labels), they just lose the template link.
+    db.prepare(
+      `UPDATE room_run_item_options SET option_id = NULL
+       WHERE option_id IN (SELECT id FROM room_checklist_item_options WHERE item_id = ?)`
+    ).run(itemId);
+    db.prepare("DELETE FROM room_checklist_item_options WHERE item_id = ?").run(itemId);
     db.prepare("DELETE FROM room_checklist_item_weekdays WHERE item_id = ?").run(itemId);
     db.prepare("DELETE FROM room_checklist_items WHERE id = ? AND room_id = ?").run(itemId, roomId);
   });
   deleteItem(req.params.itemId, req.params.id);
+  res.json({ ok: true });
+});
+
+// --- Multi-choice ("flervalg") options on a task ---
+//
+// A task with at least one option stops being a plain done/not-done line and becomes "tick which
+// of these applied today" — Sinkaberg's cleaners have to record which soap they used, one task per
+// room with the site's chemical list as its options. Options live only on the template here; each
+// day's run snapshots its own copy (see room_run_item_options), so editing this list never
+// rewrites what an earlier visit recorded.
+
+function getItemScoped(roomId, itemId, user) {
+  const { status, error } = getRoomScoped(roomId, user);
+  if (error) return { status, error };
+  const item = db.prepare("SELECT * FROM room_checklist_items WHERE id = ? AND room_id = ?").get(itemId, roomId);
+  if (!item) return { status: 404, error: "Not found" };
+  return { item };
+}
+
+roomsRouter.post("/:id/items/:itemId/options", requireAuth, requireRole("admin", "manager"), (req, res) => {
+  const { status, error } = getItemScoped(req.params.id, req.params.itemId, req.user);
+  if (error) return res.status(status).json({ error });
+
+  const label = typeof req.body?.label === "string" ? req.body.label.trim() : "";
+  if (!label) return res.status(400).json({ error: "Valgnavn kan ikke være tomt." });
+
+  const nextSort = db
+    .prepare("SELECT COALESCE(MAX(sort_order), -1) + 1 AS n FROM room_checklist_item_options WHERE item_id = ?")
+    .get(req.params.itemId).n;
+  const info = db
+    .prepare("INSERT INTO room_checklist_item_options (item_id, label, sort_order) VALUES (?, ?, ?)")
+    .run(req.params.itemId, label, nextSort);
+
+  res.status(201).json(db.prepare("SELECT * FROM room_checklist_item_options WHERE id = ?").get(info.lastInsertRowid));
+});
+
+roomsRouter.patch("/:id/items/:itemId/options/:optionId", requireAuth, requireRole("admin", "manager"), (req, res) => {
+  const { status, error } = getItemScoped(req.params.id, req.params.itemId, req.user);
+  if (error) return res.status(status).json({ error });
+
+  const label = typeof req.body?.label === "string" ? req.body.label.trim() : "";
+  if (!label) return res.status(400).json({ error: "Valgnavn kan ikke være tomt." });
+
+  const result = db
+    .prepare("UPDATE room_checklist_item_options SET label = ? WHERE id = ? AND item_id = ?")
+    .run(label, req.params.optionId, req.params.itemId);
+  if (result.changes === 0) return res.status(404).json({ error: "Not found" });
+
+  res.json(db.prepare("SELECT * FROM room_checklist_item_options WHERE id = ?").get(req.params.optionId));
+});
+
+roomsRouter.delete("/:id/items/:itemId/options/:optionId", requireAuth, requireRole("admin", "manager"), (req, res) => {
+  const { status, error } = getItemScoped(req.params.id, req.params.itemId, req.user);
+  if (error) return res.status(status).json({ error });
+
+  // Past runs keep their own snapshot of this option (label and all) — only the link back to the
+  // template row is cleared, same as a deleted task does for room_run_items.
+  const deleteOption = db.transaction((optionId, itemId) => {
+    db.prepare("UPDATE room_run_item_options SET option_id = NULL WHERE option_id = ?").run(optionId);
+    return db.prepare("DELETE FROM room_checklist_item_options WHERE id = ? AND item_id = ?").run(optionId, itemId);
+  });
+  const result = deleteOption(req.params.optionId, req.params.itemId);
+  if (result.changes === 0) return res.status(404).json({ error: "Not found" });
+
   res.json({ ok: true });
 });
 
@@ -760,13 +888,9 @@ roomsRouter.post("/:id/checkin", requireAuth, requireRole("cleaner"), (req, res)
   if (error) return res.status(status).json({ error });
 
   const run = findOrCreateTodayRoomRun(req.params.id, req.user.id);
-  const items = db
-    .prepare(
-      `SELECT rri.*, rci.monthly_weekday IS NOT NULL AS monthly
-       FROM room_run_items rri LEFT JOIN room_checklist_items rci ON rci.id = rri.room_checklist_item_id
-       WHERE rri.room_run_id = ? ORDER BY rri.sort_order`
-    )
-    .all(run.id);
+  // Picks up any flervalg-option added to a task after this room was already opened today.
+  ensureRunItemOptions(run.id);
+  const items = getRoomRunItems(run.id);
   const photos = db.prepare("SELECT * FROM photos WHERE room_run_id = ?").all(run.id);
   res.json({ ...run, items, photos });
 });
@@ -789,6 +913,7 @@ roomsRouter.post("/:id/checkin-date", requireAuth, requireRole("cleaner", "admin
   if (date > todayInOslo()) return res.status(400).json({ error: "Kan ikke åpne en fremtidig dato." });
 
   const run = findOrCreateRoomRunForDate(req.params.id, date, req.user.id);
+  ensureRunItemOptions(run.id);
   res.status(201).json(run);
 });
 
@@ -838,9 +963,51 @@ roomsRouter.patch("/runs/:runId/items/:itemId", requireAuth, requireRole("cleane
   if (ownError) return res.status(ownError.status).json({ error: ownError.error });
 
   const { done, initials } = req.body;
+  // A flervalg task (one with options, see room_run_item_options) documents WHICH alternative was
+  // used — ticking it off without naming one would record exactly the thing it exists to capture
+  // as blank, so the answer is required before it can be marked done. Unticking is never blocked.
+  if (done && !itemSelectionSatisfied(req.params.itemId)) {
+    return res.status(400).json({ error: "Velg minst ett alternativ for denne oppgaven først." });
+  }
   const result = db.prepare("UPDATE room_run_items SET done = ? WHERE id = ? AND room_run_id = ?").run(done ? 1 : 0, req.params.itemId, req.params.runId);
   if (result.changes === 0) return res.status(404).json({ error: "Not found" });
   stampRoomRunEdit(req.params.runId, initials);
+  res.json({ ok: true });
+});
+
+// True unless this run item is a flervalg task with nothing ticked yet — i.e. "may this item be
+// marked done". A plain task (no options at all) always passes, which is every task that existed
+// before flervalg did.
+function itemSelectionSatisfied(runItemId) {
+  const counts = db
+    .prepare("SELECT COUNT(*) AS total, COALESCE(SUM(selected), 0) AS chosen FROM room_run_item_options WHERE run_item_id = ?")
+    .get(runItemId);
+  return counts.total === 0 || counts.chosen > 0;
+}
+
+// Ticking one alternative on a flervalg task. Kept separate from the item PATCH above for the
+// same reason /approve is: one column per route, so each side's validation stays legible.
+// Clearing the last remaining choice also clears `done` — the task can't stay "utført" while the
+// answer it documents is blank (the same rule the PATCH above enforces, applied from this side).
+roomsRouter.patch("/runs/:runId/items/:itemId/options/:optionId", requireAuth, requireRole("cleaner", "admin", "manager", "customer"), (req, res) => {
+  const { roomRun, status, error } = getRoomRunScoped(req.params.runId, req.user);
+  if (error) return res.status(status).json({ error });
+  const ownError = requireCustomerOwnsRoom(req.user, roomRun.room_responsible);
+  if (ownError) return res.status(ownError.status).json({ error: ownError.error });
+
+  const selected = req.body?.selected ? 1 : 0;
+  const result = db
+    .prepare(
+      `UPDATE room_run_item_options SET selected = ?
+       WHERE id = ? AND run_item_id = (SELECT id FROM room_run_items WHERE id = ? AND room_run_id = ?)`
+    )
+    .run(selected, req.params.optionId, req.params.itemId, req.params.runId);
+  if (result.changes === 0) return res.status(404).json({ error: "Not found" });
+
+  if (!itemSelectionSatisfied(req.params.itemId)) {
+    db.prepare("UPDATE room_run_items SET done = 0 WHERE id = ? AND room_run_id = ?").run(req.params.itemId, req.params.runId);
+  }
+  stampRoomRunEdit(req.params.runId, req.body?.initials);
   res.json({ ok: true });
 });
 
@@ -880,7 +1047,9 @@ roomsRouter.post("/runs/:runId/items/complete-all", requireAuth, requireRole("cl
   const ownError = requireCustomerOwnsRoom(req.user, roomRun.room_responsible);
   if (ownError) return res.status(ownError.status).json({ error: ownError.error });
 
-  db.prepare("UPDATE room_run_items SET done = 1 WHERE room_run_id = ?").run(req.params.runId);
+  // Deliberately skips flervalg tasks nobody has answered yet — a blanket "merk alle" must not
+  // be able to claim a soap was used without saying which one (see itemSelectionSatisfied).
+  markAnswerableItemsDoneStmt.run(req.params.runId);
   stampRoomRunEdit(req.params.runId, req.body?.initials);
   res.json({ ok: true });
 });

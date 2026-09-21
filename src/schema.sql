@@ -192,6 +192,19 @@ CREATE TABLE IF NOT EXISTS room_checklist_item_weekdays (
   UNIQUE(item_id, weekday)
 );
 
+-- A checklist item can carry a set of tick-off alternatives ("flervalg") instead of being a
+-- plain done/not-done line: e.g. Sinkaberg's cleaners must record WHICH soap they used that day,
+-- picking one or more from the site's chemical list. An item is a multi-choice item purely by
+-- having rows here — there's no separate type column — and such an item can't be marked done
+-- until at least one of its options is ticked (enforced in routes/rooms.js).
+CREATE TABLE IF NOT EXISTS room_checklist_item_options (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  item_id INTEGER NOT NULL REFERENCES room_checklist_items(id),
+  label TEXT NOT NULL,
+  sort_order INTEGER DEFAULT 0,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS room_runs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   room_id INTEGER NOT NULL REFERENCES rooms(id),
@@ -208,6 +221,21 @@ CREATE TABLE IF NOT EXISTS room_run_items (
   sort_order INTEGER DEFAULT 0
 );
 
+-- One day's snapshot of a multi-choice item's options, mirroring how room_run_items already
+-- snapshots its parent item's label: the option list a cleaner actually chose from is frozen into
+-- the run, so renaming or removing a soap later never rewrites what last month's log says was
+-- used. option_id is the same nullable "which template row did this come from" link
+-- room_run_items.room_checklist_item_id is, and is cleared (not cascaded) when an option is
+-- deleted, exactly like that one.
+CREATE TABLE IF NOT EXISTS room_run_item_options (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_item_id INTEGER NOT NULL REFERENCES room_run_items(id),
+  option_id INTEGER REFERENCES room_checklist_item_options(id),
+  label TEXT NOT NULL,
+  sort_order INTEGER DEFAULT 0,
+  selected INTEGER DEFAULT 0
+);
+
 CREATE INDEX IF NOT EXISTS idx_sites_client ON sites(client_id);
 CREATE INDEX IF NOT EXISTS idx_runs_site ON checklist_runs(site_id);
 CREATE INDEX IF NOT EXISTS idx_deviations_site ON deviations(site_id);
@@ -216,3 +244,5 @@ CREATE INDEX IF NOT EXISTS idx_invitations_token ON invitations(token);
 CREATE INDEX IF NOT EXISTS idx_rooms_site ON rooms(site_id);
 CREATE INDEX IF NOT EXISTS idx_room_schedules_room ON room_schedules(room_id);
 CREATE INDEX IF NOT EXISTS idx_room_runs_room ON room_runs(room_id);
+CREATE INDEX IF NOT EXISTS idx_item_options_item ON room_checklist_item_options(item_id);
+CREATE INDEX IF NOT EXISTS idx_run_item_options_run_item ON room_run_item_options(run_item_id);
