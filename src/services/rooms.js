@@ -90,13 +90,19 @@ export function isRoomDueOn(room, dateStr) {
   return weekdays.has(weekdayOf(dateStr));
 }
 
-// Same "Nth weekday of month" check as isRoomDueOn's monthly mode, just scoped to one
-// checklist item instead of the whole room. No interval_days mode here (unlike rooms): an
-// item has no completion history of its own to measure "days since last done" against, so
-// only the pure-calendar monthly mode is supported. No schedule set at all means due every
-// time the room is — the pre-existing behavior for every item created before this existed.
+// Three modes, distinguished by which of the two fields is set:
+// - both null: due every time the room is (the pre-existing default, unrestricted).
+// - weekday set, occurrence null: due weekly, every occurrence of that weekday — e.g. a task
+//   merged out of a room that used to have its own weekly schedule (see "Kontorrenhold"/
+//   "Konditorirenhold", 2026-09-21) and needs its own day now that the room's tasks all share
+//   one room-level schedule.
+// - both set: due only on the Nth occurrence of that weekday in the current calendar month
+//   (the original meaning) — same "Nth weekday of month" check as isRoomDueOn's monthly mode.
+// No interval_days mode here (unlike rooms): an item has no completion history of its own to
+// measure "days since last done" against, so only these two weekday-based modes exist.
 export function isItemDueOn(item, dateStr) {
-  if (item.monthly_weekday == null || item.monthly_occurrence == null) return true;
+  if (item.monthly_weekday == null) return true;
+  if (item.monthly_occurrence == null) return weekdayOf(dateStr) === item.monthly_weekday;
   const [year, month, day] = dateStr.split("-").map(Number);
   const targetDay = nthWeekdayOfMonth(year, month - 1, item.monthly_weekday, item.monthly_occurrence);
   return targetDay === day;
