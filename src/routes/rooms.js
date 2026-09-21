@@ -621,7 +621,16 @@ roomsRouter.delete("/:id/items/:itemId", requireAuth, requireRole("admin", "mana
   const { status, error } = getRoomScoped(req.params.id, req.user);
   if (error) return res.status(status).json({ error });
 
-  db.prepare("DELETE FROM room_checklist_items WHERE id = ? AND room_id = ?").run(req.params.itemId, req.params.id);
+  // room_run_items.room_checklist_item_id (added for the monthly-tasks overview, see services/
+  // rooms.js) points back at this row with no ON DELETE clause, so a checklist item that's ever
+  // been included in a run failed this delete outright with a raw FK constraint error. Each past
+  // run_item keeps its own label as a plain text snapshot regardless, so clearing the link (not
+  // deleting the historical row itself) is enough to unblock the delete without touching history.
+  const deleteItem = db.transaction((itemId, roomId) => {
+    db.prepare("UPDATE room_run_items SET room_checklist_item_id = NULL WHERE room_checklist_item_id = ?").run(itemId);
+    db.prepare("DELETE FROM room_checklist_items WHERE id = ? AND room_id = ?").run(itemId, roomId);
+  });
+  deleteItem(req.params.itemId, req.params.id);
   res.json({ ok: true });
 });
 
