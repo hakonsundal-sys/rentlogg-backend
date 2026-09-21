@@ -1,8 +1,10 @@
 import { db } from "../db.js";
 import { toOsloDateStr } from "./schedule.js";
 import { findRoomRunForDate, getRoomRunItems, isRoomDueOn } from "./rooms.js";
+import { buildRunHistory } from "./runHistory.js";
 
 const roomRunPhotosStmt = db.prepare("SELECT * FROM photos WHERE room_run_id = ?");
+const cleanerNameStmt = db.prepare("SELECT name FROM users WHERE id = ?");
 // SELECT * (not just id/name/responsible) — isRoomDueOn needs interval_days/monthly_weekday/
 // monthly_occurrence too, to compute `due` per room below.
 const siteRoomsStmt = db.prepare("SELECT * FROM rooms WHERE site_id = ? ORDER BY sort_order, id");
@@ -23,6 +25,8 @@ function buildRoomsForDate(siteId, dateStr) {
       requires_approval: !!room.requires_approval,
       due: isRoomDueOn(room, dateStr),
       roomRunId: roomRun?.id || null,
+      started_at: roomRun?.started_at || null,
+      cleaner_name: roomRun?.cleaner_id ? cleanerNameStmt.get(roomRun.cleaner_id)?.name || null : null,
       completed_at: roomRun?.completed_at || null,
       signed_initials: roomRun?.signed_initials || null,
       edited_at: roomRun?.edited_at || null,
@@ -82,7 +86,8 @@ export function getRunDetail(runId) {
   }
   const deviations = deviationRows.map((d) => ({ ...d, photos: deviationPhotosById[d.id] || [] }));
 
-  return { ...run, items, photos, rooms, deviations };
+  const detail = { ...run, items, photos, rooms, deviations };
+  return { ...detail, history: buildRunHistory(detail) };
 }
 
 // The vaskeplan grid used to only be able to open a day that already had a flat checklist_runs
@@ -97,7 +102,7 @@ export function getVirtualDayDetail(site, dateStr) {
   const rooms = buildRoomsForDate(site.id, dateStr);
   if (rooms.length === 0) return null; // not a room-based site — nothing to show without a real run
 
-  return {
+  const detail = {
     id: null,
     site_id: site.id,
     site_name: site.name,
@@ -118,6 +123,10 @@ export function getVirtualDayDetail(site, dateStr) {
     // elsewhere (Avvik page, GET /deviations) regardless, so this isn't a real information loss.
     deviations: [],
   };
+
+  // A day with no site-level check-in still has a real story to tell — the rooms someone opened
+  // and finished that day — so this gets the same timeline a real run does.
+  return { ...detail, history: buildRunHistory(detail) };
 }
 
 export function canAccessRun(run, user) {
