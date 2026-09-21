@@ -146,6 +146,10 @@ export function getRoomsForSite(siteId, dateStr) {
       status: getRoomStatusForDate(room.id, dateStr),
       lastCleanedAt: lastCleanedStmt.get(room.id)?.completed_at || null,
       itemCount: itemCountStmt.get(room.id).n,
+      // Lets a caller (the customer dashboard's "Godkjenn alle rom" card, 2026-09-21) act on a
+      // room's run directly — e.g. POST /rooms/runs/:id/approve — without a separate day-detail
+      // fetch just to learn which run_id today's activity landed in.
+      roomRunId: run?.id || null,
       signedInitials: run?.signed_initials || null,
       readyForApprovalAt: run?.ready_for_approval_at || null,
       approvedAt: run?.approved_at || null,
