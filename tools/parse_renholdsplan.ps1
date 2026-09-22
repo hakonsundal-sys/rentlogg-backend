@@ -67,7 +67,8 @@ foreach ($ws in $wb.Worksheets) {
         for ($c = 1; $c -le $cols; $c++) {
             $t = $ws.Cells.Item($startRow + $r - 1, $startCol + $c - 1).Text
             if ($t -eq "Lokale" -or $t -eq $omradeLabel -or $t -eq "Location") { $hasLokale = $true; $lokaleCol = $c }
-            if ($t -eq "Inv/Objekt" -or $t -eq "Inventory/Object") { $hasInv = $true; $invCol = $c }
+            # "Rom / Objekt" is the administration edition's name for the same column.
+            if ($t -eq "Inv/Objekt" -or $t -eq "Inventory/Object" -or $t -eq "Rom / Objekt" -or $t -eq "Rom/Objekt") { $hasInv = $true; $invCol = $c }
             if ($t -eq "Frek." -or $t -eq "Freq.") { $frekCol = $c }
             if ($t -eq "Merknader" -or $t -eq "Remarks") { $merknaderCol = $c }
         }
@@ -111,7 +112,7 @@ foreach ($ws in $wb.Worksheets) {
     # equal to "Område" and read the value one row below it in the same column region (K5/J6-style
     # merged cell pattern seen in every one of these files: header at row 5, value at row 6)
     $areaName = ""
-    for ($r = 1; $r -le $headerRow; $r++) {
+    for ($r = 1; $r -lt $headerRow; $r++) {
         for ($c = 1; $c -le $cols; $c++) {
             $labelText = $ws.Cells.Item($startRow + $r - 1, $startCol + $c - 1).Text
             if ($labelText -eq $omradeLabel -or $labelText -eq "Area") {

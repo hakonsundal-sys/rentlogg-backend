@@ -40,6 +40,23 @@ function toAppWeekday(sourcePosition) {
   return (sourcePosition + 1) % 7;
 }
 
+// Printed after every run: how many rooms and tasks each sheet of the workbook actually produced.
+// A plan whose office or second production sheet was never read shows up here as a sheet that is
+// simply absent from the list — which is exactly what nobody noticed on Domstein Sjømat Bergen,
+// where the site was built from one-page PDFs instead of this workbook and its whole "kontor (1)"
+// sheet (18 rooms) was missing from production for ten months. Read this list against the sheet
+// tabs in the workbook before importing.
+function countBySheet(rooms) {
+  const per = {};
+  for (const r of rooms) {
+    const sheet = r.sheet.trim();
+    per[sheet] ||= { rooms: 0, tasks: 0 };
+    per[sheet].rooms++;
+    per[sheet].tasks += r.tasks.length;
+  }
+  return per;
+}
+
 // The source plan's responsibility flag column, one past the weekday grid: "x" for a daily/weekly
 // task, "p" for a periodic one, both meaning the customer does it themselves. Anything else -
 // including a file parsed before the parser captured this column at all - counts as ours, which
@@ -118,22 +135,17 @@ function transform(parsed) {
     // Only our own tasks feed the majority-weekday calculation below - a room's schedule should
     // describe when WE are there, not when the customer cleans.
     const classified = ours.map((t) => ({ ...t, cls: classify(t) }));
-    // Pick the weekday-set (among weekly tasks) that covers the most tasks
-    const weekdaySetCounts = {};
+    // The room is due on every day any of its tasks is due: the UNION of the weekly tasks' days.
+    // This used to be the most common weekday-set instead, which broke rooms with a mixed rhythm —
+    // Goman Trondheim's "Bakeri" has 9 Saturday-only tasks and 6 daily ones, so the room landed on
+    // Saturday alone and never appeared in a cleaner's Dagens plan Monday to Friday, even though it
+    // is cleaned six days a week. Tasks whose own days differ from the room's still say so in their
+    // label (see labelSuffix), so the finer rhythm is not lost by widening the room.
+    const unionDays = new Set();
     for (const t of classified) {
-      if (t.cls.kind === "weekly") {
-        const key = weekdaySetKey(t.cls.weekdays);
-        weekdaySetCounts[key] = (weekdaySetCounts[key] || 0) + 1;
-      }
+      if (t.cls.kind === "weekly") t.cls.weekdays.forEach((d) => unionDays.add(d));
     }
-    let roomWeekdaySet = null;
-    let bestCount = 0;
-    for (const [key, count] of Object.entries(weekdaySetCounts)) {
-      if (count > bestCount) {
-        bestCount = count;
-        roomWeekdaySet = key;
-      }
-    }
+    const roomWeekdaySet = unionDays.size > 0 ? weekdaySetKey([...unionDays]) : null;
 
     const tasks = classified.map((t) => {
       const suffix = labelSuffix(t.cls, roomWeekdaySet);
@@ -147,7 +159,13 @@ function transform(parsed) {
     outRooms.push({ name, tasks, schedule });
   }
 
-  return { rooms: outRooms, customerTasks, customerOnlyRooms, skipped: parsed.skipped };
+  return {
+    rooms: outRooms,
+    customerTasks,
+    customerOnlyRooms,
+    skipped: parsed.skipped,
+    perSheet: countBySheet(parsed.rooms),
+  };
 }
 
 const inPath = process.argv[2];
@@ -157,6 +175,9 @@ const parsed = JSON.parse(raw);
 const result = transform(parsed);
 fs.writeFileSync(outPath, JSON.stringify(result, null, 2), "utf8");
 console.log(`${inPath}: ${result.rooms.length} rooms, ${result.skipped.length} sheets skipped`);
+for (const [sheet, n] of Object.entries(result.perSheet)) {
+  console.log(`  sheet "${sheet}": ${n.rooms} rooms, ${n.tasks} tasks`);
+}
 if (result.customerTasks.length > 0) {
   console.log(`${result.customerTasks.length} task(s) left out as the customer's own:`);
   for (const t of result.customerTasks) console.log(`  [${t.flag}] ${t.room} / ${t.task}`);

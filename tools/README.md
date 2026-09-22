@@ -30,12 +30,13 @@ Hvert ark med romdata har en header-rad med `Lokale` (grov sone, verdien gjentas
 tomme celler) og `Inv/Objekt` (én rad per oppgave i den sonen). **Lokale blir rommet,
 Inv/Objekt blir sjekklisteoppgaven.** De 7 kolonnene rett etter `Merknader` er ukedagsrutenettet.
 
-Malen finnes i to utgaver med **identisk kolonnerekkefølge**:
+Malen finnes i tre utgaver med **identisk kolonnerekkefølge** — norsk, engelsk, og en
+«Administrasjon»-utgave for kontorplaner som kaller oppgavekolonnen `Rom / Objekt`:
 
 | Norsk | Engelsk |
 |---|---|
 | `Lokale` / `Område` | `Location` / `Area` |
-| `Inv/Objekt` | `Inventory/Object` |
+| `Inv/Objekt` (adm.: `Rom / Objekt`) | `Inventory/Object` |
 | `Frek.` | `Freq.` |
 | `Merknader` | `Remarks` |
 | `M T O T F L S` | `Mo Tu We Th Fr Sa Su` |
@@ -84,6 +85,14 @@ framfor å forsvinne i stillhet.
   (periodisk: kolonnene er månedsnummer 1–12). Disse har et annet rutenett og importeres ikke av
   dette verktøyet.
 
+**Importer fra .xlsx-en, ikke fra en PDF.** En PDF av planen er som regel ett ark, og du ser
+aldri at resten finnes. Det er nøyaktig slik Domstein Sjømat Bergen mistet hele kontorplanen sin:
+lokasjonen ble bygget fra to ensides PDF-er, og arket `kontor (1)` med 18 rom lå urørt i arbeidsboka
+i ti måneder uten at noe sa fra.
+
+`transform.js` skriver derfor ut **hvor mange rom og oppgaver hvert ark ga**. Hold den lista opp mot
+arkfanene i arbeidsboka før du importerer — et ark som mangler i lista, mangler i importen.
+
 **Kontroller alltid at (ark som ga rom) + (ark i `skipped`) = totalt antall ark.** Et ark som
 matcher headeren, men har tomme Lokale/Inv-Objekt-kolonner, forsvant tidligere sporløst uten at
 noe feilet. Nå rapporteres det, men sjekk summen uansett.
@@ -93,8 +102,16 @@ noe feilet. Nå rapporteres det, men sjekk summen uansett.
 Appen støtter bare **én** plan per rom (ukedagssett, månedlig eller intervall), mens kildeplanen
 ofte har ulik frekvens per oppgave. Policyen, avklart med Håkon:
 
-- Rommets plan settes til det ukedagssettet som dekker **flest** av oppgavene i rommet.
-- Hver oppgave som avviker, får det i navnet i stedet: `«Reoler (1x/mnd)»`, `«Bord (kun tirsdag)»`.
+- **Rommets plan er unionen av ukedagene til oppgavene i det** — rommet skal dukke opp hver dag
+  det finnes noe å gjøre der. Har ett objekt 6 ganger i uka og resten bare lørdag, står rommet
+  man–lør.
+- Hver oppgave som avviker fra rommets sett, får det i navnet: `«Reoler (1x/mnd)»`, `«Bord (kun
+  tirsdag)»`. Appen har dessuten ukedager **per oppgave** (`weekly_days` på
+  `PATCH /rooms/:id/items/:itemId`) — settes de, vises oppgaven bare på sine egne dager, og
+  merknaden i navnet er overflødig.
+- Regelen var tidligere «det settet som dekker flest oppgaver». Det satte Goman Trondheims bakeri
+  på kun lørdag, fordi ni av seksten oppgaver var lørdagsoppgaver, og rommet forsvant fra planen
+  man–fre. 45 rom måtte repareres i produksjon i september 2026.
 - Et rom uten ukentlige oppgaver i det hele tatt får ingen plan (`schedule: null`).
 - Sier frekvensen «ved behov» samtidig som ukedagene er krysset av, vinner kryssene for planen,
   men ordene blir med i navnet: `«… (ved behov)»`.
