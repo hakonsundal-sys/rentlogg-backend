@@ -1,4 +1,5 @@
 import jwt from "jsonwebtoken";
+import { isModuleEnabled } from "../modules.js";
 
 export function requireAuth(req, res, next) {
   const header = req.headers.authorization || "";
@@ -27,6 +28,18 @@ export function requireAuthQueryOrHeader(req, res, next) {
   } catch {
     res.status(401).json({ code: "invalid_token", error: "Invalid or expired token" });
   }
+}
+
+// Gates a whole add-on module's routes on the caller's company having it turned on (see
+// src/modules.js). Applied at the mount in server.js rather than per route, so a module can never
+// grow a route that forgot the check. Runs after requireAuth — it needs req.user.company_id.
+export function requireModule(key) {
+  return (req, res, next) => {
+    if (!isModuleEnabled(req.user?.company_id, key)) {
+      return res.status(403).json({ code: "module_not_enabled", error: "Denne modulen er ikke aktivert for firmaet." });
+    }
+    next();
+  };
 }
 
 export function requireRole(...roles) {

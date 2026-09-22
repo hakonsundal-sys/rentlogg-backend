@@ -8,6 +8,7 @@ import { db } from "../db.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 import { safeOriginalName, normalizeImageOrientation, imageFileFilter } from "../utils/uploads.js";
 import { normalizeLanguage } from "../utils/languages.js";
+import { enabledModulesForCompany } from "../modules.js";
 
 export const authRouter = Router();
 
@@ -94,6 +95,10 @@ authRouter.post("/login", loginLimiter, (req, res) => {
     user: {
       id: user.id, name: user.name, role: user.role,
       client_id: user.client_id, company_id: user.company_id, language: user.language ?? null,
+      // Which add-on modules this company has — rides alongside language, and for the same reason:
+      // it decides what the UI shows, not what the caller may do (requireModule does that, per
+      // request), so a stale copy in an old token's session can't grant anything.
+      modules: enabledModulesForCompany(user.company_id),
     },
   });
 });
@@ -435,7 +440,7 @@ authRouter.get("/me", requireAuth, (req, res) => {
   const user = db
     .prepare("SELECT id, name, email, role, client_id, company_id, avatar_url, phone, created_at, language FROM users WHERE id = ?")
     .get(req.user.id);
-  res.json(user);
+  res.json({ ...user, modules: enabledModulesForCompany(user.company_id) });
 });
 
 authRouter.patch("/me", requireAuth, (req, res) => {

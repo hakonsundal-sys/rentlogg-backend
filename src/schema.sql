@@ -7,6 +7,21 @@ CREATE TABLE IF NOT EXISTS companies (
   created_at TEXT DEFAULT (datetime('now'))
 );
 
+-- Which add-on modules a company has turned on. See src/modules.js for the registry of what can
+-- be turned on, and middleware/auth.js's requireModule() for where it's enforced. A company with
+-- no row for a module falls back to that module's own defaultEnabled, so this table only ever
+-- holds the deliberate exceptions — turning a module off never deletes the module's data, it
+-- only stops the routes and hides the surfaces.
+CREATE TABLE IF NOT EXISTS company_modules (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  company_id INTEGER NOT NULL REFERENCES companies(id),
+  module_key TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 0,
+  enabled_at TEXT DEFAULT (datetime('now')),
+  enabled_by INTEGER REFERENCES users(id),
+  UNIQUE(company_id, module_key)
+);
+
 -- Clients: the companies that hire the cleaning company (30-40+ expected)
 CREATE TABLE IF NOT EXISTS clients (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
