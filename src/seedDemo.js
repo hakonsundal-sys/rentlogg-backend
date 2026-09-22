@@ -19,7 +19,10 @@ const COMPANY_NAME = "Rent-A-Clean AS";
 // DEMO_PASSWORD in the environment to pick your own; otherwise a random one is generated and
 // printed at the end of the run.
 const DEMO_PASSWORD = process.env.DEMO_PASSWORD || randomBytes(9).toString("base64url");
-const REPORT_RECIPIENT_EMAIL = "hakon.sundal@gmail.com";
+// example.com is reserved by RFC 2606 and never delivers, so a demo seed run can't accidentally
+// mail a real inbox. Set DEMO_REPORT_EMAIL if you want the demo's report recipients to be an
+// address you can actually check.
+const REPORT_RECIPIENT_EMAIL = process.env.DEMO_REPORT_EMAIL || "demo@example.com";
 const UPLOADS_DIR = process.env.UPLOADS_DIR || "uploads";
 
 // A tiny valid 1x1 PNG — placeholder demo "photo" content. Real files on disk (not just DB
