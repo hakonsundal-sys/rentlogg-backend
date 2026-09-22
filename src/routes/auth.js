@@ -117,9 +117,13 @@ const STAFF_FIELDS = "id, name, email, role, phone, department_id, active, creat
 const STAFF_LIST_FIELDS =
   "u.id, u.name, u.email, u.role, u.phone, u.department_id, u.active, u.created_at, u.company_id, c.name AS company_name, u.client_id, cl.name AS client_name, u.language";
 const STAFF_LIST_JOIN = "LEFT JOIN companies c ON c.id = u.company_id LEFT JOIN clients cl ON cl.id = u.client_id";
-// The roles this file is willing to create or move an account between — never 'customer'
-// (client-scoped, invite-only) or 'super_admin' (Rentlogg's own operator account).
+// The roles an account can be MOVED between — never 'customer' (a different account shape, tied
+// to a client) or 'super_admin' (Rentlogg's own operator account).
 const STAFF_ROLES = ["admin", "manager", "cleaner"];
+// What POST /users may create. 'customer' is allowed here, unlike above, because creating one is
+// unambiguous as long as it names the client it belongs to — it is *converting* an existing
+// account between the two shapes that has no sensible meaning.
+const CREATABLE_ROLES = [...STAFF_ROLES, "customer"];
 
 authRouter.get("/users", requireAuth, requireRole("admin", "manager", "super_admin"), (req, res) => {
   const { role, company_id } = req.query;
@@ -163,7 +167,7 @@ authRouter.post("/users", requireAuth, requireRole("admin", "super_admin"), (req
   // same reason — older rows created via the invite flow keep whatever case was typed there.
   const email = typeof req.body.email === "string" ? req.body.email.trim().toLowerCase() : "";
   if (!name || !name.trim() || !email) return res.status(400).json({ code: "name_and_email_required", error: "Navn og e-post er påkrevd." });
-  if (!STAFF_ROLES.includes(role)) return res.status(400).json({ code: "invalid_role", error: "Ugyldig rolle" });
+  if (!CREATABLE_ROLES.includes(role)) return res.status(400).json({ code: "invalid_role", error: "Ugyldig rolle" });
   // 6, not the password reset's 8 — confirmed with Håkon 2026-09-18: OKV's standard starting
   // password for a new cleaner is 7 characters, and the accounts created before this endpoint
   // existed (via invite-accept, which has no minimum at all) already use it. An 8-char minimum
@@ -187,7 +191,24 @@ authRouter.post("/users", requireAuth, requireRole("admin", "super_admin"), (req
   const language = normalizeLanguage(req.body.language);
   if (language === undefined) return res.status(400).json({ code: "unsupported_language", error: "Ukjent språk." });
 
-  const departmentId = req.body.department_id ?? null;
+  // A customer account is scoped by its client, not by a department: every customer-facing check
+  // in the app keys off client_id, so an unvalidated one here would hand that account another
+  // company's data. Validated against the company the account lands in, exactly as
+  // POST /invitations does for the same role.
+  const isCustomerRole = role === "customer";
+  let clientId = null;
+  if (isCustomerRole) {
+    clientId = req.body.client_id ?? null;
+    if (!clientId) return res.status(400).json({ code: "client_id_required", error: "Velg hvilken kunde brukeren hører til." });
+    const client = db.prepare("SELECT company_id FROM clients WHERE id = ?").get(clientId);
+    if (!client || client.company_id !== companyId) {
+      return res.status(400).json({ code: "unknown_client", error: "Ukjent kunde" });
+    }
+  }
+
+  // Departments are a staff-only grouping (see db.js on users.department_id), so a customer never
+  // gets one even if the caller sends it.
+  const departmentId = isCustomerRole ? null : req.body.department_id ?? null;
   if (departmentId != null) {
     const department = db.prepare("SELECT company_id FROM departments WHERE id = ?").get(departmentId);
     if (!department || department.company_id !== companyId) {
@@ -202,9 +223,9 @@ authRouter.post("/users", requireAuth, requireRole("admin", "super_admin"), (req
   const password_hash = bcrypt.hashSync(password, 10);
   const info = db
     .prepare(
-      "INSERT INTO users (name, email, password_hash, role, company_id, department_id, language) VALUES (?, ?, ?, ?, ?, ?, ?)"
+      "INSERT INTO users (name, email, password_hash, role, company_id, department_id, client_id, language) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
     )
-    .run(name.trim(), email, password_hash, role, companyId, departmentId, language);
+    .run(name.trim(), email, password_hash, role, companyId, departmentId, clientId, language);
 
   // Any invitation still pending for this address is now moot — the account it would have created
   // exists. Mirrors the "one valid link per email at a time" rule POST /invitations already keeps.
