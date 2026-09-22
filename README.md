@@ -59,6 +59,7 @@ you don't use, from the Ansatte page.
 ```
 POST   /auth/register              (name, email, password, role, client_id?)
 POST   /auth/login                 -> { token, user }
+PATCH  /auth/me/password           (currentPassword, newPassword) — change your own
 
 GET    /clients                    [admin, manager]
 POST   /clients                    [admin]

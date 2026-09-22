@@ -437,6 +437,28 @@ authRouter.patch("/me", requireAuth, (req, res) => {
   res.json(user);
 });
 
+// Changing your own password — the one thing PATCH /users/:id/password deliberately can't do for
+// an admin (it only ever targets cleaners, managers and customers, so an admin can't be reset by a
+// co-admin), which left admins with no way to rotate their own credentials at all. Requires the
+// current password even though the caller is already authenticated: a JWT lives 12h, so a borrowed
+// or forgotten session shouldn't be enough to take the account over permanently.
+authRouter.patch("/me/password", requireAuth, (req, res) => {
+  const { currentPassword, newPassword } = req.body;
+  if (!newPassword || newPassword.length < 8) {
+    return res.status(400).json({ code: "password_too_short_8", error: "Passordet må være minst 8 tegn." });
+  }
+
+  const user = db.prepare("SELECT password_hash FROM users WHERE id = ?").get(req.user.id);
+  if (!user || !bcrypt.compareSync(currentPassword || "", user.password_hash)) {
+    return res.status(403).json({ code: "current_password_wrong", error: "Nåværende passord er feil." });
+  }
+
+  db.prepare("UPDATE users SET password_hash = ? WHERE id = ?").run(bcrypt.hashSync(newPassword, 10), req.user.id);
+  // Tokens already issued stay valid until they expire — there's no revocation list, and the 12h
+  // lifetime is the bound on that. Worth knowing before treating this as "kick everyone out".
+  res.json({ ok: true });
+});
+
 authRouter.post("/me/avatar", requireAuth, avatarUpload.single("avatar"), async (req, res) => {
   if (!req.file) return res.status(400).json({ code: "no_file_uploaded", error: "No file uploaded (field name must be 'avatar')" });
   await normalizeImageOrientation(path.join(`${process.env.UPLOADS_DIR || "uploads"}/avatars`, req.file.filename));
