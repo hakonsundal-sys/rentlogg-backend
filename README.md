@@ -24,14 +24,15 @@ npm run seed               # creates demo clients, sites, checklist templates, u
 npm run dev                 # starts on http://localhost:4000
 ```
 
-Demo logins created by the seed script:
+The seed script creates one account per role — `admin@rentlogg.no`, `manager@rentlogg.no`,
+`cleaner@rentlogg.no` and `kunde@rentlogg.no`. Their passwords are **not** in this repo: set
+`SEED_ADMIN_PASSWORD`, `SEED_MANAGER_PASSWORD`, `SEED_CLEANER_PASSWORD` and
+`SEED_CUSTOMER_PASSWORD` in `.env` to choose them, or leave them unset and `npm run seed` will
+generate random ones and print them once. (Same for `npm run seed:demo` and `DEMO_PASSWORD`.)
 
-| Role     | Email                  | Password      |
-|----------|------------------------|---------------|
-| admin    | admin@rentlogg.no      | admin1234     |
-| manager  | manager@rentlogg.no    | manager1234   |
-| cleaner  | cleaner@rentlogg.no    | cleaner1234   |
-| customer | kunde@rentlogg.no      | kunde1234     |
+These are development accounts. Don't run the seed script against a database that real people
+log in to, and if you already have — change those four passwords, or deactivate the accounts
+you don't use, from the Ansatte page.
 
 ## How the pieces fit together
 

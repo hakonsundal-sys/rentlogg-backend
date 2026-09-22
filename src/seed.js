@@ -1,4 +1,5 @@
 import "dotenv/config";
+import { randomBytes } from "node:crypto";
 import bcrypt from "bcryptjs";
 import { db } from "./db.js";
 import { newQrToken } from "./utils/qrcode.js";
@@ -25,6 +26,19 @@ if (!company) {
   company = { id: info.lastInsertRowid, name: COMPANY_NAME };
 }
 const companyId = company.id;
+
+// Seed passwords used to be literals here (and in the README), which meant any deployment that
+// ran `npm run seed` shipped with publicly known admin credentials. They now come from the
+// environment, and anything unset gets a random one printed once below — so a fresh seed is never
+// guessable, and nothing worth knowing lives in the repo.
+const generatedPasswords = [];
+function seedPassword(envVar) {
+  const fromEnv = process.env[envVar];
+  if (fromEnv) return fromEnv;
+  const generated = randomBytes(12).toString("base64url");
+  generatedPasswords.push([envVar, generated]);
+  return generated;
+}
 
 function upsertUser(name, email, password, role, client_id = null) {
   const existing = db.prepare("SELECT id FROM users WHERE email = ?").get(email);
@@ -66,13 +80,20 @@ clientIds.forEach((clientId, i) => {
   ).run(`Lokasjon ${i + 1}`, clientId, companyId, templateCycle[i % templateCycle.length], newQrToken());
 });
 
-upsertUser("Admin", "admin@rentlogg.no", "admin1234", "admin");
-upsertUser("Ola Driftsleder", "manager@rentlogg.no", "manager1234", "manager");
-upsertUser("Kari Renholder", "cleaner@rentlogg.no", "cleaner1234", "cleaner");
-upsertUser("Kunde Martens", "kunde@rentlogg.no", "kunde1234", "customer", clientIds[0]);
+upsertUser("Admin", "admin@rentlogg.no", seedPassword("SEED_ADMIN_PASSWORD"), "admin");
+upsertUser("Ola Driftsleder", "manager@rentlogg.no", seedPassword("SEED_MANAGER_PASSWORD"), "manager");
+upsertUser("Kari Renholder", "cleaner@rentlogg.no", seedPassword("SEED_CLEANER_PASSWORD"), "cleaner");
+upsertUser("Kunde Martens", "kunde@rentlogg.no", seedPassword("SEED_CUSTOMER_PASSWORD"), "customer", clientIds[0]);
 
 console.log("Done. Demo logins:");
-console.log("  admin@rentlogg.no / admin1234");
-console.log("  manager@rentlogg.no / manager1234");
-console.log("  cleaner@rentlogg.no / cleaner1234");
-console.log("  kunde@rentlogg.no / kunde1234 (Bakehuset Martens)");
+console.log("  admin@rentlogg.no    (admin)");
+console.log("  manager@rentlogg.no  (driftsleder)");
+console.log("  cleaner@rentlogg.no  (renholder)");
+console.log("  kunde@rentlogg.no    (kunde — Bakehuset Martens)");
+if (generatedPasswords.length) {
+  // upsertUser is a no-op for an account that already exists, so a password printed here is only
+  // real for a user this run actually created — re-seeding an existing database prints fresh
+  // strings that were never stored. Write them down now; they can't be recovered afterwards.
+  console.log("\nGenerated passwords (stored nowhere else — set the matching env var to choose your own):");
+  for (const [envVar, value] of generatedPasswords) console.log(`  ${envVar}=${value}`);
+}

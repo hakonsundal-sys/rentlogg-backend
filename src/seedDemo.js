@@ -9,11 +9,16 @@ import "dotenv/config";
 import bcrypt from "bcryptjs";
 import fs from "node:fs";
 import path from "node:path";
+import { randomBytes } from "node:crypto";
 import { db } from "./db.js";
 import { newQrToken } from "./utils/qrcode.js";
 
 const COMPANY_NAME = "Rent-A-Clean AS";
-const DEMO_PASSWORD = "Demo1234!";
+// Not a literal any more: this repo is public, and every demo account shares this one password,
+// so a fixed value here is a working login for anyone who reads the source. Set
+// DEMO_PASSWORD in the environment to pick your own; otherwise a random one is generated and
+// printed at the end of the run.
+const DEMO_PASSWORD = process.env.DEMO_PASSWORD || randomBytes(9).toString("base64url");
 const REPORT_RECIPIENT_EMAIL = "hakon.sundal@gmail.com";
 const UPLOADS_DIR = process.env.UPLOADS_DIR || "uploads";
 
