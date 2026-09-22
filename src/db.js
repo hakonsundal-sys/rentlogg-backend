@@ -148,6 +148,12 @@ ensureColumn("users", "active", "active INTEGER NOT NULL DEFAULT 1");
 // the customer does the cleaning themselves — here OKV still cleans, the customer just signs off
 // on it afterward). See room_runs'/room_run_items' own comments below for how the gate works.
 ensureColumn("rooms", "requires_approval", "requires_approval INTEGER DEFAULT 0");
+// Which part of the site a room belongs to — the source renholdsplan's own "Område" ("Fjøs",
+// "Slakt storfe ren"). Purely a grouping label, never a schedule or a permission: a cleaner's
+// day view splits a long room list into chapters by it, each with its own bulk-complete, which is
+// what makes a 60-room site workable as one shared checklist. Null = the room is in no chapter
+// and is listed on its own, so nothing changes for the sites that never set it.
+ensureColumn("rooms", "area", "area TEXT");
 // Set when a cleaner finishes a requires_approval room instead of completed_at (which stays
 // unset until the customer actually approves — every existing completed_at reader in the app,
 // reports/vaskeplan/history/dashboard, keeps meaning exactly what it always has: "genuinely

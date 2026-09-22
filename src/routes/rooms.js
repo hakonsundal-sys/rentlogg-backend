@@ -338,10 +338,19 @@ siteRoomsRouter.post("/complete-all-due", requireAuth, requireRole("cleaner", "a
   // Without this, a cleaner's bulk-complete silently completed the customer's own rooms too
   // (using the cleaner's initials), whenever one of those happened to be due the same day —
   // caught 2026-09-15 after it had already happened once in production.
+  // Optional: complete only these rooms rather than every due one. This is how the day view's
+  // per-chapter "Huk av alle" works — it passes that chapter's rooms. The role scoping below
+  // still applies on top, so a narrowed list can never reach a room the caller could not have
+  // completed with the unscoped call.
+  const only = Array.isArray(req.body?.room_ids)
+    ? new Set(req.body.room_ids.filter((id) => Number.isInteger(id)))
+    : null;
+  if (only && only.size === 0) return res.status(400).json({ code: "room_ids_required", error: "room_ids må ha minst ett rom" });
+
   const isCustomer = req.user.role === "customer";
-  const dueIncomplete = getRoomsForSite(req.params.siteId, today).filter(
-    (r) => r.dueToday && r.status !== "completed" && (isCustomer ? r.responsible === "customer" : r.responsible !== "customer")
-  );
+  const dueIncomplete = getRoomsForSite(req.params.siteId, today)
+    .filter((r) => r.dueToday && r.status !== "completed" && (isCustomer ? r.responsible === "customer" : r.responsible !== "customer"))
+    .filter((r) => !only || only.has(r.id));
 
   // A room holding a flervalg task nobody has answered is deliberately left open rather than
   // signed off — the whole point of such a task (which soap was used today) is that only the
@@ -514,7 +523,7 @@ siteRoomsRouter.post("/import-confirm", requireAuth, requireRole("admin", "manag
 
   const siteId = req.params.siteId;
   const insertRoom = db.prepare(
-    "INSERT INTO rooms (site_id, name, sort_order, interval_days, monthly_weekday, monthly_occurrence) VALUES (?, ?, ?, ?, ?, ?)"
+    "INSERT INTO rooms (site_id, name, area, sort_order, interval_days, monthly_weekday, monthly_occurrence) VALUES (?, ?, ?, ?, ?, ?, ?)"
   );
   const insertItem = db.prepare("INSERT INTO room_checklist_items (room_id, label, sort_order) VALUES (?, ?, ?)");
   const insertWeekday = db.prepare("INSERT INTO room_schedules (room_id, weekday) VALUES (?, ?)");
@@ -526,7 +535,7 @@ siteRoomsRouter.post("/import-confirm", requireAuth, requireRole("admin", "manag
       if (!room.name.trim()) continue;
       const schedule = sanitizeSchedule(room.schedule);
       const info = insertRoom.run(
-        siteId, room.name, nextSort++,
+        siteId, room.name, typeof room.area === "string" && room.area.trim() ? room.area.trim() : null, nextSort++,
         schedule?.interval_days ?? null,
         schedule?.monthly?.weekday ?? null,
         schedule?.monthly?.occurrence ?? null
@@ -547,7 +556,7 @@ siteRoomsRouter.post("/import-confirm", requireAuth, requireRole("admin", "manag
 
 // --- Room-scoped: /rooms/:id ---
 
-const ROOM_PATCH_FIELDS = ["name", "interval_days", "monthly_weekday", "monthly_occurrence", "responsible", "requires_approval"];
+const ROOM_PATCH_FIELDS = ["name", "area", "interval_days", "monthly_weekday", "monthly_occurrence", "responsible", "requires_approval"];
 
 roomsRouter.patch("/:id", requireAuth, requireRole("admin", "manager"), (req, res) => {
   const { status: scopeStatus, error: scopeError } = getRoomScoped(req.params.id, req.user);
