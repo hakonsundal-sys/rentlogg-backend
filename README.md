@@ -1,132 +1,164 @@
-# Rentlogg — backend scaffold
+# Rentlogg — backend
 
-A working backend for a general-purpose cleaning documentation system: QR check-in per
-site, digital checklists, before/after photos, deviation reporting, GPS validation, and
-PDF report export. Built to support many clients (e.g. 30–40+), each with their own
-sites and users.
+The API behind Rentlogg, a cleaning documentation system in daily production use: QR
+check-in per site, room-by-room checklists, before/after photos, deviation reporting with
+customer sign-off, time clock, training records, and PDF/CSV reporting. Multi-tenant — one
+deployment serves several cleaning companies, each with its own departments, customers,
+sites and users, none of whom can see another company's data.
 
-This has been tested end-to-end (login, QR check-in, checklist completion, deviation
-reporting, PDF export) and works out of the box with the seed data below.
+The frontend lives in a separate repo and is served at
+[rentlogg.no](https://www.rentlogg.no). This repo is the backend only.
 
 ## Stack
 
 - Node.js + Express
-- SQLite via `better-sqlite3` (zero external DB to set up — swap for Postgres later if you outgrow it)
-- JWT auth with roles: `admin`, `manager`, `cleaner`, `customer`
-- `qrcode` for QR generation, `multer` for photo uploads, `pdfkit` for report export
+- SQLite via `better-sqlite3`, on a persistent disk — synchronous, single-file, no external
+  database to run
+- JWT auth (12h tokens), bcrypt password hashing, `helmet`, CORS allow-list, login rate limiting
+- `qrcode` for QR generation, `multer` + `sharp` for photo upload and normalisation, `pdfkit`
+  for PDF, `archiver` for photo ZIPs, `resend` for email
+- `@anthropic-ai/sdk` + `pdf-parse` for the optional AI room-list import
 
 ## Getting started
 
 ```bash
 npm install
-cp .env.example .env      # edit JWT_SECRET before any real use
-npm run seed               # creates demo clients, sites, checklist templates, users
+cp .env.example .env      # every variable is documented there; JWT_SECRET must be set
+npm run seed               # demo clients, sites, checklist templates, one user per role
 npm run dev                 # starts on http://localhost:4000
 ```
 
-The seed script creates one account per role — `admin@rentlogg.no`, `manager@rentlogg.no`,
-`cleaner@rentlogg.no` and `kunde@rentlogg.no`. Their passwords are **not** in this repo: set
-`SEED_ADMIN_PASSWORD`, `SEED_MANAGER_PASSWORD`, `SEED_CLEANER_PASSWORD` and
-`SEED_CUSTOMER_PASSWORD` in `.env` to choose them, or leave them unset and `npm run seed` will
-generate random ones and print them once. (Same for `npm run seed:demo` and `DEMO_PASSWORD`.)
+`npm run seed` creates `admin@`, `manager@`, `cleaner@` and `kunde@rentlogg.no`. **Their
+passwords are not in this repo**: set `SEED_ADMIN_PASSWORD` and friends in `.env` to choose
+them, or leave them unset and the seed script generates random ones and prints them once.
+`npm run seed:demo` builds a fuller demo company (rooms, a finished visit, an open deviation)
+the same way, via `DEMO_PASSWORD`.
 
-These are development accounts. Don't run the seed script against a database that real people
-log in to, and if you already have — change those four passwords, or deactivate the accounts
-you don't use, from the Ansatte page.
+These are development accounts. Don't run either seed script against a database real people
+log in to — that is exactly how publicly-known passwords once ended up on live accounts.
 
 ## How the pieces fit together
 
-- **Clients** are your 30–40 customers. Each has one or more **sites**.
-- Each **site** gets a unique `qr_token`. `GET /sites/:id/qr` returns a scannable QR
-  image that encodes a check-in link (`/checkin/:qrToken`).
-- A **checklist template** (e.g. "Kontor", "Produksjon", "Helse") holds a reusable list
-  of tasks. A site points at one template.
-- When a cleaner scans the QR code, `POST /sites/checkin/:qrToken` creates a
-  **checklist run** pre-filled from the site's template, and optionally checks GPS
-  distance against the site's stored coordinates.
-- The cleaner ticks off `checklist_run_items`, can attach photos
-  (`POST /checklists/runs/:id/photos`), and files a **deviation** if something's wrong
-  (`POST /deviations`) — this immediately flags the site as `deviation` status.
-- `POST /checklists/runs/:id/complete` closes the run and updates the site's
-  `last_cleaned_at` and status (`ok` unless there's a still-open deviation).
-- `GET /reports/sites/:id/pdf` generates a PDF with recent runs and deviations — usable
-  for client hand-off or internal audits.
-- Customer-role users are scoped to their own `client_id` everywhere (sites, deviations,
-  reports) so one client's users never see another's data.
+**Company → department → client → site → room.** Every row carries a `company_id`, and every
+query is scoped by it; a `super_admin` (no company of its own) administers companies and
+their modules, and is the only role that sees across them.
+
+Roles are `super_admin`, `admin`, `manager`, `cleaner` and `customer`. Customer accounts are
+additionally scoped to their own `client_id`, so a customer sees only their own sites,
+deviations and reports.
+
+**A site is cleaned in one of two shapes**, depending on how it was set up:
+
+- *One shared checklist* — the site points at a **checklist template**, and a visit creates a
+  `checklist_run` pre-filled from it. Suits a small site that is done in one pass.
+- *Room by room* — the site has **rooms**, each with its own checklist items and a weekday
+  schedule, and each visit to a room creates a `room_run`. Suits anything large enough that a
+  single list would be unusable. A checklist item can also ask *which* alternative was used
+  (which soap, which method) rather than just done or not done.
+
+Either way:
+
+- Each site has a unique `qr_token`. `GET /sites/:id/qr` returns a scannable image; scanning it
+  with a phone's native camera opens `GET /checkin/:qrToken`, which redirects into the app's
+  check-in flow. Check-in optionally validates GPS distance against the site's coordinates
+  (`gps_radius_meters`, default 150).
+- Cleaners tick off items, attach photos, and file **deviations** when something is wrong.
+  Customers can file deviations too, reply to them, and approve the resolution.
+- Rooms marked `requires_approval` are not finished when the cleaner is done — the customer
+  signs off first. Until then the room counts as awaiting approval, not complete.
+- Reports come out as per-visit HTML or PDF, per-site PDF, photo ZIPs, and a summary with CSV
+  export. A **daily digest** email goes out per site at its own `report_send_hour` (default
+  07:00 Europe/Oslo), sent through Resend.
+
+### Add-on modules
+
+`training` (courses, slides, per-employee records and certificates) and `timeclock` (stamp in
+and out, hours per employee, payroll CSV) are sold separately. A `super_admin` enables them per
+company; `requireModule()` returns 403 when a company doesn't have one, so hiding a menu item
+is cosmetic and the backend is the real gate. Both default to off, including for companies that
+already exist — a module should never appear in a live customer's menu on deploy day.
+
+### Languages
+
+The API ships Norwegian, English, Lithuanian, Latvian and Russian. Most cleaners aren't
+Norwegian speakers and they are the app's main users, so every API error carries a stable
+`code` the frontend translates, rather than a Norwegian string the frontend would have to
+pattern-match.
 
 ## API overview
 
+Around 140 endpoints across these routers — see `src/routes/` for the detail, and
+`src/middleware/auth.js` for how `requireAuth`, `requireRole` and `requireModule` combine.
+
 ```
-POST   /auth/register              (name, email, password, role, client_id?)
-POST   /auth/login                 -> { token, user }
-PATCH  /auth/me/password           (currentPassword, newPassword) — change your own
-
-GET    /clients                    [admin, manager]
-POST   /clients                    [admin]
-
-GET    /sites                      (scoped to caller's client if role=customer)
-POST   /sites                      [admin, manager]
-GET    /sites/:id/qr                [admin, manager]  -> { checkInUrl, qrImage }
-POST   /sites/checkin/:qrToken     [cleaner]           -> creates a checklist run
-
-GET    /checklists/templates       [admin, manager]
-POST   /checklists/templates       [admin, manager]
-GET    /checklists/runs/:id
-PATCH  /checklists/runs/:id/items/:itemId   [cleaner]  { done }
-POST   /checklists/runs/:id/complete        [cleaner]
-POST   /checklists/runs/:id/photos          [cleaner]  (multipart, field "photo")
-
-GET    /deviations                 (scoped to caller's client if role=customer)
-POST   /deviations                 [cleaner, manager]
-PATCH  /deviations/:id             [admin, manager]    { status }
-
-GET    /reports/sites/:id/pdf      [admin, manager, customer]
+/auth          login, the super_admin bootstrap, own profile and password, staff admin
+/companies     [super_admin] companies and their module flags
+/departments   departments within a company
+/clients       the cleaning company's own customers
+/sites         sites, weekday schedules, documents, QR codes, check-in
+/sites/:id/rooms + /rooms
+               rooms, their checklist items and options, room schedules, room visits,
+               customer approval, the monthly grid, and Excel/AI room-list import
+/checklists    templates, and the single-checklist visit flow with photos and notes
+/deviations    reporting, replies, resolution and customer approval
+/reports       per-visit and per-site PDF, photo ZIPs, summary + CSV, daily digest trigger
+/dashboard     the admin/manager summary
+/invitations   invite-and-accept account creation
+/modules       which add-on modules the caller's company has
+/training      [module] courses, slides, assignments, progress, certificates
+/time          [module] time entries, planned hours, month lock, payroll CSV
+/uploads       authenticated file serving for photos, avatars and documents
 ```
+
+Two things worth knowing before using the API:
+
+- `POST /auth/register` is **not** open registration. It creates the very first `super_admin`
+  and then permanently closes itself (`403 signup_closed`). Every other account is created by
+  an admin (`POST /auth/users`) or through the invitation flow.
+- `PATCH /auth/users/:id/password` deliberately refuses admin targets — an admin can't be reset
+  by a co-admin. Admins change their own password with `PATCH /auth/me/password`, which
+  requires the current one.
 
 ## Deployment
 
 Live at **https://rentlogg-backend.onrender.com** (`GET /health` → `{"ok":true}`).
 
-Deployed on [Render](https://render.com) from this repo's [render.yaml](render.yaml) as a
-Blueprint (Starter plan): connect the GitHub repo in Render's "New Blueprint" flow and it
-builds with `npm install` / runs `npm start` automatically. `JWT_SECRET` is auto-generated
-by Render.
+Deployed on [Render](https://render.com) from [render.yaml](render.yaml) as a Blueprint:
+connect the repo in Render's "New Blueprint" flow and it builds with `npm install` and runs
+`npm start`. `JWT_SECRET` is auto-generated by Render; every other variable is listed in
+render.yaml with a comment saying whether it lives there or in the dashboard. **Adding an
+environment variable to the code without adding it to render.yaml is how a rebuilt service
+comes up silently missing it.**
 
-**Persistent disk**: a 1GB disk is mounted at `/var/data` (see `disk:` in render.yaml),
-with `DB_FILE=/var/data/rentlogg.db` and `UPLOADS_DIR=/var/data/uploads` pointing at it —
-the SQLite database and uploaded photos/avatars now survive redeploys and restarts. Run
-`npm run seed` once via the Render Shell tab after the first deploy; it won't need
-repeating on every deploy anymore.
+A 1GB persistent disk is mounted at `/var/data`, with `DB_FILE=/var/data/rentlogg.db` and
+`UPLOADS_DIR=/var/data/uploads` — the database and uploaded photos survive redeploys and
+restarts. Run `npm run seed` once from the Render Shell after the first deploy, and never
+again against that database.
 
-The QR check-in URL (`GET /sites/:id/qr`) falls back to Render's auto-provided
-`RENDER_EXTERNAL_URL` if `PUBLIC_BASE_URL` isn't set, so it works correctly out of the
-box on Render without extra config.
+`PUBLIC_BASE_URL` falls back to Render's own `RENDER_EXTERNAL_URL`, so printed QR codes
+encode the right host without extra configuration.
 
-## Connecting the frontend prototype
+## Known things to change
 
-The earlier React click-through prototype (`rentlogg-prototype.jsx`) used in-memory
-mock data. To wire it to this backend:
+- **CORS is open.** `ALLOWED_ORIGINS` is unset in production, so the API reflects any origin.
+  A JWT is still required for everything that matters, but this should be narrowed to the real
+  frontend domains.
+- **Rate limiting covers login only** (`src/routes/auth.js`). Nothing else is bounded.
+- **No input-validation library.** Request bodies are checked by hand, route by route —
+  consistent, but easy to forget in a new endpoint. `zod` or similar would make it structural.
+- **No token revocation.** Changing or resetting a password doesn't invalidate tokens already
+  issued; the 12h expiry is the only bound on a stale or stolen session.
+- **Photos live on the Render disk.** They survive redeploys, but there's no offsite copy — a
+  lost disk is lost documentation. S3 or R2 before this gets big.
+- **SQLite is single-server.** Fine for one Render instance; Postgres if this ever needs
+  concurrent writes across instances, or managed backups.
+- **`multer` is pinned to 1.x.** 2.x has a safer API and is worth migrating to.
+- **`nodemailer` is still a dependency** but nothing imports it — a leftover from the Gmail SMTP
+  setup that Resend replaced. Safe to remove.
 
-1. Replace the mock `INITIAL_SITES` state with a `fetch('/sites', { headers: { Authorization: 'Bearer ' + token } })` call on load.
-2. Replace the "Simuler QR-skann" button with a real QR scanner (e.g. the `html5-qrcode`
-   npm package reading the device camera), then call `POST /sites/checkin/:qrToken`
-   with the scanned token.
-3. Replace the checklist toggle and deviation form handlers with calls to the
-   corresponding `PATCH`/`POST` endpoints above.
-4. Add a login screen calling `POST /auth/login` and storing the JWT in memory (or a
-   short-lived cookie) — not localStorage, since tokens shouldn't sit in persistent
-   browser storage indefinitely.
+## Import tooling
 
-## Known things to change before real use
-
-- **Photo storage**: currently saves to a local `uploads/` folder via `multer`. Fine for
-  a prototype or small deployment; move to S3 or R2 storage before relying on it in
-  production, since local disk won't survive redeploys on most hosting platforms.
-- **Multer version**: pinned to the 1.x line for stability; 2.x has a different (safer)
-  API and is worth migrating to before production.
-- **SQLite**: great for getting started and for a single-server deployment; move to
-  Postgres if you need concurrent writes at scale or managed backups.
-- **JWT_SECRET**: the `.env.example` value is a placeholder — generate a real random
-  secret before deploying anywhere reachable from the internet.
-- **Rate limiting / input validation**: not included here — add before exposing this
-  publicly (e.g. `express-rate-limit`, `zod` for request validation).
+`tools/` turns a customer's existing "Renholdsplan ….xlsx" into the room list this API expects.
+It is run by hand when a new site is set up, is not imported by the server, and has its own
+[README](tools/README.md). Never import a room plan from a PDF when the Excel exists — that
+file explains why.
