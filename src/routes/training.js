@@ -133,8 +133,11 @@ function computeExpiry(completedAt, validityMonths) {
 // Validated when the course is saved rather than when a cleaner opens it: a typo in a link should
 // be an error for the person pasting it, not a blank screen for someone mid-shift.
 export function youtubeIdFrom(url) {
+  // Anchored to the start (after an optional scheme/www.) so a string that merely contains a
+  // youtube.com substring somewhere later — e.g. a javascript: URI with one appended after it — is
+  // rejected outright, rather than accepted here and later rendered as a raw href in the admin view.
   const match = String(url || "").match(
-    /(?:youtube\.com\/(?:watch\?(?:.*&)?v=|embed\/|shorts\/)|youtu\.be\/)([A-Za-z0-9_-]{11})/
+    /^(?:https?:\/\/)?(?:www\.)?(?:youtube\.com\/(?:watch\?(?:.*&)?v=|embed\/|shorts\/)|youtu\.be\/)([A-Za-z0-9_-]{11})/i
   );
   return match ? match[1] : null;
 }
@@ -269,9 +272,18 @@ trainingRouter.patch("/courses/:id", requireAuth, requireRole("admin"), (req, re
   const { fields, error: fieldError } = readCourseFields({ ...course, ...req.body });
   if (fieldError) return res.status(400).json(fieldError);
 
+  // A new video is a new version of the course, same as replacing the slides (see the slides route
+  // below) — an already-signed record must show up as "signert på en eldre versjon" rather than
+  // silently covering a video the signer never watched.
+  const videoChanged = fields.kind === "video" && fields.video_url !== course.video_url;
+
   db.prepare(
-    "UPDATE training_courses SET title = ?, description = ?, kind = ?, video_url = ?, validity_months = ?, requires_signature = ?, requires_drawn_signature = ? WHERE id = ?"
-  ).run(fields.title, fields.description, fields.kind, fields.video_url, fields.validity_months, fields.requires_signature, fields.requires_drawn_signature, course.id);
+    `UPDATE training_courses SET title = ?, description = ?, kind = ?, video_url = ?, validity_months = ?,
+     requires_signature = ?, requires_drawn_signature = ?, version = version + ? WHERE id = ?`
+  ).run(
+    fields.title, fields.description, fields.kind, fields.video_url, fields.validity_months,
+    fields.requires_signature, fields.requires_drawn_signature, videoChanged ? 1 : 0, course.id
+  );
 
   res.json(courseWithExtras(db.prepare("SELECT * FROM training_courses WHERE id = ?").get(course.id), todayInOslo()));
 });
@@ -791,8 +803,10 @@ trainingRouter.patch("/me/records/:id/progress", requireAuth, requireRole("admin
   if (record.completed_at) return res.status(409).json({ code: "already_completed", error: "Kurset er allerede fullført." });
 
   // A video course reports one thing and one thing only: that the player said it reached the end.
-  // Stamped once and never cleared — watching it again should not un-watch it.
-  if (req.body.video_completed === true) {
+  // Stamped once and never cleared — watching it again should not un-watch it. Gated on the record's
+  // own kind so this field can't be set on a lesson/document/classroom/external record, which would
+  // otherwise be accepted silently and later misread as "video watched" by anything trusting it.
+  if (record.kind === "video" && req.body.video_completed === true) {
     db.prepare("UPDATE training_records SET video_completed_at = COALESCE(video_completed_at, ?) WHERE id = ?")
       .run(nowStamp(), record.id);
     return res.json(db.prepare("SELECT * FROM training_records WHERE id = ?").get(record.id));
