@@ -840,13 +840,13 @@ function drawPdfHeader(doc, title, subtitle) {
   doc.moveDown();
 }
 
-trainingRouter.get("/users/:id/certificate.pdf", requireAuth, requireRole("admin", "manager"), (req, res) => {
-  const { target, status, code, error } = getStaffTarget(req.params.id, req.user);
-  if (error) return res.status(status).json({ code, error });
-
+// Shared by the admin route below and by the staff member fetching her own copy. Expired courses
+// are deliberately included, marked as expired: a certificate that quietly leaves out that the
+// hygiene course ran out last year is a worse document, not a kinder one.
+function sendCertificate(res, target, companyId) {
   const today = todayInOslo();
-  const rows = trainingForUser(target.id, req.user.company_id, today).filter((row) => row.record?.completed_at);
-  const company = db.prepare("SELECT name FROM companies WHERE id = ?").get(req.user.company_id);
+  const rows = trainingForUser(target.id, companyId, today).filter((row) => row.record?.completed_at);
+  const company = db.prepare("SELECT name FROM companies WHERE id = ?").get(companyId);
   const department = target.department_id
     ? db.prepare("SELECT name FROM departments WHERE id = ?").get(target.department_id)
     : null;
@@ -896,6 +896,23 @@ trainingRouter.get("/users/:id/certificate.pdf", requireAuth, requireRole("admin
   });
 
   doc.end();
+}
+
+trainingRouter.get("/users/:id/certificate.pdf", requireAuth, requireRole("admin", "manager"), (req, res) => {
+  const { target, status, code, error } = getStaffTarget(req.params.id, req.user);
+  if (error) return res.status(status).json({ code, error });
+  sendCertificate(res, target, req.user.company_id);
+});
+
+// Her own copy. The route above deliberately refuses a cleaner asking after a colleague's
+// certificate, and caught her own in the same net — but her own training record is the one piece of
+// personnel data she is plainly entitled to, and can request under GDPR whatever the app does. This
+// is just the cheap way to answer that request. It is also hers in a practical sense: documented
+// hygiene training is a qualification she carries to her next job, not only paperwork about her.
+trainingRouter.get("/me/certificate.pdf", requireAuth, requireRole("admin", "manager", "cleaner"), (req, res) => {
+  const me = db.prepare("SELECT id, name, department_id FROM users WHERE id = ?").get(req.user.id);
+  if (!me) return res.status(404).json({ code: "not_found", error: "Not found" });
+  sendCertificate(res, me, req.user.company_id);
 });
 
 const PARTICIPANT_STATUS_TEXT = {
