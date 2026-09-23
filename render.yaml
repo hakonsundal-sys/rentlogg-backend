@@ -10,6 +10,10 @@ services:
       name: rentlogg-data
       mountPath: /var/data
       sizeGB: 1
+    # sync: false means "the value lives in Render's dashboard, not in this file" — these are
+    # secrets or environment-specific, and listing them here is what keeps a rebuilt service from
+    # silently coming up without them. Adding a var to the code without adding it here is how
+    # REPORT_FROM_EMAIL went missing on the first live Resend send.
     envVars:
       - key: JWT_SECRET
         generateValue: true
@@ -17,9 +21,26 @@ services:
         value: /var/data/rentlogg.db
       - key: UPLOADS_DIR
         value: /var/data/uploads
-      - key: GMAIL_USER
+      # Daily report digest (services/mailer.js, sent 07:00 Europe/Oslo). No fallback: without the
+      # key, every send throws.
+      - key: RESEND_API_KEY
         sync: false
-      - key: GMAIL_APP_PASSWORD
-        sync: false
+      # Must be a sender address verified on the rentlogg.no domain in Resend.
       - key: REPORT_FROM_EMAIL
+        sync: false
+      # Optional. Enables AI PDF import for room checklists (POST /sites/:id/rooms/import-pdf);
+      # unset, that one endpoint returns a clean "not configured" error instead of crashing.
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      # Comma-separated frontend origins allowed to call this API. Left unset, CORS reflects ANY
+      # origin — which is what happens today, and should be tightened to the real domains.
+      - key: ALLOWED_ORIGINS
+        sync: false
+      # Where GET /checkin/:qrToken sends a native-camera QR scan on to. Defaults to
+      # https://rentlogg.no, which 308-redirects to https://www.rentlogg.no/ — works, one hop extra.
+      - key: PUBLIC_FRONTEND_URL
+        sync: false
+      # What a printed QR sticker encodes as its own base. Falls back to Render's own
+      # RENDER_EXTERNAL_URL, so it only needs setting if the API ever moves to a custom domain.
+      - key: PUBLIC_BASE_URL
         sync: false
