@@ -840,6 +840,107 @@ function drawPdfHeader(doc, title, subtitle) {
   doc.moveDown();
 }
 
+// One page per course, laid out as a certificate rather than a list. The old version stacked every
+// course into a flowing list and dropped the signature image into the middle of it, which put a
+// handwritten scrawl in between two lines of grey label text and read as a mess. Håkon pointed at
+// OKV's own Solenis/Lilleborg certificates as the shape to hit: one page per person per course,
+// the name large, the course named, the date and the instructor stated, and room to breathe.
+//
+// The signature block is anchored to a fixed height above the footer instead of flowing with the
+// text above it, so it lands in the same place on every page whatever the course is called.
+const ACCENT = "#f97316";
+const INK = "#18181b";
+const MUTED = "#71717a";
+
+function formatNorwegianDate(value) {
+  const day = dayOf(value);
+  if (!day) return "";
+  const months = [
+    "januar", "februar", "mars", "april", "mai", "juni",
+    "juli", "august", "september", "oktober", "november", "desember",
+  ];
+  const [y, m, d] = day.split("-").map(Number);
+  return `${d}. ${months[m - 1]} ${y}`;
+}
+
+function drawCertificatePage(doc, { company, person, department, row, today }) {
+  const left = doc.page.margins.left;
+  const width = doc.page.width - doc.page.margins.left - doc.page.margins.right;
+  const bottom = doc.page.height - doc.page.margins.bottom;
+
+  doc.rect(0, 0, doc.page.width, 12).fill(ACCENT);
+
+  doc.font("Helvetica-Bold").fontSize(11).fillColor(MUTED)
+    .text((company?.name || "").toUpperCase(), left, 56, { width, characterSpacing: 1.5 });
+
+  doc.font("Helvetica-Bold").fontSize(34).fillColor(INK).text("Kursbevis", left, 96, { width });
+  doc.rect(left, 146, 70, 4).fill(ACCENT);
+
+  doc.font("Helvetica").fontSize(12).fillColor(MUTED).text("Dette bekrefter at", left, 200, { width });
+  doc.font("Helvetica-Bold").fontSize(26).fillColor(INK).text(person.name, left, 222, { width });
+  doc.font("Helvetica").fontSize(12).fillColor(MUTED)
+    .text(department ? `${department.name} · har gjennomført` : "har gjennomført", left, 262, { width });
+  doc.font("Helvetica-Bold").fontSize(19).fillColor(INK).text(row.title, left, 286, { width });
+
+  let y = doc.y + 18;
+  if (row.description) {
+    doc.font("Helvetica").fontSize(11).fillColor(MUTED).text(row.description, left, y, { width });
+    y = doc.y + 10;
+  }
+
+  // Label/value pairs in two columns, so the page has structure instead of a paragraph of facts.
+  const facts = [
+    ["Gjennomført", formatNorwegianDate(row.record.completed_at)],
+    ["Type", row.kind_label],
+    row.record.instructor ? ["Holdt av", row.record.instructor] : null,
+    row.record.expires_at
+      ? [row.status === "expired" ? "Utløpt" : "Gyldig til", formatNorwegianDate(row.record.expires_at)]
+      : ["Gyldighet", "Uten utløpsdato"],
+    row.record.slides_total ? ["Leksjon", `${row.record.slides_seen || 0} av ${row.record.slides_total} lysbilder sett`] : null,
+    row.record.evidence_name ? ["Vedlagt bevis", row.record.evidence_name] : null,
+  ].filter(Boolean);
+
+  y = Math.max(y, 380);
+  doc.moveTo(left, y).lineTo(left + width, y).lineWidth(0.5).strokeColor("#e4e4e7").stroke();
+  y += 18;
+
+  const columnWidth = width / 2;
+  facts.forEach(([label, value], i) => {
+    const x = left + (i % 2) * columnWidth;
+    const rowY = y + Math.floor(i / 2) * 46;
+    doc.font("Helvetica").fontSize(9).fillColor(MUTED).text(label.toUpperCase(), x, rowY, { width: columnWidth - 20, characterSpacing: 0.8 });
+    doc.font("Helvetica-Bold").fontSize(12)
+      .fillColor(label === "Utløpt" ? "#dc2626" : INK)
+      .text(value, x, rowY + 14, { width: columnWidth - 20 });
+  });
+
+  // Anchored to the bottom, not to however long the course title happened to be.
+  const signatureTop = bottom - 150;
+  const lineY = bottom - 78;
+  if (row.record.signature_path) {
+    try {
+      doc.image(path.join(process.env.UPLOADS_DIR || "uploads", path.basename(row.record.signature_path)), left, signatureTop, {
+        fit: [220, 62],
+        align: "left",
+      });
+    } catch {
+      doc.font("Helvetica-Oblique").fontSize(9).fillColor(MUTED).text("(signaturbildet mangler på disk)", left, lineY - 16);
+    }
+  }
+  doc.moveTo(left, lineY).lineTo(left + 240, lineY).lineWidth(0.8).strokeColor("#a1a1aa").stroke();
+  doc.font("Helvetica").fontSize(9).fillColor(MUTED).text("SIGNATUR", left, lineY + 8, { characterSpacing: 0.8 });
+  doc.font("Helvetica-Bold").fontSize(12).fillColor(INK)
+    .text(row.record.signed_initials || person.name, left, lineY + 22, { width: 240 });
+
+  if (row.record.registered_by) {
+    doc.font("Helvetica").fontSize(9).fillColor(MUTED)
+      .text("Registrert av arbeidsgiver", left + 300, lineY + 8, { width: width - 300 });
+  }
+
+  doc.font("Helvetica").fontSize(8).fillColor(MUTED)
+    .text(`Utskrift ${today} · Rentlogg${row.version > 1 ? ` · kursversjon ${row.record.course_version}` : ""}`, left, bottom - 12, { width });
+}
+
 // Shared by the admin route below and by the staff member fetching her own copy. Expired courses
 // are deliberately included, marked as expired: a certificate that quietly leaves out that the
 // hygiene course ran out last year is a worse document, not a kinder one.
@@ -852,47 +953,22 @@ function sendCertificate(res, target, companyId) {
     : null;
 
   res.setHeader("Content-Type", "application/pdf");
-  res.setHeader("Content-Disposition", `attachment; filename=opplaering-${target.id}.pdf`);
+  res.setHeader("Content-Disposition", `attachment; filename=kursbevis-${target.id}.pdf`);
 
-  const doc = new PDFDocument({ margin: 50 });
+  // A4 rather than pdfkit's default letter: this gets printed and filed in Norway.
+  const doc = new PDFDocument({ size: "A4", margin: 50 });
   doc.pipe(res);
 
-  drawPdfHeader(doc, "Opplæringsbevis", `${company?.name || ""}${department ? " · " + department.name : ""}`);
-  doc.fontSize(14).fillColor("black").text(target.name);
-  doc.fontSize(10).fillColor("gray").text(`Utskrift ${today}`);
-  doc.moveDown();
-
-  if (rows.length === 0) doc.fontSize(11).fillColor("gray").text("Ingen gjennomført opplæring registrert.");
+  if (rows.length === 0) {
+    doc.rect(0, 0, doc.page.width, 12).fill(ACCENT);
+    doc.font("Helvetica-Bold").fontSize(26).fillColor(INK).text("Kursbevis", 50, 96);
+    doc.font("Helvetica").fontSize(12).fillColor(MUTED)
+      .text(`Ingen gjennomført opplæring er registrert på ${target.name}.`, 50, 150);
+  }
 
   rows.forEach((row, index) => {
-    if (doc.y > doc.page.height - 130) doc.addPage();
-    doc.fontSize(12).fillColor("black").text(`${index + 1}. ${row.title}`);
-    doc.fontSize(10).fillColor("gray").text(`${row.kind_label} · gjennomført ${dayOf(row.record.completed_at)}`);
-    if (row.record.signed_initials) doc.fontSize(10).fillColor("black").text(`Signert: ${row.record.signed_initials}`);
-    if (row.record.signature_path) {
-      // The drawn signature is the whole reason this page reads as a signed document rather than a
-      // printout, so it goes in at a readable size. A missing file must not take the certificate
-      // down with it — the typed name above still carries the same information.
-      try {
-        doc.image(path.join(process.env.UPLOADS_DIR || "uploads", path.basename(row.record.signature_path)), {
-          fit: [180, 55],
-        });
-        doc.moveDown(0.2);
-      } catch {
-        doc.fontSize(9).fillColor("gray").text("(signaturbildet mangler på disk)");
-      }
-    }
-    if (row.record.instructor) doc.fontSize(10).fillColor("gray").text(`Holdt av: ${row.record.instructor}`);
-    if (row.record.expires_at) {
-      const expired = row.status === "expired";
-      doc.fontSize(10).fillColor(expired ? "red" : "gray")
-        .text(`${expired ? "Utløpt" : "Gyldig til"} ${dayOf(row.record.expires_at)}`);
-    }
-    if (row.record.slides_total) {
-      doc.fontSize(9).fillColor("gray").text(`Så ${row.record.slides_seen || 0} av ${row.record.slides_total} lysbilder`);
-    }
-    if (row.record.evidence_name) doc.fontSize(9).fillColor("gray").text(`Vedlagt bevis: ${row.record.evidence_name}`);
-    doc.moveDown(0.6);
+    if (index > 0) doc.addPage();
+    drawCertificatePage(doc, { company, person: target, department, row, today });
   });
 
   doc.end();
