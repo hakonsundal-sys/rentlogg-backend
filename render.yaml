@@ -32,10 +32,22 @@ services:
       # unset, that one endpoint returns a clean "not configured" error instead of crashing.
       - key: ANTHROPIC_API_KEY
         sync: false
-      # Comma-separated frontend origins allowed to call this API. Left unset, CORS reflects ANY
-      # origin — which is what happens today, and should be tightened to the real domains.
+      # Comma-separated frontend origins allowed to call this API. Left unset, CORS answers every
+      # origin with "*", which is what production did until now.
+      #
+      # BEGGE verdiene må stå her, og www-varianten er den som faktisk brukes: rentlogg.no svarer
+      # 308 og sender nettleseren videre til www.rentlogg.no, så det er www som står i Origin-
+      # headeren på hvert eneste API-kall. Setter man bare apex-domenet — den åpenbare verdien —
+      # blokkerer nettleseren alt, og appen er nede for alle. Apex står med fordi oppsettet har
+      # snudd før: rentlogg.no ble en periode servert direkte av Vercel uten omdirigering.
+      #
+      # Merk at dette ikke er tilgangskontroll. Auth er en Bearer-header, ikke en cookie, så en
+      # fremmed origin har aldri kunnet ri på en ambient credential uansett, og hvem som helst kan
+      # fortsatt kalle API-et utenfor en nettleser. Dette hever terskelen for en phishing-klone som
+      # vil logge inn mot ekte backend fra nettleseren, og er på plass før noen eventuelt innfører
+      # cookies senere. Ikke mer enn det.
       - key: ALLOWED_ORIGINS
-        sync: false
+        value: https://www.rentlogg.no,https://rentlogg.no
       # Where GET /checkin/:qrToken sends a native-camera QR scan on to. Defaults to
       # https://rentlogg.no, which 308-redirects to https://www.rentlogg.no/ — works, one hop extra.
       - key: PUBLIC_FRONTEND_URL
