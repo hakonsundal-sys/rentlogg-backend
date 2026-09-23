@@ -58,6 +58,24 @@ export function documentFileFilter(req, file, cb) {
   cb(null, true);
 }
 
+const AUDIO_EXTENSIONS = new Set([".mp3", ".m4a", ".aac", ".ogg", ".wav"]);
+const AUDIO_MIME_TYPES = new Set([
+  "audio/mpeg", "audio/mp3", "audio/mp4", "audio/x-m4a", "audio/aac", "audio/ogg", "audio/wav", "audio/x-wav",
+]);
+
+// A training lesson's slides: an image per slide plus its narration audio. The only place in the
+// app that accepts audio at all, and it's still both-checks (extension and mimetype) for the same
+// reason imageFileFilter is — the stored extension decides the Content-Type it's served back with.
+export function slideFileFilter(req, file, cb) {
+  const ext = path.extname(file.originalname).toLowerCase();
+  const isImage = IMAGE_EXTENSIONS.has(ext) && IMAGE_MIME_TYPES.has(file.mimetype);
+  const isAudio = AUDIO_EXTENSIONS.has(ext) && AUDIO_MIME_TYPES.has(file.mimetype);
+  if (!isImage && !isAudio) {
+    return cb(new UploadRejectedError("Bare bilder eller lydfiler er tillatt i en leksjon."));
+  }
+  cb(null, true);
+}
+
 // Phone cameras routinely save a photo with its pixel data in the sensor's native orientation
 // plus an EXIF "Orientation" tag telling a viewer how to rotate it for display. Browsers honor
 // that tag (so an uploaded photo looks right in the app), but pdfkit's doc.image() draws the raw

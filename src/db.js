@@ -228,3 +228,13 @@ if (oldWeeklyItems.length > 0) {
     }
   })();
 }
+
+// Timeregistrering, per site. How a stamped shift at this location turns into payable hours:
+// 'actual' (the default, and what every existing site gets by omission) counts the clock between
+// stamp-in and stamp-out; 'fixed' pays the site's own rammetimetall instead, however long the
+// person was actually there. time_fixed_minutes is that frame, in minutes — minutes rather than
+// hours because half-hour frames are ordinary ("1,5 t") and storing 1.5 as a float would make the
+// sums drift. Both are snapshotted onto each time_entry when it closes, so editing them later
+// never rewrites an already-exported period. No CHECK constraint, matching the rest of this file.
+ensureColumn("sites", "time_billing_mode", "time_billing_mode TEXT DEFAULT 'actual'");
+ensureColumn("sites", "time_fixed_minutes", "time_fixed_minutes INTEGER");

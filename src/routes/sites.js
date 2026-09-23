@@ -6,6 +6,8 @@ import { requireAuth, requireRole } from "../middleware/auth.js";
 import { newQrToken, qrLabelSvgDataUrl } from "../utils/qrcode.js";
 import { findRunForSiteDate, todayInOslo } from "../services/schedule.js";
 import { safeOriginalName, normalizeImageOrientation, documentFileFilter, removeUploadedFile } from "../utils/uploads.js";
+import { haversineMeters } from "../utils/geo.js";
+import { startEntryForCheckin } from "../services/timeEntries.js";
 
 export const sitesRouter = Router();
 
@@ -55,9 +57,11 @@ function isValidSendHour(value) {
 }
 
 sitesRouter.post("/", requireAuth, requireRole("admin", "manager"), (req, res) => {
-  const { name, client_id, department_id, address, checklist_template_id, latitude, longitude, gps_radius_meters, room_count, report_recipients, report_send_hour } = req.body;
+  const { name, client_id, department_id, address, checklist_template_id, latitude, longitude, gps_radius_meters, room_count, report_recipients, report_send_hour, time_billing_mode, time_fixed_minutes } = req.body;
   if (!name || !client_id) return res.status(400).json({ code: "name_and_client_required", error: "name and client_id are required" });
   if (!isValidSendHour(report_send_hour)) return res.status(400).json({ code: "invalid_report_hour", error: "report_send_hour må være et heltall 0–23" });
+  const timeSettingsError = validateTimeSettings(req.body);
+  if (timeSettingsError) return res.status(400).json(timeSettingsError);
 
   const client = db.prepare("SELECT company_id FROM clients WHERE id = ?").get(client_id);
   if (!client || client.company_id !== req.user.company_id) {
@@ -79,15 +83,34 @@ sitesRouter.post("/", requireAuth, requireRole("admin", "manager"), (req, res) =
   const qr_token = newQrToken();
   const info = db
     .prepare(
-      `INSERT INTO sites (name, client_id, department_id, company_id, address, checklist_template_id, qr_token, latitude, longitude, gps_radius_meters, room_count, report_recipients, report_send_hour)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO sites (name, client_id, department_id, company_id, address, checklist_template_id, qr_token, latitude, longitude, gps_radius_meters, room_count, report_recipients, report_send_hour, time_billing_mode, time_fixed_minutes)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
-    .run(name, client_id, department_id || null, req.user.company_id, address || null, checklist_template_id || null, qr_token, latitude || null, longitude || null, gps_radius_meters || 150, room_count || 0, report_recipients || null, report_send_hour ?? null);
+    .run(name, client_id, department_id || null, req.user.company_id, address || null, checklist_template_id || null, qr_token, latitude || null, longitude || null, gps_radius_meters || 150, room_count || 0, report_recipients || null, report_send_hour ?? null, time_billing_mode || "actual", time_fixed_minutes ?? null);
 
   res.status(201).json({ id: info.lastInsertRowid, qr_token });
 });
 
-const SITE_PATCH_FIELDS = ["name", "client_id", "department_id", "address", "checklist_template_id", "latitude", "longitude", "gps_radius_meters", "room_count", "report_recipients", "report_send_hour"];
+const SITE_PATCH_FIELDS = ["name", "client_id", "department_id", "address", "checklist_template_id", "latitude", "longitude", "gps_radius_meters", "room_count", "report_recipients", "report_send_hour", "time_billing_mode", "time_fixed_minutes"];
+
+// Timeregistrering: 'actual' pays the clock between stamp-in and stamp-out, 'fixed' pays this
+// site's own rammetimetall however long the visit actually took. 'fixed' without a frame would
+// mean paying nothing, so the number is required alongside it rather than defaulted — see
+// services/timeEntries.js, which degrades to the clock if it ever finds one missing anyway.
+function validateTimeSettings(body, current = {}) {
+  const mode = "time_billing_mode" in body ? body.time_billing_mode : current.time_billing_mode;
+  if (mode != null && mode !== "actual" && mode !== "fixed") {
+    return { code: "invalid_billing_mode", error: "time_billing_mode må være 'actual' eller 'fixed'" };
+  }
+  const minutes = "time_fixed_minutes" in body ? body.time_fixed_minutes : current.time_fixed_minutes;
+  if (minutes != null && (!Number.isInteger(minutes) || minutes <= 0 || minutes > 24 * 60)) {
+    return { code: "invalid_fixed_minutes", error: "Rammetimetall må være et antall minutter mellom 1 og 1440" };
+  }
+  if (mode === "fixed" && !minutes) {
+    return { code: "fixed_minutes_required", error: "Et rammetimetall må settes når lokasjonen bruker faste timer" };
+  }
+  return null;
+}
 
 sitesRouter.patch("/:id", requireAuth, requireRole("admin", "manager"), (req, res) => {
   const { site, status, code, error } = getSiteScoped(req.params.id, req.user);
@@ -96,6 +119,10 @@ sitesRouter.patch("/:id", requireAuth, requireRole("admin", "manager"), (req, re
   if ("report_send_hour" in req.body && !isValidSendHour(req.body.report_send_hour)) {
     return res.status(400).json({ code: "invalid_report_hour", error: "report_send_hour må være et heltall 0–23" });
   }
+  // Validated against the site's current values as well as the body, so switching a site to fixed
+  // hours without also sending a rammetimetall is caught rather than saved half-applied.
+  const timeSettingsError = validateTimeSettings(req.body, site);
+  if (timeSettingsError) return res.status(400).json(timeSettingsError);
 
   const fields = SITE_PATCH_FIELDS.filter((f) => f in req.body);
   if (fields.length === 0) return res.status(400).json({ code: "no_valid_fields", error: "No valid fields to update" });
@@ -333,7 +360,12 @@ sitesRouter.post("/checkin/:qrToken", requireAuth, requireRole("cleaner"), (req,
 
   const existing = findRunForSiteDate(site.id, todayInOslo());
   if (existing) {
-    return res.json({ runId: existing.id, site, gps_verified: !!existing.gps_verified });
+    // The run is shared per site per day — this same row is handed to everyone who scans, and its
+    // cleaner_id stays whoever scanned first. The time entry below is the opposite: one row per
+    // person per stamping, which is exactly why a timesheet can't be read off the run. Returns
+    // null (at the cost of one indexed module lookup) for any company without Timeregistrering.
+    const timeEntry = startEntryForCheckin({ site, user: req.user, latitude, longitude, runId: existing.id });
+    return res.json({ runId: existing.id, site, gps_verified: !!existing.gps_verified, timeEntry });
   }
 
   const runInfo = db
@@ -347,7 +379,9 @@ sitesRouter.post("/checkin/:qrToken", requireAuth, requireRole("cleaner"), (req,
   const insertItem = db.prepare("INSERT INTO checklist_run_items (run_id, label, sort_order) VALUES (?, ?, ?)");
   templateItems.forEach((item, i) => insertItem.run(runInfo.lastInsertRowid, item.label, i));
 
-  res.status(201).json({ runId: runInfo.lastInsertRowid, site, gps_verified: !!gps_verified });
+  const timeEntry = startEntryForCheckin({ site, user: req.user, latitude, longitude, runId: runInfo.lastInsertRowid });
+
+  res.status(201).json({ runId: runInfo.lastInsertRowid, site, gps_verified: !!gps_verified, timeEntry });
 });
 
 // Called when a customer scans the same physical QR sticker cleaners use (see App.jsx's
@@ -363,14 +397,3 @@ sitesRouter.get("/checkin/:qrToken", requireAuth, requireRole("customer"), (req,
   if (!site || site.client_id !== req.user.client_id) return res.status(404).json({ code: "unknown_qr_code", error: "Unknown QR code" });
   res.json({ site: { ...site, has_customer_rooms: !!siteHasCustomerRoomsStmt.get(site.id) } });
 });
-
-function haversineMeters(lat1, lon1, lat2, lon2) {
-  const R = 6371000;
-  const toRad = (d) => (d * Math.PI) / 180;
-  const dLat = toRad(lat2 - lat1);
-  const dLon = toRad(lon2 - lon1);
-  const a =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
-  return 2 * R * Math.asin(Math.sqrt(a));
-}

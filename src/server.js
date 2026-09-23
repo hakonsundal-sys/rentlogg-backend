@@ -19,6 +19,10 @@ import { siteRoomsRouter, roomsRouter } from "./routes/rooms.js";
 import { companiesRouter } from "./routes/companies.js";
 import { departmentsRouter } from "./routes/departments.js";
 import { uploadsRouter } from "./routes/uploads.js";
+import { modulesRouter } from "./routes/modules.js";
+import { trainingRouter } from "./routes/training.js";
+import { timeRouter } from "./routes/time.js";
+import { requireAuth, requireModule } from "./middleware/auth.js";
 import { startDailyReportScheduler } from "./services/scheduler.js";
 import { UploadRejectedError } from "./utils/uploads.js";
 
@@ -72,6 +76,14 @@ app.use("/sites/:siteId/rooms", siteRoomsRouter);
 app.use("/rooms", roomsRouter);
 app.use("/companies", companiesRouter);
 app.use("/departments", departmentsRouter);
+app.use("/modules", modulesRouter);
+// Gated at the mount rather than per route, so no route inside training.js can ever forget the
+// check — a company without the "Opplæring" module gets 403 module_not_enabled on all of it.
+app.use("/training", requireAuth, requireModule("training"), trainingRouter);
+// Same gating as training above. Note that stamping IN is NOT here — it happens inside the QR
+// check-in (POST /sites/checkin/:qrToken), which stays ungated for everyone and checks the module
+// itself via startEntryForCheckin.
+app.use("/time", requireAuth, requireModule("timeclock"), timeRouter);
 
 // Without this, a rejected upload (most commonly a phone photo over the size limit — modern
 // camera HDR/high-res shots routinely exceed what a "reasonable" limit looks like on paper)

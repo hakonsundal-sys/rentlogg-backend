@@ -251,6 +251,157 @@ CREATE TABLE IF NOT EXISTS room_run_item_options (
   selected INTEGER DEFAULT 0
 );
 
+-- Training ("Opplæring"): documenting that a staff member has received training — a lesson watched
+-- in the app, a routine read, a physical course held, an external certificate earned — and has
+-- signed for it. An add-on module (see src/modules.js), off unless a super_admin turns it on.
+--
+-- Split the same way the rest of the app splits plan from event (room_schedules → room_runs):
+-- training_assignments is who SHOULD take a course, training_records is what actually happened.
+CREATE TABLE IF NOT EXISTS training_courses (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  company_id INTEGER NOT NULL REFERENCES companies(id),
+  title TEXT NOT NULL,
+  description TEXT,
+  -- 'lesson'    slides + narration played in the app
+  -- 'document'  a routine/PDF the person confirms having read
+  -- 'classroom' physical/practical training, registered by an admin afterwards
+  -- 'external'  an outside course (e.g. Hygiene Academy), documented by its certificate
+  -- No CHECK constraint, matching every other enum-ish column in this app — validated in the route.
+  kind TEXT NOT NULL DEFAULT 'lesson',
+  validity_months INTEGER, -- null = never expires; else records get expires_at = completed + N months
+  requires_signature INTEGER NOT NULL DEFAULT 1,
+  -- Bumped whenever the lesson's slides are replaced. A record carries the version it was signed
+  -- on, so "signed, but the course has changed since" is visible without discarding the old signature.
+  version INTEGER NOT NULL DEFAULT 1,
+  active INTEGER NOT NULL DEFAULT 1,
+  sort_order INTEGER DEFAULT 0,
+  created_by INTEGER REFERENCES users(id),
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
+-- One slide of a lesson, in one language. The app plays image + audio and shows narration_text
+-- underneath; a language nobody on the roster reads is simply never generated, so a course can
+-- have Norwegian and Lithuanian slides and nothing else.
+CREATE TABLE IF NOT EXISTS training_slides (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  course_id INTEGER NOT NULL REFERENCES training_courses(id),
+  language TEXT NOT NULL,
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  image_path TEXT,
+  audio_path TEXT,
+  narration_text TEXT,
+  duration_seconds INTEGER,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
+-- Attachments belonging to the course itself (the routine PDF for a kind='document' course,
+-- a handout for a classroom one) — not to be confused with a record's evidence file below.
+CREATE TABLE IF NOT EXISTS training_course_files (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  course_id INTEGER NOT NULL REFERENCES training_courses(id),
+  name TEXT NOT NULL,
+  file_path TEXT NOT NULL,
+  language TEXT,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS training_assignments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  course_id INTEGER NOT NULL REFERENCES training_courses(id),
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  assigned_by INTEGER REFERENCES users(id),
+  assigned_at TEXT DEFAULT (datetime('now')),
+  due_at TEXT,
+  UNIQUE(course_id, user_id)
+);
+
+-- One row per completion, not per person: a course that expires and is retaken gets a second row,
+-- so the history of who was trained when survives the re-certification instead of being overwritten.
+CREATE TABLE IF NOT EXISTS training_records (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  course_id INTEGER NOT NULL REFERENCES training_courses(id),
+  course_version INTEGER NOT NULL DEFAULT 1,
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  started_at TEXT DEFAULT (datetime('now')),
+  completed_at TEXT,
+  signed_at TEXT,
+  signed_initials TEXT,          -- the person's own name, same convention as room_runs.signed_initials
+  registered_by INTEGER REFERENCES users(id), -- set when an admin registered it on someone's behalf
+  instructor TEXT,               -- who held the training (a person or an external provider)
+  evidence_path TEXT,            -- an external course certificate, uploaded as proof
+  evidence_name TEXT,
+  expires_at TEXT,               -- computed from completed_at + course.validity_months at save time
+  note TEXT,
+  -- Lesson progress, kept on the record rather than in a table of its own: enough to resume where
+  -- the person left off AND to document "saw 14 of 14 slides" once it's signed.
+  slides_total INTEGER,
+  slides_seen INTEGER DEFAULT 0,
+  last_slide_index INTEGER DEFAULT 0,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
+-- Timeregistrering: one row per person per stamping, born from the QR scan but deliberately
+-- independent of checklist_runs.
+--
+-- Why its own table rather than reading hours off the check-in: a checklist_run is shared per site
+-- per day. findRunForSiteDate (services/schedule.js) hands today's run to whoever scans, so its
+-- cleaner_id is only ever "whoever scanned first" and a second cleaner on the same site that day
+-- leaves no trace on it at all; findOrCreateRoomRunForDate shares room runs the same way. And
+-- completed_at only means somebody tapped "Avslutt besøk" (see the caveat in routes/checklists.js),
+-- which a cleaner can do with most rooms still undone. None of that is wrong for a checklist — it
+-- is exactly wrong for a timesheet, where the question is always "this person, this shift".
+--
+-- This is payroll data, so the lock and the edit trail are here from the first row rather than
+-- retrofitted: locked_at freezes an exported period, and edited_at/edited_by_initials follow the
+-- same shape room_runs already uses for a corrected checklist.
+CREATE TABLE IF NOT EXISTS time_entries (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  company_id INTEGER NOT NULL REFERENCES companies(id),
+  site_id INTEGER NOT NULL REFERENCES sites(id),
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  -- The Europe/Oslo calendar day the shift belongs to, stored rather than derived: started_at is
+  -- UTC (Render runs in UTC), and every grouping, filter and export in this module is by working
+  -- day. Fixed at stamp-in, so a shift running past midnight stays on the day it started.
+  work_date TEXT NOT NULL,
+  started_at TEXT NOT NULL,
+  ended_at TEXT,
+  -- 'qr' stamped in by scanning the site's QR code, 'manual' registered afterwards by an
+  -- admin/driftsleder. No CHECK constraint, matching every other enum-ish column in this app.
+  source TEXT NOT NULL DEFAULT 'qr',
+  -- The visit this stamping was born from, kept for context only — never read to compute hours,
+  -- and null for a manually registered entry.
+  run_id INTEGER REFERENCES checklist_runs(id),
+  start_gps_verified INTEGER DEFAULT 0,
+  start_latitude REAL,
+  start_longitude REAL,
+  end_gps_verified INTEGER DEFAULT 0,
+  end_latitude REAL,
+  end_longitude REAL,
+  -- The raw clock difference, always kept even when the site pays a fixed frame — "she was there
+  -- 2t 40m but the site is paid as 2t" is the whole point of having both numbers.
+  actual_minutes INTEGER,
+  -- What actually counts for this shift, and which rule produced it: 'actual' = the clock,
+  -- 'fixed' = the site's rammetimetall, 'manual' = a number an admin typed. billing_mode and
+  -- fixed_minutes are snapshots taken when the entry was closed, not looked up on read: changing
+  -- a site's rammetimetall next month must never silently rewrite what last month's payroll said
+  -- (same reasoning as training_records.expires_at being computed at save time).
+  minutes INTEGER,
+  billing_mode TEXT,
+  fixed_minutes INTEGER,
+  -- Set when nobody stamped out by hand: 'new_checkin' (closed at the moment the same person
+  -- stamped in somewhere else the same day) or 'stale' (still open when a later day started — left
+  -- with no ended_at on purpose, because inventing an evening departure time is inventing payroll).
+  auto_closed_reason TEXT,
+  note TEXT,
+  -- Payroll lock: set over a whole period once it has been exported, after which the entry can be
+  -- neither edited nor deleted until an admin unlocks it again.
+  locked_at TEXT,
+  locked_by INTEGER REFERENCES users(id),
+  edited_at TEXT,
+  edited_by_initials TEXT,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
 CREATE INDEX IF NOT EXISTS idx_sites_client ON sites(client_id);
 CREATE INDEX IF NOT EXISTS idx_runs_site ON checklist_runs(site_id);
 CREATE INDEX IF NOT EXISTS idx_deviations_site ON deviations(site_id);
@@ -261,3 +412,11 @@ CREATE INDEX IF NOT EXISTS idx_room_schedules_room ON room_schedules(room_id);
 CREATE INDEX IF NOT EXISTS idx_room_runs_room ON room_runs(room_id);
 CREATE INDEX IF NOT EXISTS idx_item_options_item ON room_checklist_item_options(item_id);
 CREATE INDEX IF NOT EXISTS idx_run_item_options_run_item ON room_run_item_options(run_item_id);
+CREATE INDEX IF NOT EXISTS idx_training_courses_company ON training_courses(company_id);
+CREATE INDEX IF NOT EXISTS idx_training_slides_course ON training_slides(course_id, language, sort_order);
+CREATE INDEX IF NOT EXISTS idx_training_course_files_course ON training_course_files(course_id);
+CREATE INDEX IF NOT EXISTS idx_training_assignments_user ON training_assignments(user_id);
+CREATE INDEX IF NOT EXISTS idx_training_records_user ON training_records(user_id, course_id);
+CREATE INDEX IF NOT EXISTS idx_time_entries_company_date ON time_entries(company_id, work_date);
+CREATE INDEX IF NOT EXISTS idx_time_entries_user_date ON time_entries(user_id, work_date);
+CREATE INDEX IF NOT EXISTS idx_time_entries_site_date ON time_entries(site_id, work_date);

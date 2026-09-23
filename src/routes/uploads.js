@@ -2,6 +2,7 @@ import { Router } from "express";
 import path from "node:path";
 import { db } from "../db.js";
 import { requireAuthQueryOrHeader } from "../middleware/auth.js";
+import { isModuleEnabled } from "../modules.js";
 
 // Replaces the old `app.use("/uploads", express.static(uploadsDir))`, which served every
 // uploaded file — deviation/checklist/room photos, site documents, avatars — to anyone who knew
@@ -85,6 +86,55 @@ uploadsRouter.get("/:filename", requireAuthQueryOrHeader, (req, res) => {
     const visibleTo = req.user.role === "customer" ? ["customer", "both"] : ["staff", "both"];
     if (!allowed || !visibleTo.includes(doc.visibility)) return res.status(403).json({ code: "not_allowed", error: "Not allowed" });
     return sendStoredFile(res, null, doc.file_path);
+  }
+
+  // Training ("Opplæring") files, in the module's own two sensitivities. Both branches also require
+  // the caller's company to still have the module — turning it off has to close the files too, not
+  // just the routes and the menu.
+  const trainingEnabled = req.user.role !== "customer" && isModuleEnabled(req.user.company_id, "training");
+
+  // Course material: slide images, narration audio, the routine PDF attached to a course. Readable
+  // by any staff member in the owning company — it's the training itself, not anyone's record of it.
+  const material = db
+    .prepare(
+      `SELECT file_path, company_id FROM (
+         SELECT f.file_path AS file_path, c.company_id AS company_id
+           FROM training_course_files f JOIN training_courses c ON c.id = f.course_id
+         UNION ALL
+         SELECT s.image_path, c.company_id FROM training_slides s JOIN training_courses c ON c.id = s.course_id
+           WHERE s.image_path IS NOT NULL
+         UNION ALL
+         SELECT s.audio_path, c.company_id FROM training_slides s JOIN training_courses c ON c.id = s.course_id
+           WHERE s.audio_path IS NOT NULL
+       ) WHERE instr(file_path, ?) > 0`
+    )
+    .get(filename);
+
+  if (material && path.basename(material.file_path) === filename) {
+    if (!trainingEnabled || material.company_id !== req.user.company_id) {
+      return res.status(403).json({ code: "not_allowed", error: "Not allowed" });
+    }
+    return sendStoredFile(res, null, material.file_path);
+  }
+
+  // A record's evidence (an external course certificate) is personnel data, so it follows the
+  // stricter rule the training routes themselves use: the person it belongs to, or an admin/manager
+  // in the same company — never a colleague.
+  const evidence = db
+    .prepare(
+      `SELECT r.file_path, r.user_id, c.company_id FROM
+         (SELECT evidence_path AS file_path, user_id, course_id FROM training_records WHERE evidence_path IS NOT NULL) r
+       JOIN training_courses c ON c.id = r.course_id
+       WHERE instr(r.file_path, ?) > 0`
+    )
+    .get(filename);
+
+  if (evidence && path.basename(evidence.file_path) === filename) {
+    const managesStaff = req.user.role === "admin" || req.user.role === "manager";
+    const allowed =
+      trainingEnabled && evidence.company_id === req.user.company_id && (evidence.user_id === req.user.id || managesStaff);
+    if (!allowed) return res.status(403).json({ code: "not_allowed", error: "Not allowed" });
+    return sendStoredFile(res, null, evidence.file_path);
   }
 
   res.status(404).json({ code: "not_found", error: "Not found" });
