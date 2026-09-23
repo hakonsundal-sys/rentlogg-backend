@@ -270,6 +270,10 @@ CREATE TABLE IF NOT EXISTS training_courses (
   kind TEXT NOT NULL DEFAULT 'lesson',
   validity_months INTEGER, -- null = never expires; else records get expires_at = completed + N months
   requires_signature INTEGER NOT NULL DEFAULT 1,
+  -- On top of the typed name: the person draws their signature with a finger before the course can
+  -- be completed. Adds nothing legally that the name and timestamp don't already carry — what it
+  -- adds is that the documentation reads as a signature to a customer or an inspector looking at it.
+  requires_drawn_signature INTEGER NOT NULL DEFAULT 0,
   -- Bumped whenever the lesson's slides are replaced. A record carries the version it was signed
   -- on, so "signed, but the course has changed since" is visible without discarding the old signature.
   version INTEGER NOT NULL DEFAULT 1,
@@ -330,6 +334,8 @@ CREATE TABLE IF NOT EXISTS training_records (
   instructor TEXT,               -- who held the training (a person or an external provider)
   evidence_path TEXT,            -- an external course certificate, uploaded as proof
   evidence_name TEXT,
+  signature_path TEXT,           -- the drawn signature, when the course asks for one
+
   expires_at TEXT,               -- computed from completed_at + course.validity_months at save time
   note TEXT,
   -- Lesson progress, kept on the record rather than in a table of its own: enough to resume where

@@ -238,3 +238,10 @@ if (oldWeeklyItems.length > 0) {
 // never rewrites an already-exported period. No CHECK constraint, matching the rest of this file.
 ensureColumn("sites", "time_billing_mode", "time_billing_mode TEXT DEFAULT 'actual'");
 ensureColumn("sites", "time_fixed_minutes", "time_fixed_minutes INTEGER");
+
+// A drawn signature on top of the typed name, per course — see schema.sql's own comment on why it
+// exists. Both tables already exist in every running database, so schema.sql alone would never add
+// these: CREATE TABLE IF NOT EXISTS is a no-op once the table is there. Default 0 means every
+// course that already exists keeps asking only for a name.
+ensureColumn("training_courses", "requires_drawn_signature", "requires_drawn_signature INTEGER NOT NULL DEFAULT 0");
+ensureColumn("training_records", "signature_path", "signature_path TEXT");

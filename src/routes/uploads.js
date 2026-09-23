@@ -123,7 +123,11 @@ uploadsRouter.get("/:filename", requireAuthQueryOrHeader, (req, res) => {
   const evidence = db
     .prepare(
       `SELECT r.file_path, r.user_id, c.company_id FROM
-         (SELECT evidence_path AS file_path, user_id, course_id FROM training_records WHERE evidence_path IS NOT NULL) r
+         (SELECT evidence_path AS file_path, user_id, course_id FROM training_records WHERE evidence_path IS NOT NULL
+          UNION ALL
+          -- A drawn signature is as personal as the certificate next to it, and is served under the
+          -- same rule rather than getting its own looser one.
+          SELECT signature_path, user_id, course_id FROM training_records WHERE signature_path IS NOT NULL) r
        JOIN training_courses c ON c.id = r.course_id
        WHERE instr(r.file_path, ?) > 0`
     )

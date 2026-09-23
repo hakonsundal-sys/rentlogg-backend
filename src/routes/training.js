@@ -7,7 +7,8 @@ import sharp from "sharp";
 import { db } from "../db.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 import {
-  safeOriginalName, documentFileFilter, slideFileFilter, normalizeImageOrientation, removeUploadedFile,
+  safeOriginalName, documentFileFilter, slideFileFilter, imageFileFilter,
+  normalizeImageOrientation, removeUploadedFile,
 } from "../utils/uploads.js";
 import { todayInOslo } from "../services/schedule.js";
 import { DEFAULT_LANGUAGE, normalizeLanguage } from "../utils/languages.js";
@@ -42,6 +43,18 @@ const evidenceUpload = multer({
   limits: { fileSize: 20 * 1024 * 1024 },
 });
 
+// A signature drawn with a finger: a small PNG off a canvas, a few kilobytes. Its own upload rather
+// than sharing the one above so the size limit can be tight — anything arriving here that is
+// megabytes large is not a signature, whatever it claims to be.
+const signatureUpload = multer({
+  storage: multer.diskStorage({
+    destination: process.env.UPLOADS_DIR || "uploads/",
+    filename: (req, file, cb) => cb(null, `signatur-${Date.now()}-${safeOriginalName(file.originalname)}`),
+  }),
+  fileFilter: imageFileFilter,
+  limits: { fileSize: 2 * 1024 * 1024 },
+});
+
 // --- Scoping ---------------------------------------------------------------------------------
 
 // Same shape as getSiteScoped/getRoomScoped elsewhere: fetch once, then apply the one tenant rule.
@@ -74,7 +87,8 @@ function getStaffTarget(userId, requester) {
 function getRecordScoped(recordId, requester) {
   const record = db
     .prepare(
-      `SELECT r.*, c.company_id, c.title AS course_title, c.kind, c.requires_signature, c.validity_months
+      `SELECT r.*, c.company_id, c.title AS course_title, c.kind, c.requires_signature,
+              c.requires_drawn_signature, c.validity_months
        FROM training_records r JOIN training_courses c ON c.id = r.course_id WHERE r.id = ?`
     )
     .get(recordId);
@@ -191,6 +205,10 @@ function readCourseFields(body) {
       kind,
       validity_months: validity,
       requires_signature: body.requires_signature === false || body.requires_signature === 0 ? 0 : 1,
+      // Opposite default to the one above: asking for a drawn signature is the exception, so it is
+      // off unless explicitly turned on. Same merged-body caveat applies, hence the === 1 rather
+      // than a truthiness check that a stored 0 would also pass.
+      requires_drawn_signature: body.requires_drawn_signature === true || body.requires_drawn_signature === 1 ? 1 : 0,
     },
   };
 }
@@ -201,12 +219,12 @@ trainingRouter.post("/courses", requireAuth, requireRole("admin"), (req, res) =>
 
   const info = db
     .prepare(
-      `INSERT INTO training_courses (company_id, title, description, kind, validity_months, requires_signature, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO training_courses (company_id, title, description, kind, validity_months, requires_signature, requires_drawn_signature, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       req.user.company_id, fields.title, fields.description, fields.kind,
-      fields.validity_months, fields.requires_signature, req.user.id
+      fields.validity_months, fields.requires_signature, fields.requires_drawn_signature, req.user.id
     );
 
   const course = db.prepare("SELECT * FROM training_courses WHERE id = ?").get(info.lastInsertRowid);
@@ -227,8 +245,8 @@ trainingRouter.patch("/courses/:id", requireAuth, requireRole("admin"), (req, re
   if (fieldError) return res.status(400).json(fieldError);
 
   db.prepare(
-    "UPDATE training_courses SET title = ?, description = ?, kind = ?, validity_months = ?, requires_signature = ? WHERE id = ?"
-  ).run(fields.title, fields.description, fields.kind, fields.validity_months, fields.requires_signature, course.id);
+    "UPDATE training_courses SET title = ?, description = ?, kind = ?, validity_months = ?, requires_signature = ?, requires_drawn_signature = ? WHERE id = ?"
+  ).run(fields.title, fields.description, fields.kind, fields.validity_months, fields.requires_signature, fields.requires_drawn_signature, course.id);
 
   res.json(courseWithExtras(db.prepare("SELECT * FROM training_courses WHERE id = ?").get(course.id), todayInOslo()));
 });
@@ -553,8 +571,12 @@ trainingRouter.post(
   "/records",
   requireAuth,
   requireRole("admin", "manager"),
-  evidenceUpload.single("evidence"),
+  // .fields rather than .single: the person is standing there when a leader registers a course
+  // held in a room, so the signature can be drawn on the spot alongside any certificate.
+  evidenceUpload.fields([{ name: "evidence", maxCount: 1 }, { name: "signature", maxCount: 1 }]),
   async (req, res) => {
+    const evidenceFile = req.files?.evidence?.[0] || null;
+    const signatureFile = req.files?.signature?.[0] || null;
     const { course, status, code, error } = getCourseScoped(req.body.course_id, req.user);
     if (error) return res.status(status).json({ code, error });
     const { target, status: targetStatus, code: targetCode, error: targetError } = getStaffTarget(req.body.user_id, req.user);
@@ -570,26 +592,29 @@ trainingRouter.post(
     }
 
     let evidencePath = null;
-    if (req.file) {
-      if (req.file.mimetype.startsWith("image/")) {
-        await normalizeImageOrientation(path.join(process.env.UPLOADS_DIR || "uploads", req.file.filename));
+    if (evidenceFile) {
+      if (evidenceFile.mimetype.startsWith("image/")) {
+        await normalizeImageOrientation(path.join(process.env.UPLOADS_DIR || "uploads", evidenceFile.filename));
       }
-      evidencePath = path.join("uploads", req.file.filename);
+      evidencePath = path.join("uploads", evidenceFile.filename);
     }
+    // Not run through normalizeImageOrientation: a canvas PNG has no EXIF to rotate by, and
+    // sharp would only rewrite the file for nothing.
+    const signaturePath = signatureFile ? path.join("uploads", signatureFile.filename) : null;
 
     const info = db
       .prepare(
         `INSERT INTO training_records
           (course_id, course_version, user_id, started_at, completed_at, signed_at, signed_initials,
-           registered_by, instructor, evidence_path, evidence_name, expires_at, note)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+           registered_by, instructor, evidence_path, evidence_name, signature_path, expires_at, note)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         course.id, course.version, target.id, completedAt, completedAt,
         signedInitials ? completedAt : null, signedInitials || null,
         req.user.id, String(req.body.instructor || "").trim() || null,
-        evidencePath, req.file ? String(req.body.evidence_name || req.file.originalname).trim() : null,
-        computeExpiry(completedAt, course.validity_months), String(req.body.note || "").trim() || null
+        evidencePath, evidenceFile ? String(req.body.evidence_name || evidenceFile.originalname).trim() : null,
+        signaturePath, computeExpiry(completedAt, course.validity_months), String(req.body.note || "").trim() || null
       );
 
     res.status(201).json(db.prepare("SELECT * FROM training_records WHERE id = ?").get(info.lastInsertRowid));
@@ -603,6 +628,7 @@ trainingRouter.delete("/records/:id", requireAuth, requireRole("admin"), (req, r
   if (error) return res.status(status).json({ code, error });
 
   if (record.evidence_path) removeUploadedFile(record.evidence_path);
+  if (record.signature_path) removeUploadedFile(record.signature_path);
   db.prepare("DELETE FROM training_records WHERE id = ?").run(record.id);
   res.json({ ok: true });
 });
@@ -638,6 +664,7 @@ function trainingForUser(userId, companyId, today) {
         active: !!course.active,
         validity_months: course.validity_months,
         requires_signature: !!course.requires_signature,
+        requires_drawn_signature: !!course.requires_drawn_signature,
         assigned: !!assignment,
         assignment_id: assignment?.id ?? null,
         due_at: assignment?.due_at ?? null,
@@ -751,36 +778,59 @@ trainingRouter.patch("/me/records/:id/progress", requireAuth, requireRole("admin
   res.json(db.prepare("SELECT * FROM training_records WHERE id = ?").get(record.id));
 });
 
-trainingRouter.post("/me/records/:id/sign", requireAuth, requireRole("admin", "manager", "cleaner"), (req, res) => {
+// Multipart rather than JSON because of the drawn signature — a canvas PNG as base64 inside a JSON
+// body would sail past express.json()'s 100 kB limit on a long signature, and would sidestep the
+// fileFilter and size limit every other upload in this app goes through.
+trainingRouter.post(
+  "/me/records/:id/sign",
+  requireAuth,
+  requireRole("admin", "manager", "cleaner"),
+  signatureUpload.single("signature"),
+  (req, res) => {
+  // multer has already written the signature to disk by the time this runs, so every path that
+  // refuses the signing has to take it away again — otherwise a person tapping "signer" twice on a
+  // bad signal leaves a file on the disk that no row will ever point at.
+  const signaturePath = req.file ? path.join("uploads", req.file.filename) : null;
+  const refuse = (httpStatus, body) => {
+    if (signaturePath) removeUploadedFile(signaturePath);
+    return res.status(httpStatus).json(body);
+  };
+
   const { record, status, code, error } = getRecordScoped(req.params.id, req.user);
-  if (error) return res.status(status).json({ code, error });
-  if (record.user_id !== req.user.id) return res.status(403).json({ code: "not_allowed", error: "Not allowed" });
-  if (record.completed_at) return res.status(409).json({ code: "already_completed", error: "Kurset er allerede fullført." });
+  if (error) return refuse(status, { code, error });
+  if (record.user_id !== req.user.id) return refuse(403, { code: "not_allowed", error: "Not allowed" });
+  if (record.completed_at) return refuse(409, { code: "already_completed", error: "Kurset er allerede fullført." });
 
   // The whole claim this module makes is "she saw the training". A lesson signed halfway through
   // would make that claim falsely, so the gate lives here on the server, not only in the player.
   if (record.kind === "lesson" && record.slides_total > 0 && (record.slides_seen || 0) < record.slides_total) {
-    return res.status(409).json({ code: "lesson_not_finished", error: "Du må se hele leksjonen før du kan signere." });
+    return refuse(409, { code: "lesson_not_finished", error: "Du må se hele leksjonen før du kan signere." });
   }
 
   const signedInitials = String(req.body.signed_initials || "").trim();
   if (record.requires_signature && !signedInitials) {
-    return res.status(400).json({ code: "signature_required", error: "Skriv inn navnet ditt for å signere." });
+    return refuse(400, { code: "signature_required", error: "Skriv inn navnet ditt for å signere." });
+  }
+  if (record.requires_drawn_signature && !signaturePath) {
+    return refuse(400, { code: "drawn_signature_required", error: "Skriv signaturen din i feltet." });
   }
 
   const completedAt = nowStamp();
   db.prepare(
-    "UPDATE training_records SET completed_at = ?, signed_at = ?, signed_initials = ?, expires_at = ? WHERE id = ?"
+    `UPDATE training_records SET completed_at = ?, signed_at = ?, signed_initials = ?, signature_path = ?, expires_at = ?
+     WHERE id = ?`
   ).run(
     completedAt,
     signedInitials ? completedAt : null,
     signedInitials || null,
+    signaturePath,
     computeExpiry(completedAt, record.validity_months),
     record.id
   );
 
   res.json(db.prepare("SELECT * FROM training_records WHERE id = ?").get(record.id));
-});
+  }
+);
 
 // --- Documentation on paper --------------------------------------------------------------------
 
@@ -819,6 +869,19 @@ trainingRouter.get("/users/:id/certificate.pdf", requireAuth, requireRole("admin
     doc.fontSize(12).fillColor("black").text(`${index + 1}. ${row.title}`);
     doc.fontSize(10).fillColor("gray").text(`${row.kind_label} · gjennomført ${dayOf(row.record.completed_at)}`);
     if (row.record.signed_initials) doc.fontSize(10).fillColor("black").text(`Signert: ${row.record.signed_initials}`);
+    if (row.record.signature_path) {
+      // The drawn signature is the whole reason this page reads as a signed document rather than a
+      // printout, so it goes in at a readable size. A missing file must not take the certificate
+      // down with it — the typed name above still carries the same information.
+      try {
+        doc.image(path.join(process.env.UPLOADS_DIR || "uploads", path.basename(row.record.signature_path)), {
+          fit: [180, 55],
+        });
+        doc.moveDown(0.2);
+      } catch {
+        doc.fontSize(9).fillColor("gray").text("(signaturbildet mangler på disk)");
+      }
+    }
     if (row.record.instructor) doc.fontSize(10).fillColor("gray").text(`Holdt av: ${row.record.instructor}`);
     if (row.record.expires_at) {
       const expired = row.status === "expired";
