@@ -63,8 +63,19 @@ authRouter.post("/register", (req, res) => {
 });
 
 authRouter.post("/login", loginLimiter, (req, res) => {
-  const { email, password } = req.body;
-  const user = db.prepare("SELECT * FROM users WHERE email = ?").get(email);
+  // Every write path stores the email lower-cased, but this lookup compared it byte for byte, so
+  // a phone that capitalises the first letter of a field — or a paste that carried a trailing
+  // space — failed with a plain "invalid_credentials" that looks exactly like a wrong password.
+  // Normalising here (and matching NOCASE, as the duplicate checks below already do) closes the
+  // gap from both ends, including for a row stored with an uppercase address before this existed.
+  const email = String(req.body?.email ?? "").trim().toLowerCase();
+  const password = req.body?.password;
+  // bcrypt.compareSync throws on a non-string, which turned a request with no password field at
+  // all into a 500. A missing password is simply not a valid credential; say so.
+  if (typeof password !== "string" || password === "") {
+    return res.status(401).json({ code: "invalid_credentials", error: "Invalid email or password" });
+  }
+  const user = db.prepare("SELECT * FROM users WHERE email = ? COLLATE NOCASE").get(email);
   // Always run a bcrypt compare, even for an unknown email — comparing against a fixed dummy
   // hash keeps the response time the same either way, so a timing difference can't be used to
   // enumerate which emails have accounts (an unknown email used to return near-instantly, since
