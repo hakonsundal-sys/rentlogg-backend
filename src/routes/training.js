@@ -118,6 +118,14 @@ function nowStamp() {
   return db.prepare("SELECT datetime('now') AS now").get().now;
 }
 
+// Read from the database, never from req.user: language is deliberately kept out of the JWT (see
+// the comment on POST /login), so req.user.language is always undefined. Reading it off the token
+// silently played every lesson in Norwegian — caught 2026-09-23 watching a Lithuanian account get
+// the Norwegian narration while the rest of her screen was in Lithuanian.
+function accountLanguage(userId) {
+  return db.prepare("SELECT language FROM users WHERE id = ?").get(userId)?.language || DEFAULT_LANGUAGE;
+}
+
 // --- Courses ---------------------------------------------------------------------------------
 
 function courseWithExtras(course, today) {
@@ -671,7 +679,9 @@ trainingRouter.get("/me/courses/:id/slides", requireAuth, requireRole("admin", "
   const { course, status, code, error } = getCourseScoped(req.params.id, req.user);
   if (error) return res.status(status).json({ code, error });
 
-  const wanted = normalizeLanguage(req.query.language) || req.user.language || DEFAULT_LANGUAGE;
+  // The language she is reading the app in right now wins over the one stored on her account — she
+  // may have picked a different one from the header, and that is the language she can actually read.
+  const wanted = normalizeLanguage(req.query.language) || accountLanguage(req.user.id);
   const available = db
     .prepare("SELECT DISTINCT language FROM training_slides WHERE course_id = ? ORDER BY language")
     .all(course.id)
@@ -712,7 +722,7 @@ trainingRouter.post("/me/courses/:id/start", requireAuth, requireRole("admin", "
   // slide in the meantime.
   const countSlides = db.prepare("SELECT COUNT(*) AS n FROM training_slides WHERE course_id = ? AND language = ?");
   const slidesTotal =
-    countSlides.get(course.id, req.user.language || DEFAULT_LANGUAGE).n ||
+    countSlides.get(course.id, normalizeLanguage(req.body?.language) || accountLanguage(req.user.id)).n ||
     countSlides.get(course.id, DEFAULT_LANGUAGE).n;
 
   const info = db

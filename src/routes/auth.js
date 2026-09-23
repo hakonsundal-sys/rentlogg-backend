@@ -419,6 +419,14 @@ authRouter.delete("/users/:id", requireAuth, requireRole("admin", "super_admin")
     romvisitter: db.prepare("SELECT COUNT(*) AS n FROM room_runs WHERE cleaner_id = ?").get(req.params.id).n,
     avvik: db.prepare("SELECT COUNT(*) AS n FROM deviations WHERE reported_by = ?").get(req.params.id).n,
     invitasjoner: db.prepare("SELECT COUNT(*) AS n FROM invitations WHERE invited_by = ?").get(req.params.id).n,
+    // Training they received, and training they registered for someone else — both are the same
+    // kind of documentation as the rows above. Without these two the DELETE below didn't just lose
+    // the history, it failed outright: training_records references users(id) and foreign keys are
+    // on, so a trained employee came back as a bare 500 instead of "har historikk, deaktiver i
+    // stedet". Assignments are deliberately absent — a course someone was merely told to take is a
+    // plan, not history, and is cleared below like the scheduling links are.
+    opplæring: db.prepare("SELECT COUNT(*) AS n FROM training_records WHERE user_id = ?").get(req.params.id).n,
+    "registrerte opplæringer": db.prepare("SELECT COUNT(*) AS n FROM training_records WHERE registered_by = ?").get(req.params.id).n,
   };
   const withHistory = Object.entries(counts).filter(([, n]) => n > 0);
   if (withHistory.length > 0) {
@@ -430,6 +438,16 @@ authRouter.delete("/users/:id", requireAuth, requireRole("admin", "super_admin")
   const deleteUser = db.transaction((id) => {
     db.prepare("UPDATE site_schedules SET assigned_cleaner_id = NULL WHERE assigned_cleaner_id = ?").run(id);
     db.prepare("UPDATE room_schedules SET assigned_cleaner_id = NULL WHERE assigned_cleaner_id = ?").run(id);
+    // Same treatment as the two above, for the same reason: these are plans pointing at a person,
+    // not a record of anything that happened, and they hold a foreign key that would otherwise
+    // block the delete.
+    db.prepare("DELETE FROM training_assignments WHERE user_id = ?").run(id);
+    db.prepare("UPDATE training_assignments SET assigned_by = NULL WHERE assigned_by = ?").run(id);
+    // Who first wrote a course down, and who switched a module on, are notes about the row rather
+    // than about the person — the course and the module outlive whoever set them up. Left alone
+    // they are foreign keys too, and they blocked the delete just as silently.
+    db.prepare("UPDATE training_courses SET created_by = NULL WHERE created_by = ?").run(id);
+    db.prepare("UPDATE company_modules SET enabled_by = NULL WHERE enabled_by = ?").run(id);
     db.prepare("DELETE FROM users WHERE id = ?").run(id);
   });
   deleteUser(req.params.id);

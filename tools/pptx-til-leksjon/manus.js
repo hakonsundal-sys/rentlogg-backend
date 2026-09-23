@@ -72,6 +72,42 @@ const NARRATION_TOOL = {
   },
 };
 
+// A crude tell per language, and deliberately crude: the job is only to catch a slide that came
+// back in the wrong language altogether, not to grade the translation. Over two to four sentences
+// a Lithuanian or Latvian text without a single one of its own letters is vanishingly unlikely,
+// Russian is unmistakable, and English is caught by the Norwegian letters it must not contain. A
+// false warning costs a human ten seconds of reading; a miss puts a lesson in front of someone in
+// a language they do not read, which is the failure this whole module exists to prevent.
+const LANGUAGE_TELLS = {
+  lt: (text) => /[ąčęėįšųūž]/i.test(text),
+  lv: (text) => /[āčēģīķļņšūž]/i.test(text),
+  ru: (text) => /[Ѐ-ӿ]/.test(text),
+  en: (text) => !/[æøå]/i.test(text),
+};
+
+function looksLike(language, text) {
+  if (!text) return false;
+  const tell = LANGUAGE_TELLS[language];
+  return tell ? tell(text) : true;
+}
+
+// The other half of the check, and the one that actually caught the real case: a slide can satisfy
+// the tell above and still be half Norwegian, because the model translated the last sentence and
+// left the first two alone. A run of five consecutive Norwegian words surviving into the
+// translation is not something a place name or a product name produces — it is the source text
+// still sitting there.
+const RUN_LENGTH = 5;
+
+function keepsNorwegianRun(norwegianText, translated) {
+  const words = (s) => s.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, " ").split(/\s+/).filter(Boolean);
+  const source = words(norwegianText);
+  const haystack = ` ${words(translated).join(" ")} `;
+  for (let i = 0; i + RUN_LENGTH <= source.length; i++) {
+    if (haystack.includes(` ${source.slice(i, i + RUN_LENGTH).join(" ")} `)) return true;
+  }
+  return false;
+}
+
 // One call, for a chosen set of slides. `only` narrows it to the slides that need redoing, so the
 // untranslated-slide retry below doesn't pay for the nine that came back fine.
 async function askModel(language, slides) {
@@ -117,20 +153,29 @@ async function writeNarration(language) {
 
   const byIndex = await askModel(language, input);
 
-  // Caught on a real deck 2026-09-23: one slide in ten came back verbatim in Norwegian while the
-  // other nine translated fine. Nothing downstream would have noticed — it would simply have been
-  // read aloud in the wrong language to someone who does not speak it. Cheap to detect, so detect
-  // it: retry just the slides that did not move, then say so plainly if they still have not.
+  // Caught on a real deck 2026-09-23: one slide in ten came back in Norwegian while the other nine
+  // translated fine. Nothing downstream would have noticed — it would simply have been read aloud
+  // in a language the person does not speak. The first version of this check compared the output to
+  // the Norwegian input and only caught a verbatim copy; the retry then handed back a *reworded*
+  // Norwegian sentence, which sailed straight through. So the check looks at the text itself
+  // instead of at whether it changed.
   if (!isSource) {
-    const untouched = input.filter((s) => byIndex.get(s.index) === s.text);
-    if (untouched.length > 0) {
-      process.stdout.write(`(${untouched.length} uoversatt, prøver igjen) `);
-      const retry = await askModel(language, untouched);
+    const suspect = (slide) => {
+      const text = byIndex.get(slide.index) || "";
+      return !looksLike(language, text) || keepsNorwegianRun(slide.text, text);
+    };
+    let toRedo = input.filter(suspect);
+    if (toRedo.length > 0) {
+      process.stdout.write(`(${toRedo.length} ikke oversatt, prøver igjen) `);
+      const retry = await askModel(language, toRedo);
       for (const [index, text] of retry) byIndex.set(index, text);
+      toRedo = input.filter(suspect);
     }
-    const stillUntouched = input.filter((s) => byIndex.get(s.index) === s.text).map((s) => s.index);
-    if (stillUntouched.length > 0) {
-      console.warn(`\n  ⚠ lysbilde ${stillUntouched.join(", ")} kom tilbake på norsk — oversett for hånd.`);
+    if (toRedo.length > 0) {
+      console.warn(
+        `\n  ⚠ lysbilde ${toRedo.map((s) => s.index).join(", ")} ser ikke ut til å være på ` +
+        `${LANGUAGE_NAMES[language]} — les dem og oversett for hånd.`
+      );
     }
   }
 
