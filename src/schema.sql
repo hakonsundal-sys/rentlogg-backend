@@ -263,6 +263,8 @@ CREATE TABLE IF NOT EXISTS training_courses (
   title TEXT NOT NULL,
   description TEXT,
   -- 'lesson'    slides + narration played in the app
+  -- 'video'     a YouTube video played in the app (see video_url) — costs no disk here, but is one
+  --             language per video and needs real signal, unlike slides
   -- 'document'  a routine/PDF the person confirms having read
   -- 'classroom' physical/practical training, registered by an admin afterwards
   -- 'external'  an outside course (e.g. Hygiene Academy), documented by its certificate
@@ -274,6 +276,7 @@ CREATE TABLE IF NOT EXISTS training_courses (
   -- be completed. Adds nothing legally that the name and timestamp don't already carry — what it
   -- adds is that the documentation reads as a signature to a customer or an inspector looking at it.
   requires_drawn_signature INTEGER NOT NULL DEFAULT 0,
+  video_url TEXT, -- kind = video: the YouTube link. Unlisted works; private cannot be embedded.
   -- Bumped whenever the lesson's slides are replaced. A record carries the version it was signed
   -- on, so "signed, but the course has changed since" is visible without discarding the old signature.
   version INTEGER NOT NULL DEFAULT 1,
@@ -335,6 +338,7 @@ CREATE TABLE IF NOT EXISTS training_records (
   evidence_path TEXT,            -- an external course certificate, uploaded as proof
   evidence_name TEXT,
   signature_path TEXT,           -- the drawn signature, when the course asks for one
+  video_completed_at TEXT,       -- kind = video: when the player reported the video had ended
 
   expires_at TEXT,               -- computed from completed_at + course.validity_months at save time
   note TEXT,

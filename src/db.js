@@ -245,3 +245,8 @@ ensureColumn("sites", "time_fixed_minutes", "time_fixed_minutes INTEGER");
 // course that already exists keeps asking only for a name.
 ensureColumn("training_courses", "requires_drawn_signature", "requires_drawn_signature INTEGER NOT NULL DEFAULT 0");
 ensureColumn("training_records", "signature_path", "signature_path TEXT");
+// A course can be a YouTube video instead of slides — the link on the course, and on the record the
+// moment the player said it reached the end. Same reason as the two above: both tables exist
+// already, so schema.sql alone would never add these.
+ensureColumn("training_courses", "video_url", "video_url TEXT");
+ensureColumn("training_records", "video_completed_at", "video_completed_at TEXT");

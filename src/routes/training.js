@@ -22,9 +22,10 @@ import { DEFAULT_LANGUAGE, normalizeLanguage } from "../utils/languages.js";
 // on what beyond the certificate an admin chooses to send them.
 export const trainingRouter = Router();
 
-const COURSE_KINDS = ["lesson", "document", "classroom", "external"];
+const COURSE_KINDS = ["lesson", "video", "document", "classroom", "external"];
 const COURSE_KIND_LABELS = {
   lesson: "Leksjon i appen",
+  video: "Video",
   document: "Dokument som skal leses",
   classroom: "Fysisk opplæring",
   external: "Eksternt kurs",
@@ -128,6 +129,16 @@ function computeExpiry(completedAt, validityMonths) {
   return db.prepare("SELECT datetime(?, ?) AS expires").get(completedAt, `+${Number(validityMonths)} months`).expires;
 }
 
+// Accepts the three shapes a YouTube link actually arrives in and hands back the 11-character id.
+// Validated when the course is saved rather than when a cleaner opens it: a typo in a link should
+// be an error for the person pasting it, not a blank screen for someone mid-shift.
+export function youtubeIdFrom(url) {
+  const match = String(url || "").match(
+    /(?:youtube\.com\/(?:watch\?(?:.*&)?v=|embed\/|shorts\/)|youtu\.be\/)([A-Za-z0-9_-]{11})/
+  );
+  return match ? match[1] : null;
+}
+
 function nowStamp() {
   return db.prepare("SELECT datetime('now') AS now").get().now;
 }
@@ -198,11 +209,25 @@ function readCourseFields(body) {
   if (validity !== null && (!Number.isInteger(validity) || validity < 1 || validity > 120)) {
     return { error: { code: "invalid_validity", error: "Gyldighet må være mellom 1 og 120 måneder." } };
   }
+
+  const videoUrl = String(body.video_url || "").trim() || null;
+  if (kind === "video" && !youtubeIdFrom(videoUrl)) {
+    return {
+      error: {
+        code: "invalid_video_url",
+        error: "Lim inn en YouTube-lenke. Videoen må være ulistet eller offentlig — en privat video kan ikke spilles av i appen.",
+      },
+    };
+  }
+
   return {
     fields: {
       title,
       description: String(body.description || "").trim() || null,
       kind,
+      // Kept even when the kind is changed away from video, so switching a course to slides and
+      // back doesn't lose the link someone already pasted.
+      video_url: videoUrl,
       validity_months: validity,
       requires_signature: body.requires_signature === false || body.requires_signature === 0 ? 0 : 1,
       // Opposite default to the one above: asking for a drawn signature is the exception, so it is
@@ -219,11 +244,11 @@ trainingRouter.post("/courses", requireAuth, requireRole("admin"), (req, res) =>
 
   const info = db
     .prepare(
-      `INSERT INTO training_courses (company_id, title, description, kind, validity_months, requires_signature, requires_drawn_signature, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO training_courses (company_id, title, description, kind, video_url, validity_months, requires_signature, requires_drawn_signature, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
-      req.user.company_id, fields.title, fields.description, fields.kind,
+      req.user.company_id, fields.title, fields.description, fields.kind, fields.video_url,
       fields.validity_months, fields.requires_signature, fields.requires_drawn_signature, req.user.id
     );
 
@@ -245,8 +270,8 @@ trainingRouter.patch("/courses/:id", requireAuth, requireRole("admin"), (req, re
   if (fieldError) return res.status(400).json(fieldError);
 
   db.prepare(
-    "UPDATE training_courses SET title = ?, description = ?, kind = ?, validity_months = ?, requires_signature = ?, requires_drawn_signature = ? WHERE id = ?"
-  ).run(fields.title, fields.description, fields.kind, fields.validity_months, fields.requires_signature, fields.requires_drawn_signature, course.id);
+    "UPDATE training_courses SET title = ?, description = ?, kind = ?, video_url = ?, validity_months = ?, requires_signature = ?, requires_drawn_signature = ? WHERE id = ?"
+  ).run(fields.title, fields.description, fields.kind, fields.video_url, fields.validity_months, fields.requires_signature, fields.requires_drawn_signature, course.id);
 
   res.json(courseWithExtras(db.prepare("SELECT * FROM training_courses WHERE id = ?").get(course.id), todayInOslo()));
 });
@@ -665,6 +690,7 @@ function trainingForUser(userId, companyId, today) {
         validity_months: course.validity_months,
         requires_signature: !!course.requires_signature,
         requires_drawn_signature: !!course.requires_drawn_signature,
+        video_url: course.video_url,
         assigned: !!assignment,
         assignment_id: assignment?.id ?? null,
         due_at: assignment?.due_at ?? null,
@@ -764,6 +790,14 @@ trainingRouter.patch("/me/records/:id/progress", requireAuth, requireRole("admin
   if (record.user_id !== req.user.id) return res.status(403).json({ code: "not_allowed", error: "Not allowed" });
   if (record.completed_at) return res.status(409).json({ code: "already_completed", error: "Kurset er allerede fullført." });
 
+  // A video course reports one thing and one thing only: that the player said it reached the end.
+  // Stamped once and never cleared — watching it again should not un-watch it.
+  if (req.body.video_completed === true) {
+    db.prepare("UPDATE training_records SET video_completed_at = COALESCE(video_completed_at, ?) WHERE id = ?")
+      .run(nowStamp(), record.id);
+    return res.json(db.prepare("SELECT * FROM training_records WHERE id = ?").get(record.id));
+  }
+
   const lastIndex = Number(req.body.last_slide_index);
   const seen = Number(req.body.slides_seen);
   if (!Number.isInteger(lastIndex) || lastIndex < 0) {
@@ -805,6 +839,11 @@ trainingRouter.post(
   // would make that claim falsely, so the gate lives here on the server, not only in the player.
   if (record.kind === "lesson" && record.slides_total > 0 && (record.slides_seen || 0) < record.slides_total) {
     return refuse(409, { code: "lesson_not_finished", error: "Du må se hele leksjonen før du kan signere." });
+  }
+  // Weaker evidence than the slide count — the scrubber can be dragged — but it is what a player
+  // can honestly report, and it still means the video ran to its end on her device.
+  if (record.kind === "video" && !record.video_completed_at) {
+    return refuse(409, { code: "video_not_finished", error: "Du må se hele videoen før du kan signere." });
   }
 
   const signedInitials = String(req.body.signed_initials || "").trim();
