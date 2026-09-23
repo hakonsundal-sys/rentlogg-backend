@@ -896,7 +896,10 @@ function drawCertificatePage(doc, { company, person, department, row, today }) {
     row.record.expires_at
       ? [row.status === "expired" ? "Utløpt" : "Gyldig til", formatNorwegianDate(row.record.expires_at)]
       : ["Gyldighet", "Uten utløpsdato"],
-    row.record.slides_total ? ["Leksjon", `${row.record.slides_seen || 0} av ${row.record.slides_total} lysbilder sett`] : null,
+    // Slide count deliberately left off: it is the evidence behind the claim, not part of the
+    // claim. On a certificate handed to a customer or an inspector, "saw 6 of 6 slides" reads as a
+    // receipt from an e-learning system rather than a qualification. It stays visible on the
+    // person's card in the admin view, which is where someone would go to check it.
     row.record.evidence_name ? ["Vedlagt bevis", row.record.evidence_name] : null,
   ].filter(Boolean);
 
