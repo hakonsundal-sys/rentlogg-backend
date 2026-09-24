@@ -370,6 +370,10 @@ siteRoomsRouter.post("/complete-all-due", requireAuth, requireRole("cleaner", "a
   const isCustomer = req.user.role === "customer";
   const dueIncomplete = getRoomsForSite(req.params.siteId, today)
     .filter((r) => r.dueToday && r.status !== "completed" && (isCustomer ? r.responsible === "customer" : r.responsible !== "customer"))
+    // A gated room already sent to the customer is not "incomplete work" this sweep should touch
+    // again — pressing the button twice would otherwise reset ready_for_approval_at and overwrite
+    // whoever originally signed it off with whoever pressed last.
+    .filter((r) => r.status !== "awaiting_approval")
     .filter((r) => !only || only.has(r.id));
 
   // A room holding a flervalg task nobody has answered is deliberately left open rather than
@@ -380,6 +384,7 @@ siteRoomsRouter.post("/complete-all-due", requireAuth, requireRole("cleaner", "a
   const completeAll = db.transaction((rooms) => {
     const completed = [];
     const skipped = [];
+    const sentForApproval = [];
     for (const room of rooms) {
       const run = findOrCreateTodayRoomRun(room.id, req.user.id);
       markAnswerableItemsDoneStmt.run(run.id);
@@ -390,10 +395,25 @@ siteRoomsRouter.post("/complete-all-due", requireAuth, requireRole("cleaner", "a
         skipped.push(room.name);
         continue;
       }
-      db.prepare("UPDATE room_runs SET completed_at = datetime('now'), signed_initials = ? WHERE id = ?").run(initials, run.id);
+      recordParticipant(run.id, req.user);
+      // A requires_approval room must go to the customer here exactly as it does when the cleaner
+      // finishes it one room at a time (POST /rooms/runs/:runId/complete). Until now this wrote
+      // completed_at directly, with no check at all — so the single most-used button in the app
+      // walked straight through the approval gate, and on avd. Midt rooms were being marked done
+      // without the customer ever seeing them. Shipped 2026-09-17, found 2026-09-24.
+      if (room.requires_approval) {
+        db.prepare(
+          "UPDATE room_runs SET ready_for_approval_at = datetime('now'), signed_initials = ?, signed_by = ? WHERE id = ?"
+        ).run(initials, req.user.id, run.id);
+        sentForApproval.push(room.name);
+        continue;
+      }
+      db.prepare(
+        "UPDATE room_runs SET completed_at = datetime('now'), signed_initials = ?, signed_by = ? WHERE id = ?"
+      ).run(initials, req.user.id, run.id);
       completed.push(room.id);
     }
-    return { completedCount: completed.length, skippedRooms: skipped };
+    return { completedCount: completed.length, skippedRooms: skipped, sentForApprovalRooms: sentForApproval };
   });
 
   res.json(completeAll(dueIncomplete));
