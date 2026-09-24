@@ -2,6 +2,9 @@ import { db } from "../db.js";
 import { isModuleEnabled } from "../modules.js";
 import { isWithinSiteRadius } from "../utils/geo.js";
 import { todayInOslo, toOsloDateStr } from "./schedule.js";
+// Imported lazily-shaped rather than at the top of the file would be cleaner, but these two are
+// leaves: timeOrders.js imports only nowStamp from here, so the cycle resolves.
+import { logEntryEvent, orderIdForSite } from "./timeOrders.js";
 
 // Timeregistrering ("Timeklokke"): everything that reads or writes a time_entry, in one place, so
 // the QR check-in in routes/sites.js can start a shift without knowing any of the rules.
@@ -89,9 +92,12 @@ export function statusOf(entry) {
 
 const entryRowStmt = db.prepare(
   `SELECT t.*, s.name AS site_name, u.name AS user_name, sch.assigned_cleaner_id,
-          au.name AS assigned_cleaner_name
+          au.name AS assigned_cleaner_name, u.employee_number, o.name AS order_name,
+          o.number AS order_number, o.kind AS order_kind, p.name AS project_name
    FROM time_entries t
-   JOIN sites s ON s.id = t.site_id
+   LEFT JOIN sites s ON s.id = t.site_id
+   LEFT JOIN orders o ON o.id = t.order_id
+   LEFT JOIN projects p ON p.id = o.project_id
    JOIN users u ON u.id = t.user_id
    LEFT JOIN site_schedules sch
      ON sch.site_id = t.site_id
@@ -110,6 +116,12 @@ export function decorate(entry) {
     start_gps_verified: !!entry.start_gps_verified,
     end_gps_verified: !!entry.end_gps_verified,
     locked: !!entry.locked_at,
+    approved: !!entry.approved_at,
+    rejected: !!entry.rejected_at,
+    // Only a finished shift can be approved at all — there is nothing to confirm about hours that
+    // are still running, and approving one would freeze a driftsleder's signature to a number that
+    // is still moving.
+    approvable: !!entry.ended_at && !entry.locked_at,
     // "Planned vs actual" at the level of one row: was this person the one the weekly plan
     // expected at this site on this weekday? null when the site has no plan for that day at all.
     as_planned: entry.assigned_cleaner_id == null ? null : entry.assigned_cleaner_id === entry.user_id,
@@ -117,7 +129,8 @@ export function decorate(entry) {
 }
 
 export function getEntry(id) {
-  return decorate(entryRowStmt.get(id));
+  const entry = decorate(entryRowStmt.get(id));
+  return entry ? { ...entry, lines: getLines(entry.id) } : null;
 }
 
 // --- Stamping ----------------------------------------------------------------------------------
@@ -153,19 +166,28 @@ function closeDanglingEntries(userId, workDate, at) {
   for (const entry of open) {
     if (entry.work_date !== workDate) {
       markStale.run(entry.id);
+      logEntryEvent({
+        entryId: entry.id, companyId: entry.company_id, user: null, action: "auto_closed",
+        status: "missing_checkout", comment: "Sto åpen inn i en ny dag — mangler utstempling",
+      });
       continue;
     }
     const site = siteByIdStmt.get(entry.site_id);
     const billing = billingForSite(site);
     const actual = minutesBetween(entry.started_at, at);
     closeSameDay.run(at, actual, payableMinutes({ ...billing, actual_minutes: actual }), billing.billing_mode, billing.fixed_minutes, entry.id);
+    writeStampLine(db.prepare("SELECT * FROM time_entries WHERE id = ?").get(entry.id));
+    logEntryEvent({
+      entryId: entry.id, companyId: entry.company_id, user: null, action: "auto_closed", status: "auto_closed",
+      comment: "Avsluttet automatisk da hun stemplet inn et annet sted",
+    });
   }
 }
 
 const insertEntryStmt = db.prepare(
-  `INSERT INTO time_entries (company_id, site_id, user_id, work_date, started_at, source, run_id,
+  `INSERT INTO time_entries (company_id, site_id, order_id, user_id, work_date, started_at, source, run_id,
                              start_gps_verified, start_latitude, start_longitude)
-   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 );
 
 // Called from the QR check-in (routes/sites.js). Returns the entry, or null when the company
@@ -187,9 +209,13 @@ export function startEntryForCheckin({ site, user, latitude, longitude, runId })
   closeDanglingEntries(user.id, workDate, at);
 
   const info = insertEntryStmt.run(
-    site.company_id, site.id, user.id, workDate, at, "qr", runId || null,
+    site.company_id, site.id, orderIdForSite(site.id), user.id, workDate, at, "qr", runId || null,
     isWithinSiteRadius(site, latitude, longitude), latitude ?? null, longitude ?? null
   );
+  logEntryEvent({
+    entryId: info.lastInsertRowid, companyId: site.company_id, user,
+    action: "stamped_in", status: "open", comment: site.name,
+  });
   return getEntry(info.lastInsertRowid);
 }
 
@@ -211,6 +237,14 @@ export function stopEntry(entry, { latitude, longitude }) {
     at, actual, payableMinutes({ ...billing, actual_minutes: actual }), billing.billing_mode, billing.fixed_minutes,
     isWithinSiteRadius(site, latitude, longitude), latitude ?? null, longitude ?? null, entry.id
   );
+  // The shift now has a duration, so it can finally be written as a line on the company's default
+  // lønnsart — which is the form payroll reads it in.
+  const closed = db.prepare("SELECT * FROM time_entries WHERE id = ?").get(entry.id);
+  writeStampLine(closed);
+  logEntryEvent({
+    entryId: entry.id, companyId: entry.company_id, user: { id: entry.user_id, name: entry.user_name },
+    action: "stamped_out", status: "closed", comment: formatMinutes(closed.minutes),
+  });
   return getEntry(entry.id);
 }
 
@@ -218,7 +252,7 @@ export function stopEntry(entry, { latitude, longitude }) {
 
 // from/to are inclusive Oslo working days. user_id/site_id narrow further; the caller is
 // responsible for having already restricted user_id to somebody they're allowed to read.
-export function listEntries({ companyId, from, to, userId, siteId }) {
+export function listEntries({ companyId, from, to, userId, siteId, orderId, approval }) {
   const conditions = ["t.company_id = ?", "t.work_date >= ?", "t.work_date <= ?"];
   const params = [companyId, from, to];
   if (userId) {
@@ -229,12 +263,22 @@ export function listEntries({ companyId, from, to, userId, siteId }) {
     conditions.push("t.site_id = ?");
     params.push(siteId);
   }
+  if (orderId) {
+    conditions.push("t.order_id = ?");
+    params.push(orderId);
+  }
+  // "Godkjent"/"Venter", the filter a driftsleder works from: show me only what still needs me.
+  if (approval === "approved") conditions.push("t.approved_at IS NOT NULL");
+  if (approval === "pending") conditions.push("t.approved_at IS NULL");
   return db
     .prepare(
       `SELECT t.*, s.name AS site_name, u.name AS user_name, sch.assigned_cleaner_id,
-              au.name AS assigned_cleaner_name
+              au.name AS assigned_cleaner_name, u.employee_number, o.name AS order_name,
+              o.number AS order_number, o.kind AS order_kind, p.name AS project_name
        FROM time_entries t
-       JOIN sites s ON s.id = t.site_id
+       LEFT JOIN sites s ON s.id = t.site_id
+       LEFT JOIN orders o ON o.id = t.order_id
+       LEFT JOIN projects p ON p.id = o.project_id
        JOIN users u ON u.id = t.user_id
        LEFT JOIN site_schedules sch
          ON sch.site_id = t.site_id
@@ -244,7 +288,8 @@ export function listEntries({ companyId, from, to, userId, siteId }) {
        ORDER BY t.work_date DESC, t.started_at DESC`
     )
     .all(...params)
-    .map(decorate);
+    .map(decorate)
+    .map((entry) => ({ ...entry, lines: getLines(entry.id) }));
 }
 
 // --- Planned vs actual ---------------------------------------------------------------------------
@@ -286,7 +331,10 @@ function weekdayOf(dateStr) {
 // planned_minutes is the site's rammetimetall where one is set. A site paid by the clock has no
 // planned number to compare against — that column is simply blank for it rather than invented.
 export function computePlannedVsActual({ companyId, from, to, siteId, userId }) {
-  const entries = listEntries({ companyId, from, to, siteId, userId });
+  // Only shifts at a building take part. This report answers "did somebody turn up where the
+  // weekly plan said", and intern tid, kjøring and fravær have no building and no plan — including
+  // them would fill the list with rows permanently marked "ikke planlagt".
+  const entries = listEntries({ companyId, from, to, siteId, userId }).filter((e) => e.site_id != null);
   const entriesByKey = new Map();
   for (const entry of entries) {
     const key = `${entry.site_id}:${entry.work_date}`;
@@ -354,7 +402,7 @@ export function computePlannedVsActual({ companyId, from, to, siteId, userId }) 
     });
   }
 
-  rows.sort((a, b) => b.date.localeCompare(a.date) || a.site_name.localeCompare(b.site_name, "nb"));
+  rows.sort((a, b) => b.date.localeCompare(a.date) || (a.site_name || "").localeCompare(b.site_name || "", "nb"));
   return rows;
 }
 
@@ -366,9 +414,10 @@ export function summarizeByUser(entries) {
   for (const entry of entries) {
     if (!byUser.has(entry.user_id)) {
       byUser.set(entry.user_id, {
-        user_id: entry.user_id, user_name: entry.user_name,
+        user_id: entry.user_id, user_name: entry.user_name, employee_number: entry.employee_number,
         minutes: 0, actual_minutes: 0, entry_count: 0, open_count: 0, missing_count: 0,
-        locked_count: 0, site_ids: new Set(),
+        locked_count: 0, approved_count: 0, pending_count: 0, approvable_count: 0,
+        site_ids: new Set(), byType: new Map(),
       });
     }
     const row = byUser.get(entry.user_id);
@@ -378,11 +427,184 @@ export function summarizeByUser(entries) {
     if (entry.status === "open") row.open_count++;
     if (entry.status === "missing_checkout") row.missing_count++;
     if (entry.locked) row.locked_count++;
+    if (entry.approved) row.approved_count++;
+    else if (entry.approvable) row.approvable_count++;
+    if (!entry.approved) row.pending_count++;
     row.site_ids.add(entry.site_id);
+    // Broken down by lønnsart, because "7t 30m" is not what goes to payroll — "6t ordinær +
+    // 1t 30m overtid 50 %" is, and that is the number a driftsleder is actually approving.
+    for (const line of entry.lines || []) {
+      const key = line.type_code || line.type_name || "—";
+      if (!row.byType.has(key)) {
+        row.byType.set(key, { code: line.type_code, name: line.type_name, kind: line.kind, minutes: 0, quantity: 0 });
+      }
+      const bucket = row.byType.get(key);
+      if (line.kind === "supplement") bucket.quantity += line.quantity || 0;
+      else bucket.minutes += line.minutes || 0;
+    }
   }
   return [...byUser.values()]
-    .map(({ site_ids, ...row }) => ({ ...row, site_count: site_ids.size }))
+    .map(({ site_ids, byType, ...row }) => ({ ...row, site_count: site_ids.size, types: [...byType.values()] }))
     .sort((a, b) => a.user_name.localeCompare(b.user_name, "nb"));
+}
+
+// --- Lønnsarter (time_types) ---------------------------------------------------------------------
+
+// OKV's own list, read straight off the Mobile Worker they use today — the codes matter more than
+// the names, because `code` is what Unimicro reads on import. Seeded per company the first time the
+// module is used rather than by a migration, so a company that never buys Timeregistrering never
+// gets rows it has no use for. Editable afterwards from "Timearter"; this is only the starting set.
+const DEFAULT_TIME_TYPES = [
+  { kind: "hours", code: "T.ORDINÆR TID", name: "Ordinær tid", is_default: 1, counts_as_work: 1, category: "arbeid" },
+  { kind: "hours", code: "T.EKSTRA ARBEID", name: "Ekstra arbeid", counts_as_work: 1, category: "arbeid" },
+  // Hours on the sheet, but not worked time — without counts_as_work = 0 the day silently pays for
+  // the lunch break.
+  { kind: "hours", code: "LUNSJ", name: "Lunsj", counts_as_work: 0, category: "arbeid" },
+  { kind: "hours", code: "T.OVERTID 50 %", name: "Overtid 50 %", counts_as_work: 1, category: "arbeid" },
+  { kind: "hours", code: "T.OVERTID 50 % EKSTRAARBEID", name: "Overtid 50 % ekstraarbeid", counts_as_work: 1, category: "arbeid" },
+  { kind: "hours", code: "T.OVERTID 100%", name: "Overtid 100 %", counts_as_work: 1, category: "arbeid" },
+  { kind: "hours", code: "T.OVERTID 100 % EKSTRAARBEID", name: "Overtid 100 % ekstraarbeid", counts_as_work: 1, category: "arbeid" },
+  // Fravær counts toward the total, unlike lunch and tillegg. Measured against OKV's own Mobile
+  // Worker 2026-09-24: on their internal project, 165 t sick + 61,5 t ordinary + 60 t holiday adds
+  // up to exactly the 286,5 t their "Sum arbeidede timer" column shows, while teamleder-, formann-
+  // and nattillegg stay outside it.
+  //
+  // The column is a TIME total, not a payment one — T.SYK OVER 16 DAGER counts here even though the
+  // employer stops paying after day 16 (that is what the separate code exists to mark). Who pays is
+  // decided in Unimicro, off the codes; this number only says how many hours the month contained.
+  { kind: "hours", code: "T.FERIE", name: "Ferie", counts_as_work: 1, category: "fravær" },
+  { kind: "hours", code: "T.SYKEFRAVÆR", name: "Sykefravær", counts_as_work: 1, category: "fravær" },
+  { kind: "hours", code: "T.SYK OVER 16 DAGER", name: "Syk over 16 dager", counts_as_work: 1, category: "fravær" },
+  { kind: "hours", code: "T.HELLIGDAGSGODTGJØRELSE", name: "Helligdagsgodtgjørelse", counts_as_work: 1, category: "fravær" },
+  { kind: "supplement", code: "T.TILLEGG TEAMLEDER", name: "Tillegg teamleder", category: "tillegg" },
+  { kind: "supplement", code: "Rapid-Tillegg", name: "Rapid-tillegg", category: "tillegg" },
+  { kind: "supplement", code: "T.NATTILLEGG", name: "Nattillegg", category: "tillegg" },
+  { kind: "supplement", code: "T.TILLEGG FORMANN", name: "Tillegg formann", category: "tillegg" },
+];
+
+const countTypesStmt = db.prepare("SELECT COUNT(*) AS n FROM time_types WHERE company_id = ?");
+const insertTypeStmt = db.prepare(
+  `INSERT INTO time_types (company_id, kind, code, name, is_default, counts_as_work, category, sort_order)
+   VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+);
+
+// Idempotent by design: it only ever fires for a company with no arts at all, so an admin who
+// deliberately deletes one never has it quietly reappear on the next request.
+export function seedDefaultTimeTypes(companyId) {
+  if (!companyId || countTypesStmt.get(companyId).n > 0) return;
+  db.transaction(() => {
+    DEFAULT_TIME_TYPES.forEach((t, i) => {
+      insertTypeStmt.run(companyId, t.kind, t.code, t.name, t.is_default ? 1 : 0, t.counts_as_work ? 1 : 0, t.category ?? null, i);
+    });
+  })();
+}
+
+const countCategoryStmt = db.prepare("SELECT COUNT(*) AS n FROM time_types WHERE company_id = ? AND category = ?");
+
+export function backfillTimeTypeCategories(companyId) {
+  if (!companyId) return;
+  // Categories first: they were added after the arts themselves, so an existing row has none and
+  // would sort as "uncategorised" in every grouping.
+  const setCategory = db.prepare("UPDATE time_types SET category = ? WHERE company_id = ? AND code = ? AND category IS NULL");
+  for (const t of DEFAULT_TIME_TYPES) if (t.category) setCategory.run(t.category, companyId, t.code);
+  db.prepare("UPDATE time_types SET category = 'tillegg' WHERE company_id = ? AND kind = 'supplement' AND category IS NULL").run(companyId);
+  db.prepare("UPDATE time_types SET category = 'arbeid' WHERE company_id = ? AND kind = 'hours' AND category IS NULL").run(companyId);
+
+  if (countCategoryStmt.get(companyId, "fravær").n > 0) return;
+  const sortOrder = db.prepare("SELECT COALESCE(MAX(sort_order), 0) AS n FROM time_types WHERE company_id = ?").get(companyId).n;
+  db.transaction(() => {
+    DEFAULT_TIME_TYPES.filter((t) => t.category === "fravær").forEach((t, i) => {
+      insertTypeStmt.run(companyId, t.kind, t.code, t.name, 0, t.counts_as_work ? 1 : 0, t.category, sortOrder + i + 1);
+    });
+  })();
+}
+
+export function listTimeTypes(companyId, { includeInactive = false } = {}) {
+  seedDefaultTimeTypes(companyId);
+  backfillTimeTypeCategories(companyId);
+  return db
+    .prepare(
+      `SELECT * FROM time_types WHERE company_id = ?${includeInactive ? "" : " AND active = 1"}
+       ORDER BY kind, sort_order, id`
+    )
+    .all(companyId)
+    .map((t) => ({ ...t, is_default: !!t.is_default, counts_as_work: !!t.counts_as_work, active: !!t.active }));
+}
+
+// The art a QR stamping becomes. Falls back to the first active hours art, and then to null — a
+// company that has deleted every art still gets working stampings, just untyped ones, rather than a
+// crash on the one code path a cleaner depends on every morning.
+export function defaultHoursType(companyId) {
+  seedDefaultTimeTypes(companyId);
+  return (
+    db.prepare("SELECT * FROM time_types WHERE company_id = ? AND kind = 'hours' AND active = 1 AND is_default = 1").get(companyId) ||
+    db.prepare("SELECT * FROM time_types WHERE company_id = ? AND kind = 'hours' AND active = 1 ORDER BY sort_order, id").get(companyId) ||
+    null
+  );
+}
+
+// --- Linjer (time_entry_lines) -------------------------------------------------------------------
+
+const linesForEntryStmt = db.prepare("SELECT * FROM time_entry_lines WHERE entry_id = ? ORDER BY kind, sort_order, id");
+
+export function getLines(entryId) {
+  return linesForEntryStmt.all(entryId).map((l) => ({ ...l, counts_as_work: !!l.counts_as_work }));
+}
+
+const insertLineStmt = db.prepare(
+  `INSERT INTO time_entry_lines (entry_id, kind, time_type_id, type_code, type_name, counts_as_work,
+                                 start_time, end_time, minutes, quantity, description, sort_order)
+   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+);
+const deleteLinesStmt = db.prepare("DELETE FROM time_entry_lines WHERE entry_id = ?");
+
+// The one line a QR stamping produces: the whole shift, on the company's default art. Written at
+// stamp-out rather than stamp-in, because until she stamps out there is no duration to put on it.
+export function writeStampLine(entry) {
+  const type = defaultHoursType(entry.company_id);
+  deleteLinesStmt.run(entry.id);
+  if (entry.minutes == null) return;
+  insertLineStmt.run(
+    entry.id, "hours", type?.id ?? null, type?.code ?? null, type?.name ?? null, 1,
+    osloTimeOf(entry.started_at) || null, osloTimeOf(entry.ended_at) || null,
+    entry.minutes, null, null, 0
+  );
+}
+
+// Replaces an entry's lines wholesale — the admin form submits the full set every time, which is
+// far easier to reason about than diffing rows, and these are at most a handful per shift.
+// Returns the payable total: the sum of the hours lines that count as work. Lunch is stored,
+// listed and exported, but never paid.
+export function replaceLines(entry, lines, companyId) {
+  const byId = new Map(listTimeTypes(companyId, { includeInactive: true }).map((t) => [t.id, t]));
+  deleteLinesStmt.run(entry.id);
+  let workedMinutes = 0;
+  lines.forEach((line, i) => {
+    const type = byId.get(Number(line.time_type_id)) || null;
+    const kind = type?.kind === "supplement" ? "supplement" : "hours";
+    const countsAsWork = kind === "hours" && (type ? type.counts_as_work : 1) ? 1 : 0;
+    const minutes = kind === "hours" ? Math.round(Number(line.minutes) || 0) : null;
+    const quantity = kind === "supplement" ? Number(line.quantity) || 0 : null;
+    if (countsAsWork) workedMinutes += minutes;
+    insertLineStmt.run(
+      entry.id, kind, type?.id ?? null, type?.code ?? null, type?.name ?? null, countsAsWork,
+      kind === "hours" ? line.start_time || null : null,
+      kind === "hours" ? line.end_time || null : null,
+      minutes, quantity, (line.description || "").trim() || null, i
+    );
+  });
+  return workedMinutes;
+}
+
+// "16:00"–"18:30" as a duration. A line ending before it starts is treated as crossing midnight,
+// which is a real night shift here, not an error — unlike the whole-entry check in validateInterval,
+// a single line carries no date of its own to tell the two apart.
+export function lineMinutes(startTime, endTime) {
+  if (!/^\d{2}:\d{2}$/.test(startTime || "") || !/^\d{2}:\d{2}$/.test(endTime || "")) return null;
+  const [sh, sm] = startTime.split(":").map(Number);
+  const [eh, em] = endTime.split(":").map(Number);
+  const diff = eh * 60 + em - (sh * 60 + sm);
+  return diff < 0 ? diff + 24 * 60 : diff;
 }
 
 // --- Validation ----------------------------------------------------------------------------------
@@ -436,4 +658,74 @@ export function validateInterval(startedAt, endedAt) {
   if (minutes < 0) return { code: "end_before_start", error: "Utstempling kan ikke være før innstempling." };
   if (minutes > MINUTES_PER_DAY) return { code: "interval_too_long", error: "En stempling kan ikke vare mer enn ett døgn." };
   return null;
+}
+
+// Every stamping that closed before lønnsarter existed carries no line, and would therefore be
+// missing from the line-level payroll export even though it is plainly on the screen. Backfilled
+// on demand rather than in a boot migration, because it needs the company's default art — which is
+// itself seeded on first use, not at boot. Cheap and self-terminating: once a company's old rows
+// have lines, the SELECT finds nothing and this is a single indexed lookup per listing.
+const entriesMissingLinesStmt = db.prepare(
+  `SELECT t.* FROM time_entries t
+   WHERE t.company_id = ? AND t.ended_at IS NOT NULL AND t.minutes IS NOT NULL
+     AND NOT EXISTS (SELECT 1 FROM time_entry_lines l WHERE l.entry_id = t.id)`
+);
+
+export function backfillMissingLines(companyId) {
+  // Stampings made before orders existed have a site but no order, and would show a blank
+  // Prosjekt/Ordre in the very export those columns were added for. Filed under whatever order
+  // their site now belongs to — the same order a stamping there would get today.
+  db.prepare(
+    `UPDATE time_entries SET order_id = (SELECT s.order_id FROM sites s WHERE s.id = time_entries.site_id)
+     WHERE company_id = ? AND order_id IS NULL AND site_id IS NOT NULL`
+  ).run(companyId);
+
+  const missing = entriesMissingLinesStmt.all(companyId);
+  if (missing.length === 0) return 0;
+  db.transaction(() => {
+    for (const entry of missing) writeStampLine(entry);
+  })();
+  return missing.length;
+}
+
+// --- Overlapp ------------------------------------------------------------------------------------
+
+// Nobody is two places at once, so two of the same person's shifts covering the same clock time is
+// always a mistake — and the expensive kind, because both go to payroll and the hour is paid twice.
+// Mobile Worker only *lists* these after the fact (their own data has live examples); catching it at
+// the point of saving is strictly better, since whoever is typing is the one who knows which of the
+// two is right.
+//
+// A shift that is genuinely running occupies [started_at, now) — the same assumption the rest of the
+// module makes — so a second registration cannot slide underneath it.
+//
+// A shift left open into a later day (auto_closed_reason = 'stale') is deliberately NOT treated that
+// way. It has no end because nobody knows when she went home; reading that as "occupied until now"
+// made one forgotten stamp-out block every registration for the rest of the month. It is a hole in
+// the record, already flagged for a human to close, not a claim on the clock.
+const overlapStmt = db.prepare(
+  `SELECT t.id, t.work_date, t.started_at, t.ended_at, s.name AS site_name, o.name AS order_name
+   FROM time_entries t
+   LEFT JOIN sites s ON s.id = t.site_id
+   LEFT JOIN orders o ON o.id = t.order_id
+   WHERE t.user_id = ?
+     AND t.id IS NOT ?
+     AND NOT (t.ended_at IS NULL AND t.auto_closed_reason IS NOT NULL)
+     AND t.started_at < ?
+     AND COALESCE(t.ended_at, datetime('now')) > ?
+   ORDER BY t.started_at
+   LIMIT 1`
+);
+
+export function findOverlap({ userId, startedAt, endedAt, excludeEntryId = null }) {
+  if (!userId || !startedAt) return null;
+  return overlapStmt.get(userId, excludeEntryId, endedAt || nowStamp(), startedAt) || null;
+}
+
+// The sentence somebody reads when their save is refused. Naming the shift it collides with is the
+// whole point — "overlapper en annen time" leaves them hunting for which one.
+export function overlapMessage(clash) {
+  const where = clash.order_name || clash.site_name || "en annen føring";
+  const span = `${osloTimeOf(clash.started_at)}–${osloTimeOf(clash.ended_at) || "pågår"}`;
+  return `Timene overlapper ${where} ${clash.work_date} ${span}. Samme person kan ikke være to steder samtidig.`;
 }

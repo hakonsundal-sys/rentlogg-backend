@@ -367,7 +367,9 @@ CREATE TABLE IF NOT EXISTS training_records (
 CREATE TABLE IF NOT EXISTS time_entries (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   company_id INTEGER NOT NULL REFERENCES companies(id),
-  site_id INTEGER NOT NULL REFERENCES sites(id),
+  -- Null for a shift booked on an order with no building — intern tid, kjøring, fravær. Every
+  -- QR stamping has one; only a hand-registered entry on such an order does not.
+  site_id INTEGER REFERENCES sites(id),
   user_id INTEGER NOT NULL REFERENCES users(id),
   -- The Europe/Oslo calendar day the shift belongs to, stored rather than derived: started_at is
   -- UTC (Render runs in UTC), and every grouping, filter and export in this module is by working
@@ -412,6 +414,193 @@ CREATE TABLE IF NOT EXISTS time_entries (
   created_at TEXT DEFAULT (datetime('now'))
 );
 
+-- Lønnsarter: what a line of hours, or a supplement, is called by the time it reaches payroll.
+-- Unimicro reads `code`, so that string is the actual interface to the payroll system and is
+-- snapshotted onto every line rather than joined at read time — renaming an art next year must not
+-- rewrite what was exported last year. Defaults are seeded per company from OKV's own Mobile Worker
+-- list (see seedDefaultTimeTypes in services/timeEntries.js) and are editable from "Timearter".
+--
+-- kind: 'hours' (has fra/til, sums to a duration) or 'supplement' ("tillegg/annet" — a count, e.g.
+-- one night supplement for a shift). Expenses ("utlegg") are deliberately absent: OKV registers
+-- those by hand in the payroll system, and they are kroner, not time.
+CREATE TABLE IF NOT EXISTS time_types (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  company_id INTEGER NOT NULL REFERENCES companies(id),
+  kind TEXT NOT NULL DEFAULT 'hours',
+  code TEXT NOT NULL,
+  name TEXT NOT NULL,
+  -- The art a QR stamping turns into. Exactly one per company is the default; setting a new one
+  -- clears the old (enforced in the route, like every other invariant in this app).
+  is_default INTEGER NOT NULL DEFAULT 0,
+  -- Lunch is hours, and belongs on the timesheet, but is not worked time — without this the daily
+  -- total silently pays for it.
+  counts_as_work INTEGER NOT NULL DEFAULT 1,
+  active INTEGER NOT NULL DEFAULT 1,
+  sort_order INTEGER DEFAULT 0,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
+-- What a stamping actually consists of. A QR stamping produces exactly one line (the default art,
+-- the whole shift); a shift registered by hand can be split — 16:00–16:30 ordinary plus 16:30–18:00
+-- overtime — which is the reason this is a table and not three more columns on time_entries.
+--
+-- time_entries.minutes stays the authoritative payable total and is recomputed as the sum of the
+-- work-counting lines whenever they change, so every existing reader (totals, CSV, the cleaner's
+-- own card) keeps working without knowing lines exist.
+CREATE TABLE IF NOT EXISTS time_entry_lines (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  entry_id INTEGER NOT NULL REFERENCES time_entries(id),
+  kind TEXT NOT NULL DEFAULT 'hours',
+  time_type_id INTEGER REFERENCES time_types(id),
+  -- Snapshots, for the same reason billing_mode/fixed_minutes are snapshotted on the entry.
+  type_code TEXT,
+  type_name TEXT,
+  counts_as_work INTEGER NOT NULL DEFAULT 1,
+  -- Oslo wall clock "HH:MM", null on a supplement line and on an hours line entered as a bare
+  -- quantity. The day itself lives on the parent entry's work_date.
+  start_time TEXT,
+  end_time TEXT,
+  minutes INTEGER,        -- hours lines
+  quantity REAL,          -- supplement lines ("2 nattillegg")
+  description TEXT,
+  sort_order INTEGER DEFAULT 0,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
+-- Prosjekt og ordre: the dimension time is actually booked on, modelled after the Mobile Worker
+-- OKV runs today (Håkon 2026-09-23). A site is a building with a QR code; an order is the thing
+-- that gets invoiced, reported on and paid against — and not every order is a building. "Intern
+-- tid" is an order with no site and no customer, which is precisely why hours could not be booked
+-- to it before this existed: there was nothing to scan.
+--
+-- Hierarchy: projects → orders → sites. A site belongs to at most one order, and a stamping
+-- inherits its order from the site it was stamped at; an entry registered by hand (internal time,
+-- holiday, sick leave) has an order and no site at all.
+CREATE TABLE IF NOT EXISTS projects (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  company_id INTEGER NOT NULL REFERENCES companies(id),
+  number TEXT,
+  name TEXT NOT NULL,
+  client_id INTEGER REFERENCES clients(id),
+  manager_id INTEGER REFERENCES users(id),
+  active INTEGER NOT NULL DEFAULT 1,
+  sort_order INTEGER DEFAULT 0,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS orders (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  company_id INTEGER NOT NULL REFERENCES companies(id),
+  project_id INTEGER REFERENCES projects(id),
+  -- The number staff actually say out loud ("1014 Vågen"). Free text, not the row id: it comes
+  -- from the customer's own order system as often as from ours.
+  number TEXT,
+  name TEXT NOT NULL,
+  -- 'customer' the ordinary case, 'internal' (intern tid, kjøring) and 'absence' (ferie,
+  -- sykefravær) — the two that have no customer to invoice and no building to stand in. No CHECK
+  -- constraint, matching every other enum-ish column in this app.
+  kind TEXT NOT NULL DEFAULT 'customer',
+  client_id INTEGER REFERENCES clients(id),
+  manager_id INTEGER REFERENCES users(id),   -- ordreansvarlig
+  cost_center TEXT,                          -- kostnadssted
+  labels TEXT,                               -- etiketter, comma-separated
+  invoice_comment TEXT,                      -- fakturakommentar
+  -- Lets an order be stamped without a QR code at all, which is what makes "Før timer" possible
+  -- for internal time and absence. A customer order normally leaves this off: hours there come
+  -- from actually being at the building.
+  allows_manual INTEGER NOT NULL DEFAULT 0,
+  active INTEGER NOT NULL DEFAULT 1,
+  sort_order INTEGER DEFAULT 0,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
+-- Godkjenningsnivåer: the ladder a shift climbs before it counts as approved — OKV's own is
+-- Teamleder → Formann → Driftssjef → Administrasjon. Each staff member sits at one level, and a
+-- shift needs one approval from each level marked `required`, in step order.
+--
+-- Deliberately a table rather than a role enum: the levels are the company's own org chart, they
+-- differ between companies, and an admin has to be able to add "Kvalitet" next year without a
+-- deploy.
+CREATE TABLE IF NOT EXISTS approval_levels (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  company_id INTEGER NOT NULL REFERENCES companies(id),
+  name TEXT NOT NULL,
+  step INTEGER NOT NULL DEFAULT 1,
+  -- An optional level may approve but is never waited for. Lets a company keep "Teamleder" as a
+  -- courtesy signature without stalling payroll when the team leader is on holiday.
+  required INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
+-- One level per person, the same shape Mobile Worker's "Tildel brukere til godkjenningsnivå"
+-- shows. Somebody with no row here simply cannot approve.
+CREATE TABLE IF NOT EXISTS user_approval_levels (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  company_id INTEGER NOT NULL REFERENCES companies(id),
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  level_id INTEGER NOT NULL REFERENCES approval_levels(id),
+  UNIQUE(user_id)
+);
+
+-- One row per level that has signed off on one shift. Kept rather than collapsed into a flag on
+-- time_entries, because "who signed, at which level, when" is the whole point of having levels —
+-- and because a correction has to be able to throw away the signatures without throwing away the
+-- record that they once existed (see time_entry_log).
+CREATE TABLE IF NOT EXISTS time_entry_approvals (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  entry_id INTEGER NOT NULL REFERENCES time_entries(id),
+  level_id INTEGER NOT NULL REFERENCES approval_levels(id),
+  level_name TEXT,                 -- snapshot, so a renamed level doesn't rewrite old sign-offs
+  level_step INTEGER,
+  approved_at TEXT,
+  approved_by INTEGER REFERENCES users(id),
+  approved_by_name TEXT,
+  comment TEXT,
+  UNIQUE(entry_id, level_id)
+);
+
+-- Endringsloggen. Mobile Worker shows Status | Ansattnavn | Tid | Kommentar under every timesheet,
+-- and it is the thing that answers "why does this say 6 hours when she was there 8" three months
+-- later. Append-only: nothing in this app ever edits or deletes a row here.
+CREATE TABLE IF NOT EXISTS time_entry_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  entry_id INTEGER NOT NULL REFERENCES time_entries(id),
+  company_id INTEGER NOT NULL REFERENCES companies(id),
+  at TEXT DEFAULT (datetime('now')),
+  user_id INTEGER REFERENCES users(id),
+  user_name TEXT,
+  -- 'stamped_in' | 'stamped_out' | 'auto_closed' | 'created' | 'edited' | 'approved' |
+  -- 'rejected' | 'approval_cleared' | 'locked' | 'unlocked'
+  action TEXT NOT NULL,
+  status TEXT,      -- what the shift looked like after this happened
+  comment TEXT
+);
+
+-- Team og ansattgrupper: the two ways OKV slices its staff in Mobile Worker, alongside the
+-- Avdeling (Vest/Midt/Sør/Øst) Rentlogg already has. They are not the same thing and neither
+-- replaces the other:
+--   Avdeling  the org unit a person is paid under
+--   Team      where they physically work — Bergen, Haugesund, Rørvik, Nortura Malvik …
+--   Gruppe    what kind of staff they are — Renhold, Teamleder/Ledelse
+-- All three are filters on the timesheet, and a person belongs to at most one of each.
+CREATE TABLE IF NOT EXISTS teams (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  company_id INTEGER NOT NULL REFERENCES companies(id),
+  name TEXT NOT NULL,
+  active INTEGER NOT NULL DEFAULT 1,
+  sort_order INTEGER DEFAULT 0,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS employee_groups (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  company_id INTEGER NOT NULL REFERENCES companies(id),
+  name TEXT NOT NULL,
+  active INTEGER NOT NULL DEFAULT 1,
+  sort_order INTEGER DEFAULT 0,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
 CREATE INDEX IF NOT EXISTS idx_sites_client ON sites(client_id);
 CREATE INDEX IF NOT EXISTS idx_runs_site ON checklist_runs(site_id);
 CREATE INDEX IF NOT EXISTS idx_deviations_site ON deviations(site_id);
@@ -430,6 +619,17 @@ CREATE INDEX IF NOT EXISTS idx_training_records_user ON training_records(user_id
 CREATE INDEX IF NOT EXISTS idx_time_entries_company_date ON time_entries(company_id, work_date);
 CREATE INDEX IF NOT EXISTS idx_time_entries_user_date ON time_entries(user_id, work_date);
 CREATE INDEX IF NOT EXISTS idx_time_entries_site_date ON time_entries(site_id, work_date);
+CREATE INDEX IF NOT EXISTS idx_time_types_company ON time_types(company_id, kind, sort_order);
+CREATE INDEX IF NOT EXISTS idx_time_entry_lines_entry ON time_entry_lines(entry_id, sort_order);
+CREATE INDEX IF NOT EXISTS idx_orders_company ON orders(company_id, sort_order);
+CREATE INDEX IF NOT EXISTS idx_orders_project ON orders(project_id);
+CREATE INDEX IF NOT EXISTS idx_projects_company ON projects(company_id, sort_order);
+CREATE INDEX IF NOT EXISTS idx_approval_levels_company ON approval_levels(company_id, step);
+CREATE INDEX IF NOT EXISTS idx_user_approval_levels_company ON user_approval_levels(company_id);
+CREATE INDEX IF NOT EXISTS idx_entry_approvals_entry ON time_entry_approvals(entry_id);
+CREATE INDEX IF NOT EXISTS idx_entry_log_entry ON time_entry_log(entry_id, at);
+CREATE INDEX IF NOT EXISTS idx_teams_company ON teams(company_id, sort_order);
+CREATE INDEX IF NOT EXISTS idx_employee_groups_company ON employee_groups(company_id, sort_order);
 
 -- Kvalitetslogg: an append-only record of everything that happens to the cleaning documentation
 -- after it has been written. Rentlogg's history view (services/runHistory.js) is assembled from

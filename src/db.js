@@ -250,3 +250,80 @@ ensureColumn("training_records", "signature_path", "signature_path TEXT");
 // already, so schema.sql alone would never add these.
 ensureColumn("training_courses", "video_url", "video_url TEXT");
 ensureColumn("training_records", "video_completed_at", "video_completed_at TEXT");
+
+// Godkjenning: a driftsleder confirming somebody's shift before it goes anywhere near payroll.
+// Deliberately NOT the same thing as locking a period — approval is per shift and says "I have
+// looked at this", the lock is per period and says "this has been exported, nobody touches it".
+// The chain is: renholder stamps → driftsleder approves → admin locks and exports.
+// approved_by_name is a snapshot beside the id for the same reason edited_by_initials is: the
+// export has to still say who approved it after that person leaves the company.
+ensureColumn("time_entries", "approved_at", "approved_at TEXT");
+ensureColumn("time_entries", "approved_by", "approved_by INTEGER REFERENCES users(id)");
+ensureColumn("time_entries", "approved_by_name", "approved_by_name TEXT");
+
+// One-time: every stamping that closed before lønnsarter existed has no line, and would therefore
+// vanish from the payroll export's line-level rows. Backfilled lazily by the module itself rather
+// than here — see backfillMissingLines in services/timeEntries.js, which runs on the first listing
+// per company and needs that company's default art to exist first. Nothing to do at boot.
+
+// Prosjekt/ordre (see schema.sql). A site now hangs under an order, and a time entry carries the
+// order it was booked on — inherited from the site when stamped, chosen by hand for internal time
+// and absence, which have no building to stand in. Both nullable: every site and every entry that
+// existed before orders did keeps working untouched until it is filed under one.
+ensureColumn("sites", "order_id", "order_id INTEGER REFERENCES orders(id)");
+ensureColumn("time_entries", "order_id", "order_id INTEGER REFERENCES orders(id)");
+// A stamping normally has a site. An entry on an internal or absence order has none, so this is
+// the column that had to become optional for "Før timer" to be possible at all.
+ensureColumn("time_entries", "rejected_at", "rejected_at TEXT");
+ensureColumn("time_entries", "rejected_by", "rejected_by INTEGER REFERENCES users(id)");
+ensureColumn("time_entries", "rejected_by_name", "rejected_by_name TEXT");
+ensureColumn("time_entries", "rejection_comment", "rejection_comment TEXT");
+// Which bucket a lønnsart belongs in: 'arbeid' (counts toward "sum arbeidede timer"), 'fravær'
+// (ferie, sykefravær — paid by payroll, but never worked hours) or 'tillegg'. Mobile Worker calls
+// this "Timeart kategori"; without it, holiday silently lands in the same total as a night shift.
+ensureColumn("time_types", "category", "category TEXT");
+// Tillegg carry a rate in Mobile Worker ("Sats"), alongside the count. Informational here — no
+// kroner are computed anywhere in Rentlogg — but it travels with the line to payroll.
+ensureColumn("time_types", "rate", "rate REAL");
+ensureColumn("time_entry_lines", "rate", "rate REAL");
+
+// time_entries.site_id started life NOT NULL, back when every stamping was a QR scan at a building.
+// Orders changed that: internal time, driving and absence are booked on an order with no site at
+// all, and SQLite cannot drop a NOT NULL with ALTER TABLE. Same legacy_alter_table rebuild as the
+// users-role and departments migrations above, with one difference — the new table is built from
+// the OLD table's own stored SQL with the constraint edited out, rather than from a literal CREATE.
+// That way every column added by ensureColumn since (order_id, approved_at, rejected_at, …) comes
+// across automatically, and this migration cannot drift out of date as more are added.
+const timeEntriesSql = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'time_entries'").get()?.sql || "";
+if (/site_id\s+INTEGER\s+NOT\s+NULL/i.test(timeEntriesSql)) {
+  const rebuiltSql = timeEntriesSql.replace(/site_id\s+INTEGER\s+NOT\s+NULL/i, "site_id INTEGER");
+  const columns = db
+    .prepare("PRAGMA table_info(time_entries)")
+    .all()
+    .map((c) => `"${c.name}"`)
+    .join(", ");
+
+  db.pragma("foreign_keys = OFF");
+  db.pragma("legacy_alter_table = ON");
+  db.exec(`
+    ALTER TABLE time_entries RENAME TO time_entries_old;
+    ${rebuiltSql};
+    INSERT INTO time_entries (${columns}) SELECT ${columns} FROM time_entries_old;
+    DROP TABLE time_entries_old;
+  `);
+  db.pragma("legacy_alter_table = OFF");
+  db.pragma("foreign_keys = ON");
+}
+
+// Ansattnummer: the id payroll knows a person by. Unimicro matches employees on a number, not on a
+// name, so an export without it cannot actually be imported — see the Timeregistrering module's CSV.
+// Free text rather than an integer: OKV's numbers come out of the payroll system, and a leading
+// zero or a letter prefix has to survive the round trip. Uniqueness is enforced per company in the
+// route, not here, since a null must stay repeatable.
+ensureColumn("users", "employee_number", "employee_number TEXT");
+
+// Which team and which staff group a person belongs to — the two filters Mobile Worker's timesheet
+// offers alongside Avdeling, which Rentlogg already had. Nullable: a company that never sets them
+// up simply never sees the filters.
+ensureColumn("users", "team_id", "team_id INTEGER REFERENCES teams(id)");
+ensureColumn("users", "employee_group_id", "employee_group_id INTEGER REFERENCES employee_groups(id)");

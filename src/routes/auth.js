@@ -131,7 +131,7 @@ const STAFF_FIELDS = "id, name, email, role, phone, department_id, active, creat
 // cross-company view (an admin/manager's own rows are all their own company already). client_id/
 // client_name are only populated for role='customer' rows ("Kundebrukere") — null for staff.
 const STAFF_LIST_FIELDS =
-  "u.id, u.name, u.email, u.role, u.phone, u.department_id, u.active, u.created_at, u.company_id, c.name AS company_name, u.client_id, cl.name AS client_name, u.language";
+  "u.id, u.name, u.email, u.role, u.phone, u.employee_number, u.department_id, u.active, u.created_at, u.company_id, c.name AS company_name, u.client_id, cl.name AS client_name, u.language";
 const STAFF_LIST_JOIN = "LEFT JOIN companies c ON c.id = u.company_id LEFT JOIN clients cl ON cl.id = u.client_id";
 // The roles an account can be MOVED between — never 'customer' (a different account shape, tied
 // to a client) or 'super_admin' (Rentlogg's own operator account).
@@ -236,12 +236,20 @@ authRouter.post("/users", requireAuth, requireRole("admin", "super_admin"), (req
     return res.status(409).json({ code: "email_taken", error: "En konto med denne e-posten finnes allerede" });
   }
 
+  // Optional at creation — the number often comes from payroll after the person has started, and
+  // blocking the account on it would just mean nobody gets created.
+  const employeeNumber = typeof req.body.employee_number === "string" ? req.body.employee_number.trim() || null : null;
+  if (employeeNumber) {
+    const clash = db.prepare("SELECT id FROM users WHERE employee_number = ? AND company_id IS ?").get(employeeNumber, companyId);
+    if (clash) return res.status(409).json({ code: "employee_number_taken", error: "En annen ansatt har allerede dette ansattnummeret." });
+  }
+
   const password_hash = bcrypt.hashSync(password, 10);
   const info = db
     .prepare(
-      "INSERT INTO users (name, email, password_hash, role, company_id, department_id, client_id, language) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+      "INSERT INTO users (name, email, password_hash, role, company_id, department_id, client_id, language, employee_number) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
-    .run(name.trim(), email, password_hash, role, companyId, departmentId, clientId, language);
+    .run(name.trim(), email, password_hash, role, companyId, departmentId, clientId, language, employeeNumber);
 
   // Any invitation still pending for this address is now moot — the account it would have created
   // exists. Mirrors the "one valid link per email at a time" rule POST /invitations already keeps.
@@ -282,7 +290,7 @@ function getStaffTarget(id, requester, { allowCustomer = false } = {}) {
 // edit row is saved. Also doubles as "Kundebrukere"'s edit-details route (name/email/phone only
 // — department_id is staff-only and rejected below for a customer target) since the two lists
 // share this same shape of inline edit.
-const USER_PATCH_FIELDS = ["name", "email", "phone", "department_id", "language"];
+const USER_PATCH_FIELDS = ["name", "email", "phone", "employee_number", "department_id", "language"];
 
 authRouter.patch("/users/:id", requireAuth, requireRole("admin", "manager", "super_admin"), (req, res) => {
   const { target, status, code, error } = getStaffTarget(req.params.id, req.user, { allowCustomer: true });
@@ -326,6 +334,23 @@ authRouter.patch("/users/:id", requireAuth, requireRole("admin", "manager", "sup
   if ("phone" in req.body) {
     const phone = typeof req.body.phone === "string" ? req.body.phone.trim() : "";
     updates.phone = phone || null;
+  }
+
+  // Ansattnummer: the id payroll knows this person by. Kept free text rather than an integer —
+  // OKV's own numbers come out of the payroll system, and a leading zero or a letter prefix is
+  // exactly the kind of thing that must survive a round trip. Unique within the company, because
+  // two people sharing one number is the one mistake that silently pays the wrong person.
+  if ("employee_number" in req.body) {
+    const number = typeof req.body.employee_number === "string" ? req.body.employee_number.trim() : "";
+    if (number) {
+      const clash = db
+        .prepare("SELECT id FROM users WHERE employee_number = ? AND company_id IS ? AND id != ?")
+        .get(number, target.company_id, target.id);
+      if (clash) {
+        return res.status(409).json({ code: "employee_number_taken", error: "En annen ansatt har allerede dette ansattnummeret." });
+      }
+    }
+    updates.employee_number = number || null;
   }
 
   if ("language" in req.body) {
