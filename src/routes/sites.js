@@ -4,7 +4,7 @@ import path from "node:path";
 import { db } from "../db.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 import { newQrToken, qrLabelSvgDataUrl } from "../utils/qrcode.js";
-import { findRunForSiteDate, todayInOslo } from "../services/schedule.js";
+import { findRunForSiteDate, getRunStatusForSiteDate, todayInOslo, toOsloDateStr } from "../services/schedule.js";
 import { safeOriginalName, normalizeImageOrientation, documentFileFilter, removeUploadedFile } from "../utils/uploads.js";
 import { logQualityEvent } from "../services/qualityLog.js";
 import { haversineMeters } from "../utils/geo.js";
@@ -268,6 +268,128 @@ sitesRouter.delete("/:id", requireAuth, requireRole("admin", "manager"), (req, r
 });
 
 // --- Recurring weekly schedule ---
+
+// What the last person who was here wrote down. Cleaners cover for each other constantly, so the
+// person arriving is often not the person who was here last — and everything she needs to know
+// about the building's quirks ("fryseren må gjøres sist", "bakdøra klemmer") is already in the
+// notes, it has just never been shown to the next one through the door.
+//
+// Nothing new is stored: checklist_runs.note and room_runs.note have been written for months.
+const previousRunsStmt = db.prepare(
+  `SELECT r.id, r.started_at, r.note, r.signed_initials, u.name AS cleaner_name
+   FROM checklist_runs r LEFT JOIN users u ON u.id = r.cleaner_id
+   WHERE r.site_id = ? AND date(r.started_at) <= date(?, '+1 day')
+   ORDER BY r.started_at DESC
+   LIMIT 20`
+);
+const roomNotesForDateStmt = db.prepare(
+  `SELECT rr.note, rr.signed_initials, rr.started_at, ro.name AS room_name
+   FROM room_runs rr JOIN rooms ro ON ro.id = rr.room_id
+   WHERE ro.site_id = ? AND rr.note IS NOT NULL AND TRIM(rr.note) != ''
+     AND date(rr.started_at) BETWEEN date(?, '-1 day') AND date(?, '+1 day')
+   ORDER BY ro.sort_order, ro.id`
+);
+
+sitesRouter.get("/:id/previous-visit", requireAuth, (req, res) => {
+  const { site, status, code, error } = getSiteScoped(req.params.id, req.user);
+  if (error) return res.status(status).json({ code, error });
+
+  const today = todayInOslo();
+  // Runs are stored in UTC, so the Oslo calendar day is resolved in JS the same way
+  // findRunForSiteDate does — a visit just before midnight belongs to the day it started.
+  const previous = previousRunsStmt.all(site.id, today).find((r) => toOsloDateStr(r.started_at) < today);
+  if (!previous) return res.json(null);
+
+  const date = toOsloDateStr(previous.started_at);
+  const roomNotes = roomNotesForDateStmt
+    .all(site.id, date, date)
+    .filter((n) => toOsloDateStr(n.started_at) === date)
+    .map(({ started_at, ...note }) => note);
+
+  // A visit with nothing written down has nothing to pass on. Returning it anyway would put an
+  // empty card on the screen she checks in from every morning.
+  if (!previous.note?.trim() && roomNotes.length === 0) return res.json(null);
+
+  res.json({
+    date,
+    // How stale it is, so a note from three weeks ago is visibly not from yesterday.
+    days_ago: Math.round((new Date(`${today}T00:00:00Z`) - new Date(`${date}T00:00:00Z`)) / 86400000),
+    by: previous.signed_initials || previous.cleaner_name || null,
+    note: previous.note?.trim() || null,
+    rooms: roomNotes,
+  });
+});
+
+// "Hvor skal jeg i morgen?" — the question a cleaner asks most often, and the one Rentlogg could
+// already answer but never did: site_schedules.assigned_cleaner_id has held the weekly plan all
+// along, it was only ever readable from the admin side.
+//
+// This is a VIEW, not a restriction. Cleaners cover for each other and rotate between sites (see
+// the engineering conventions), so a site missing from her week is not a site she may not enter —
+// which is why anything she actually worked shows up here too, marked as unplanned rather than
+// hidden.
+const myPlanStmt = db.prepare(
+  `SELECT sch.weekday, s.id AS site_id, s.name, s.address, s.status,
+          s.time_billing_mode, s.time_fixed_minutes
+   FROM site_schedules sch JOIN sites s ON s.id = sch.site_id
+   WHERE sch.assigned_cleaner_id = ? AND s.company_id = ?
+   ORDER BY s.name`
+);
+const myVisitsStmt = db.prepare(
+  `SELECT r.id, r.started_at, r.site_id, s.name
+   FROM checklist_runs r JOIN sites s ON s.id = r.site_id
+   WHERE r.cleaner_id = ? AND s.company_id = ?
+     AND date(r.started_at) BETWEEN date(?, '-1 day') AND date(?, '+1 day')`
+);
+
+sitesRouter.get("/my-week", requireAuth, (req, res) => {
+  // Monday of the week the given day falls in; without a date, the week she is standing in.
+  const anchor = /^\d{4}-\d{2}-\d{2}$/.test(req.query.from || "") ? req.query.from : todayInOslo();
+  const anchorDate = new Date(`${anchor}T00:00:00Z`);
+  const monday = new Date(anchorDate);
+  monday.setUTCDate(monday.getUTCDate() - ((anchorDate.getUTCDay() + 6) % 7));
+
+  const plan = myPlanStmt.all(req.user.id, req.user.company_id);
+  const dates = [...Array(7)].map((_, i) => {
+    const d = new Date(monday);
+    d.setUTCDate(d.getUTCDate() + i);
+    return d.toISOString().slice(0, 10);
+  });
+  const visits = myVisitsStmt.all(req.user.id, req.user.company_id, dates[0], dates[6]);
+  const today = todayInOslo();
+
+  const days = dates.map((date) => {
+    // Date#getDay(), 0=søndag — the same convention site_schedules stores.
+    const weekday = new Date(`${date}T00:00:00`).getDay();
+    const planned = plan.filter((p) => p.weekday === weekday);
+    const visitedIds = new Set(visits.filter((v) => toOsloDateStr(v.started_at) === date).map((v) => v.site_id));
+
+    const sites = planned.map((p) => ({
+      site_id: p.site_id,
+      name: p.name,
+      address: p.address,
+      planned: true,
+      // Only a fixed-frame site has a number to promise her; on an hourly site the answer is
+      // honestly "as long as it takes".
+      planned_minutes: p.time_billing_mode === "fixed" ? p.time_fixed_minutes : null,
+      status: getRunStatusForSiteDate(p.site_id, date),
+    }));
+
+    // Somewhere she actually worked that her plan says nothing about — covering for somebody, or a
+    // one-off. Hiding it would make her own week disagree with her own memory.
+    for (const visit of visits.filter((v) => toOsloDateStr(v.started_at) === date)) {
+      if (planned.some((p) => p.site_id === visit.site_id)) continue;
+      sites.push({
+        site_id: visit.site_id, name: visit.name, address: null, planned: false,
+        planned_minutes: null, status: getRunStatusForSiteDate(visit.site_id, date),
+      });
+    }
+
+    return { date, weekday, is_today: date === today, is_past: date < today, sites };
+  });
+
+  res.json({ from: dates[0], to: dates[6], days });
+});
 
 sitesRouter.get("/:id/schedule", requireAuth, requireRole("admin", "manager"), (req, res) => {
   const { status, code, error } = getSiteScoped(req.params.id, req.user);
