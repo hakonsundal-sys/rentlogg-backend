@@ -140,9 +140,12 @@ encode the right host without extra configuration.
 
 ## Known things to change
 
-- **CORS is open.** `ALLOWED_ORIGINS` is unset in production, so the API reflects any origin.
-  A JWT is still required for everything that matters, but this should be narrowed to the real
-  frontend domains.
+- **`ALLOWED_ORIGINS` is a single point of failure.** It's set in Render's dashboard, not in
+  this repo, and it must list **`https://www.rentlogg.no`** — the apex 308-redirects to www, so
+  www is what sits in the `Origin` header of every API call. Setting the apex alone, which is
+  the obvious-looking value, blocks every browser request and takes the app down for all users
+  with no code change to point at; the symptom is "Failed to fetch" rather than a status code.
+  Left entirely unset, CORS falls back to reflecting any origin, which is safe-ish but wide.
 - **Rate limiting covers login only** (`src/routes/auth.js`). Nothing else is bounded.
 - **No input-validation library.** Request bodies are checked by hand, route by route —
   consistent, but easy to forget in a new endpoint. `zod` or similar would make it structural.

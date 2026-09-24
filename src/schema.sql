@@ -392,6 +392,11 @@ CREATE TABLE IF NOT EXISTS time_entries (
   -- The raw clock difference, always kept even when the site pays a fixed frame — "she was there
   -- 2t 40m but the site is paid as 2t" is the whole point of having both numbers.
   actual_minutes INTEGER,
+  -- The unpaid break she reported when stamping out. Asked rather than clocked: a pause button
+  -- only works if she remembers to press it twice, and a forgotten one costs her real money.
+  -- Deducted from the clock on an 'actual' site; on a 'fixed' site the frame is the frame and this
+  -- is recorded without changing what she is paid (Håkon, 2026-09-24).
+  pause_minutes INTEGER NOT NULL DEFAULT 0,
   -- What actually counts for this shift, and which rule produced it: 'actual' = the clock,
   -- 'fixed' = the site's rammetimetall, 'manual' = a number an admin typed. billing_mode and
   -- fixed_minutes are snapshots taken when the entry was closed, not looked up on read: changing

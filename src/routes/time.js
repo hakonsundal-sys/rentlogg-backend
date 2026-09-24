@@ -5,9 +5,9 @@ import { todayInOslo } from "../services/schedule.js";
 import { sendTimesheetPdf, sendXlsx } from "../services/timeExport.js";
 import {
   computePlannedVsActual, decimalHours, findOpenEntry, formatMinutes, getEntry,
-  findOverlap, isValidDate, lineMinutes, listEntries, listTimeTypes, minutesBetween, nowStamp,
+  findOverlap, getLines, isValidDate, lineMinutes, listEntries, listTimeTypes, minutesBetween, nowStamp,
   osloTimeOf, overlapMessage,
-  osloTimeToUtcStamp, payableMinutes, replaceLines, seedDefaultTimeTypes, stopEntry, writeStampLine,
+  osloTimeToUtcStamp, payableMinutes, replaceLines, seedDefaultTimeTypes, stopEntry, validatePause, writeStampLine,
   backfillMissingLines,
   summarizeByUser, validateInterval,
 } from "../services/timeEntries.js";
@@ -153,7 +153,13 @@ timeRouter.post("/entries/:id/stop", requireAuth, (req, res) => {
   }
 
   const { latitude, longitude } = req.body || {};
-  res.json(stopEntry(entry, { latitude, longitude }));
+  // She is asked for a break when stamping out rather than given a button to press twice during
+  // the shift — a button she forgets to end costs her the rest of her hours, and at four in the
+  // morning that is not a hypothetical (Håkon, 2026-09-24). Absent or 0 means no break.
+  const pauseMinutes = Math.round(Number(req.body?.pause_minutes) || 0);
+  const badPause = validatePause(entry.started_at, pauseMinutes);
+  if (badPause) return res.status(400).json(badPause);
+  res.json(stopEntry(entry, { latitude, longitude, pauseMinutes }));
 });
 
 // --- The admin's views ---------------------------------------------------------------------------
@@ -523,7 +529,15 @@ timeRouter.post("/entries", requireAuth, requireRole("admin", "manager"), (req, 
 // working without knowing lines exist at all.
 function applyLines(entry, lines, companyId) {
   const workedMinutes = replaceLines(entry, lines, companyId);
-  db.prepare("UPDATE time_entries SET minutes = ?, billing_mode = 'lines' WHERE id = ?").run(workedMinutes, entry.id);
+  // Once an admin has rewritten the lines by hand, they are what payroll reads — so pause_minutes
+  // is re-derived from them rather than left showing what she originally answered at stamp-out.
+  // Two numbers that disagree about the same break is exactly the thing somebody queries months
+  // later, and the lines are the ones that got exported.
+  const pause = getLines(entry.id)
+    .filter((l) => l.kind === "hours" && !l.counts_as_work)
+    .reduce((sum, l) => sum + (l.minutes || 0), 0);
+  db.prepare("UPDATE time_entries SET minutes = ?, pause_minutes = ?, billing_mode = 'lines' WHERE id = ?")
+    .run(workedMinutes, pause, entry.id);
 }
 
 // "Før timer" — the cleaner registering her own hours on an order that has no building: a staff
@@ -612,9 +626,11 @@ function billingFor(site, minutesOverride) {
   return { billing_mode: fixed ? "fixed" : "actual", fixed_minutes: fixed ? site.time_fixed_minutes : null };
 }
 
-function resolveMinutes({ billing, actual, minutesOverride }) {
+// The break she reported at stamp-out survives an admin correcting the clock. Leaving it out here
+// meant a corrected shift silently paid the break back: 3 timer med 20 min pause kom ut som 3 timer.
+function resolveMinutes({ billing, actual, minutesOverride, pauseMinutes = 0 }) {
   if (billing.billing_mode === "manual") return minutesOverride;
-  return payableMinutes({ ...billing, actual_minutes: actual });
+  return payableMinutes({ ...billing, actual_minutes: actual, pause_minutes: pauseMinutes });
 }
 
 const PATCH_TIME_FIELDS = ["start_time", "end_time", "note", "minutes", "work_date", "lines"];
@@ -681,16 +697,17 @@ timeRouter.patch("/entries/:id", requireAuth, requireRole("admin", "manager"), (
             edited_at = ?, edited_by_initials = ? WHERE id = ?`
   ).run(
     workDate, startedAt, endedAt, actual,
-    resolveMinutes({ billing, actual, minutesOverride }), billing.billing_mode, billing.fixed_minutes,
+    resolveMinutes({ billing, actual, minutesOverride, pauseMinutes: entry.pause_minutes }),
+    billing.billing_mode, billing.fixed_minutes,
     autoClosedReason, "note" in req.body ? (req.body.note || "").trim() || null : entry.note,
     nowStamp(), req.user.name || null, entry.id
   );
 
   if (lines) applyLines(entry, lines, req.user.company_id);
-  else if (entry.lines?.length <= 1) {
-    // A stamped shift carries one auto-written line for its whole duration. Rewrite it so the hours
-    // the correction just changed are the hours payroll reads — but never touch a hand-built set of
-    // lines the admin is not editing right now.
+  else if (entry.lines?.length <= (entry.pause_minutes > 0 ? 2 : 1)) {
+    // A stamped shift carries one auto-written line for its whole duration, or two when she
+    // reported a break. Rewrite them so the hours the correction just changed are the hours payroll
+    // reads — but never touch a hand-built set of lines the admin is not editing right now.
     writeStampLine(db.prepare("SELECT * FROM time_entries WHERE id = ?").get(entry.id));
   }
 

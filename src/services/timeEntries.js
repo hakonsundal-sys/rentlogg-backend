@@ -71,10 +71,13 @@ export function billingForSite(site) {
 // pays its frame from the moment the shift is closed at all, however short or long it ran — that
 // is what "fast rammetimetall uavhengig av hvor mange timer de faktisk var der" means. An entry
 // that was never closed is worth nothing yet, in either mode: no stamp-out, no hours.
-export function payableMinutes({ billing_mode, fixed_minutes, actual_minutes }) {
+// A fixed site pays its rammetimetall whatever the clock did, so a break there is recorded but
+// changes nothing — Håkon's call, 2026-09-24: "de tilfellene det er fast ramme påvirker ikke
+// dette rammen". On an 'actual' site the break is simply not worked time and comes off.
+export function payableMinutes({ billing_mode, fixed_minutes, actual_minutes, pause_minutes = 0 }) {
   if (actual_minutes == null) return null;
   if (billing_mode === "fixed") return fixed_minutes ?? actual_minutes;
-  return actual_minutes;
+  return Math.max(0, actual_minutes - (pause_minutes || 0));
 }
 
 // --- Row shaping -------------------------------------------------------------------------------
@@ -220,21 +223,38 @@ export function startEntryForCheckin({ site, user, latitude, longitude, runId })
 }
 
 const stopEntryStmt = db.prepare(
-  `UPDATE time_entries SET ended_at = ?, actual_minutes = ?, minutes = ?, billing_mode = ?, fixed_minutes = ?,
-          end_gps_verified = ?, end_latitude = ?, end_longitude = ?
+  `UPDATE time_entries SET ended_at = ?, actual_minutes = ?, pause_minutes = ?, minutes = ?, billing_mode = ?,
+          fixed_minutes = ?, end_gps_verified = ?, end_latitude = ?, end_longitude = ?
    WHERE id = ?`
 );
+
+// A break longer than the shift it sits in is a typo, not a break — and it would hand payroll a
+// zero. Checked against the clock as it stands right now, which is the same instant stopEntry is
+// about to write.
+export function validatePause(startedAt, pauseMinutes) {
+  if (!pauseMinutes) return null;
+  if (!Number.isInteger(pauseMinutes) || pauseMinutes < 0) {
+    return { code: "invalid_pause", error: "Pausen må være et helt antall minutter." };
+  }
+  const actual = minutesBetween(startedAt, nowStamp());
+  if (pauseMinutes >= actual) {
+    return { code: "pause_too_long", error: `Pausen må være kortere enn vakta på ${formatMinutes(actual)}.` };
+  }
+  return null;
+}
 
 // Stamping out. The site's billing rule is read here, at the end of the shift, and written onto the
 // row — from this point the entry carries its own answer and stops depending on the site's current
 // settings.
-export function stopEntry(entry, { latitude, longitude }) {
+export function stopEntry(entry, { latitude, longitude, pauseMinutes = 0 }) {
   const site = siteByIdStmt.get(entry.site_id);
   const at = nowStamp();
   const actual = minutesBetween(entry.started_at, at);
   const billing = billingForSite(site);
+  const pause = Math.max(0, Math.min(Math.round(pauseMinutes) || 0, Math.max(0, actual - 1)));
   stopEntryStmt.run(
-    at, actual, payableMinutes({ ...billing, actual_minutes: actual }), billing.billing_mode, billing.fixed_minutes,
+    at, actual, pause, payableMinutes({ ...billing, actual_minutes: actual, pause_minutes: pause }),
+    billing.billing_mode, billing.fixed_minutes,
     isWithinSiteRadius(site, latitude, longitude), latitude ?? null, longitude ?? null, entry.id
   );
   // The shift now has a duration, so it can finally be written as a line on the company's default
@@ -243,7 +263,8 @@ export function stopEntry(entry, { latitude, longitude }) {
   writeStampLine(closed);
   logEntryEvent({
     entryId: entry.id, companyId: entry.company_id, user: { id: entry.user_id, name: entry.user_name },
-    action: "stamped_out", status: "closed", comment: formatMinutes(closed.minutes),
+    action: "stamped_out", status: "closed",
+    comment: pause > 0 ? `${formatMinutes(closed.minutes)} (pause ${formatMinutes(pause)})` : formatMinutes(closed.minutes),
   });
   return getEntry(entry.id);
 }
@@ -558,8 +579,27 @@ const insertLineStmt = db.prepare(
 );
 const deleteLinesStmt = db.prepare("DELETE FROM time_entry_lines WHERE entry_id = ?");
 
-// The one line a QR stamping produces: the whole shift, on the company's default art. Written at
-// stamp-out rather than stamp-in, because until she stamps out there is no duration to put on it.
+// The art an unpaid break is booked on. LUNSJ by code first, then any hours art the company has
+// marked as not counting as work — a company that renamed theirs still gets the break on the right
+// kind of art rather than on none at all.
+export function pauseHoursType(companyId) {
+  seedDefaultTimeTypes(companyId);
+  return (
+    db.prepare("SELECT * FROM time_types WHERE company_id = ? AND kind = 'hours' AND active = 1 AND code = 'LUNSJ'").get(companyId) ||
+    db.prepare("SELECT * FROM time_types WHERE company_id = ? AND kind = 'hours' AND active = 1 AND counts_as_work = 0 ORDER BY sort_order, id").get(companyId) ||
+    null
+  );
+}
+
+// The lines a QR stamping produces: the whole shift on the company's default art, plus the break
+// she reported at stamp-out. Written at stamp-out rather than stamp-in, because until she stamps
+// out there is no duration to put on either.
+//
+// The break carries no from/to. She is asked how long it was, not when it was, and inventing
+// "11:30–12:00" from a number she never gave would be putting words in her mouth on a payroll line.
+//
+// The two together always reconcile to the clock on an 'actual' site (work + break = actual), and
+// on a 'fixed' site the work line is the frame and the break sits beside it without touching it.
 export function writeStampLine(entry) {
   const type = defaultHoursType(entry.company_id);
   deleteLinesStmt.run(entry.id);
@@ -569,6 +609,13 @@ export function writeStampLine(entry) {
     osloTimeOf(entry.started_at) || null, osloTimeOf(entry.ended_at) || null,
     entry.minutes, null, null, 0
   );
+  if (entry.pause_minutes > 0) {
+    const pause = pauseHoursType(entry.company_id);
+    insertLineStmt.run(
+      entry.id, "hours", pause?.id ?? null, pause?.code ?? null, pause?.name ?? null, 0,
+      null, null, entry.pause_minutes, null, null, 1
+    );
+  }
 }
 
 // Replaces an entry's lines wholesale — the admin form submits the full set every time, which is

@@ -251,6 +251,10 @@ ensureColumn("training_records", "signature_path", "signature_path TEXT");
 ensureColumn("training_courses", "video_url", "video_url TEXT");
 ensureColumn("training_records", "video_completed_at", "video_completed_at TEXT");
 
+// The unpaid break she reports when stamping out. Deducted from the clock on an `actual` site;
+// on a `fixed` site the rammetimetall is unchanged and this is recorded beside it.
+ensureColumn("time_entries", "pause_minutes", "pause_minutes INTEGER NOT NULL DEFAULT 0");
+
 // Godkjenning: a driftsleder confirming somebody's shift before it goes anywhere near payroll.
 // Deliberately NOT the same thing as locking a period — approval is per shift and says "I have
 // looked at this", the lock is per period and says "this has been exported, nobody touches it".
