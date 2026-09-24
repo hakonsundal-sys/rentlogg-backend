@@ -8,6 +8,7 @@ import { requireAuth, requireRole } from "../middleware/auth.js";
 import { todayInOslo } from "../services/schedule.js";
 import { getRoomsForSite, findOrCreateTodayRoomRun, findOrCreateRoomRunForDate, findRoomRunForDate, getMonthlyItemsForSite, getRoomGridForSiteMonth, getRoomRunItems, ensureRunItemOptions } from "../services/rooms.js";
 import { safeOriginalName, compressUploadedPhoto, imageFileFilter, removeUploadedFile, UploadRejectedError } from "../utils/uploads.js";
+import { logQualityEvent } from "../services/qualityLog.js";
 
 export const siteRoomsRouter = Router({ mergeParams: true });
 export const roomsRouter = Router();
@@ -57,6 +58,7 @@ function getRoomRunScoped(roomRunId, user) {
   const roomRun = db
     .prepare(
       `SELECT rr.*, r.responsible AS room_responsible, r.requires_approval AS room_requires_approval,
+              r.site_id AS room_site_id, r.name AS room_name,
               s.company_id AS site_company_id, s.client_id AS site_client_id
        FROM room_runs rr JOIN rooms r ON r.id = rr.room_id JOIN sites s ON s.id = r.site_id WHERE rr.id = ?`
     )
@@ -268,6 +270,24 @@ siteRoomsRouter.delete("/", requireAuth, requireRole("admin", "manager"), (req, 
       db.prepare(`UPDATE deviations SET room_id = NULL WHERE room_id IN (${roomPlaceholders})`).run(...ids);
     }
     for (const roomId of ids) {
+      // One row per room rather than one for the batch: a later "what happened to this room"
+      // report looks up by room_id, and a single summary row would be invisible to it.
+      const room = db.prepare("SELECT name, site_id FROM rooms WHERE id = ?").get(roomId);
+      const runCount = db.prepare("SELECT COUNT(*) AS n FROM room_runs WHERE room_id = ?").get(roomId).n;
+      const photoCount = db
+        .prepare("SELECT COUNT(*) AS n FROM photos WHERE room_run_id IN (SELECT id FROM room_runs WHERE room_id = ?)")
+        .get(roomId).n;
+      logQualityEvent({
+        user: req.user,
+        action: "room_deleted",
+        subjectType: "room",
+        subjectId: roomId,
+        siteId: room?.site_id ?? null,
+        roomId,
+        occurredAt: req.body?.occurred_at,
+        beforeValue: room?.name ?? null,
+        comment: `${runCount} besøk og ${photoCount} bilder slettet sammen med rommet (masseslett av ${ids.length} rom)`,
+      });
       const runIds = db.prepare("SELECT id FROM room_runs WHERE room_id = ?").all(roomId).map((r) => r.id);
       if (runIds.length) {
         const placeholders = runIds.map(() => "?").join(",");
@@ -595,11 +615,30 @@ roomsRouter.patch("/:id", requireAuth, requireRole("admin", "manager"), (req, re
 });
 
 roomsRouter.delete("/:id", requireAuth, requireRole("admin", "manager"), (req, res) => {
-  const { status, code, error } = getRoomScoped(req.params.id, req.user);
+  const { room, status, code, error } = getRoomScoped(req.params.id, req.user);
   if (error) return res.status(status).json({ code, error });
 
   const filesToRemove = [];
   const deleteCascade = db.transaction((roomId) => {
+    // Deleting a room still takes every room_run, run item and photo in it with it — three
+    // months of a room's cleaning record, gone on one click. Until soft delete lands, the least
+    // this can do is leave a row saying it happened, who did it and how much went with it.
+    // Counted before the deletes below, for obvious reasons.
+    const runCount = db.prepare("SELECT COUNT(*) AS n FROM room_runs WHERE room_id = ?").get(roomId).n;
+    const photoCount = db
+      .prepare("SELECT COUNT(*) AS n FROM photos WHERE room_run_id IN (SELECT id FROM room_runs WHERE room_id = ?)")
+      .get(roomId).n;
+    logQualityEvent({
+      user: req.user,
+      action: "room_deleted",
+      subjectType: "room",
+      subjectId: roomId,
+      siteId: room.site_id,
+      roomId,
+      occurredAt: req.body?.occurred_at,
+      beforeValue: room.name,
+      comment: `${runCount} besøk og ${photoCount} bilder slettet sammen med rommet`,
+    });
     db.prepare("UPDATE deviations SET room_id = NULL WHERE room_id = ?").run(roomId);
     const runIds = db.prepare("SELECT id FROM room_runs WHERE room_id = ?").all(roomId).map((r) => r.id);
     if (runIds.length) {
@@ -1132,8 +1171,25 @@ roomsRouter.delete("/runs/:runId/photos/:photoId", requireAuth, requireRole("cle
   const photo = db.prepare("SELECT * FROM photos WHERE id = ? AND room_run_id = ?").get(req.params.photoId, req.params.runId);
   if (!photo) return res.status(404).json({ code: "not_found", error: "Not found" });
 
+  // The log write and the delete are one transaction on purpose: a photo is evidence, and if we
+  // cannot record that it was removed then it must not be removed. See services/qualityLog.js.
+  // The file itself is unlinked only after that transaction commits — a rolled-back delete must
+  // not leave the row pointing at a file that is already gone.
+  db.transaction(() => {
+    logQualityEvent({
+      user: req.user,
+      action: "photo_deleted",
+      subjectType: "photo",
+      subjectId: photo.id,
+      siteId: roomRun.room_site_id,
+      roomId: roomRun.room_id,
+      occurredAt: req.body?.occurred_at,
+      beforeValue: photo.file_path,
+      comment: roomRun.room_name || null,
+    });
+    db.prepare("DELETE FROM photos WHERE id = ?").run(photo.id);
+  })();
   removeUploadedFile(photo.file_path);
-  db.prepare("DELETE FROM photos WHERE id = ?").run(photo.id);
   stampRoomRunEdit(req.params.runId, req.body?.initials);
 
   res.json({ ok: true });

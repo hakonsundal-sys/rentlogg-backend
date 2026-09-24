@@ -430,3 +430,54 @@ CREATE INDEX IF NOT EXISTS idx_training_records_user ON training_records(user_id
 CREATE INDEX IF NOT EXISTS idx_time_entries_company_date ON time_entries(company_id, work_date);
 CREATE INDEX IF NOT EXISTS idx_time_entries_user_date ON time_entries(user_id, work_date);
 CREATE INDEX IF NOT EXISTS idx_time_entries_site_date ON time_entries(site_id, work_date);
+
+-- Kvalitetslogg: an append-only record of everything that happens to the cleaning documentation
+-- after it has been written. Rentlogg's history view (services/runHistory.js) is assembled from
+-- the timestamps the app happens to keep, which means it can only ever show the LAST edit, cannot
+-- show a task being un-ticked, and shows nothing at all when a photo, room or site is deleted —
+-- the cascades simply removed the rows and the files. For an ordinary checklist that was fine.
+-- For documentation a food-safety auditor relies on, evidence that can be changed or removed
+-- without trace is not evidence, so this table exists to make every such event survive the thing
+-- it happened to.
+--
+-- Same shape as time_entry_log, which already does this for payroll: one row per event, never
+-- updated, never deleted, carrying a snapshot of who did it rather than only a foreign key (the
+-- export has to still name them after they leave the company).
+--
+-- Deliberately NOT cascaded from anything. A row here outlives the room, site, photo or avvik it
+-- describes — that is the entire point — so subject_id is a plain integer, not a foreign key.
+--
+-- occurred_at vs recorded_at: a cleaner's phone queues actions in IndexedDB while it has no
+-- signal and replays them FIFO when it reconnects (frontend's offlineQueue.js), so a plain
+-- datetime('now') would date a morning's work to whenever the bus came back into coverage.
+-- occurred_at is when it actually happened, recorded_at when the server heard about it, and
+-- offline flags the rows where those two legitimately differ. A report that shows a tick as
+-- having happened hours after the room was finished, with no explanation, invites exactly the
+-- question this system exists to answer.
+CREATE TABLE IF NOT EXISTS quality_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  company_id INTEGER NOT NULL REFERENCES companies(id),
+  -- 'room_run' | 'room_run_item' | 'photo' | 'room' | 'site' | 'deviation'
+  subject_type TEXT NOT NULL,
+  subject_id INTEGER NOT NULL,
+  -- Where it happened, denormalised so a room/site report can be built after the room or site
+  -- itself is gone. Nullable because not every subject can resolve both.
+  site_id INTEGER,
+  room_id INTEGER,
+  occurred_at TEXT NOT NULL,
+  recorded_at TEXT DEFAULT (datetime('now')),
+  offline INTEGER DEFAULT 0,
+  user_id INTEGER REFERENCES users(id),
+  user_name TEXT,
+  -- 'photo_deleted' | 'room_deleted' | 'site_deleted' | 'deviation_deleted' | …
+  action TEXT NOT NULL,
+  -- What the record said before and after, as free text: enough for a reader to see what changed
+  -- without this table having to mirror every column of every table it describes.
+  before_value TEXT,
+  after_value TEXT,
+  comment TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_quality_log_subject ON quality_log(subject_type, subject_id, occurred_at);
+CREATE INDEX IF NOT EXISTS idx_quality_log_room ON quality_log(room_id, occurred_at);
+CREATE INDEX IF NOT EXISTS idx_quality_log_site ON quality_log(site_id, occurred_at);

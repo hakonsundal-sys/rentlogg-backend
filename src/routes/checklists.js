@@ -8,6 +8,7 @@ import { getRunDetail, getVirtualDayDetail, canAccessRun } from "../services/run
 import { getRoomCompletionForSiteDate } from "../services/rooms.js";
 import { toOsloDateStr, todayInOslo, findRunForSiteDate } from "../services/schedule.js";
 import { safeOriginalName, compressUploadedPhoto, imageFileFilter, removeUploadedFile } from "../utils/uploads.js";
+import { logQualityEvent } from "../services/qualityLog.js";
 
 export const checklistsRouter = Router();
 
@@ -299,14 +300,27 @@ checklistsRouter.post("/runs/:id/photos", requireAuth, requireRole("cleaner", "a
 });
 
 checklistsRouter.delete("/runs/:id/photos/:photoId", requireAuth, requireRole("cleaner", "admin", "manager"), (req, res) => {
-  const { status: scopeStatus, error: scopeError } = getRunScoped(req.params.id, req.user);
+  const { run, status: scopeStatus, error: scopeError } = getRunScoped(req.params.id, req.user);
   if (scopeError) return res.status(scopeStatus).json({ error: scopeError });
 
   const photo = db.prepare("SELECT * FROM photos WHERE id = ? AND run_id = ?").get(req.params.photoId, req.params.id);
   if (!photo) return res.status(404).json({ code: "not_found", error: "Not found" });
 
+  // Same rule as the room-level photo delete in rooms.js: the log write shares the delete's
+  // transaction, and the file is unlinked only after it commits.
+  db.transaction(() => {
+    logQualityEvent({
+      user: req.user,
+      action: "photo_deleted",
+      subjectType: "photo",
+      subjectId: photo.id,
+      siteId: run.site_id,
+      occurredAt: req.body?.occurred_at,
+      beforeValue: photo.file_path,
+    });
+    db.prepare("DELETE FROM photos WHERE id = ?").run(photo.id);
+  })();
   removeUploadedFile(photo.file_path);
-  db.prepare("DELETE FROM photos WHERE id = ?").run(photo.id);
   stampChecklistRunEdit(req.params.id, req.body?.initials);
 
   res.json({ ok: true });
@@ -316,7 +330,7 @@ checklistsRouter.delete("/runs/:id/photos/:photoId", requireAuth, requireRole("c
 // endpoint) — refuses to delete a run that has deviations attached rather than silently
 // orphaning them, since those represent real reports that shouldn't quietly disappear.
 checklistsRouter.delete("/runs/:id", requireAuth, requireRole("admin", "manager"), (req, res) => {
-  const { status, code, error } = getRunScoped(req.params.id, req.user);
+  const { run, status, code, error } = getRunScoped(req.params.id, req.user);
   if (error) return res.status(status).json({ code, error });
 
   const deviationCount = db.prepare("SELECT COUNT(*) AS n FROM deviations WHERE run_id = ?").get(req.params.id).n;
@@ -326,10 +340,23 @@ checklistsRouter.delete("/runs/:id", requireAuth, requireRole("admin", "manager"
     });
   }
 
-  db.prepare("SELECT file_path FROM photos WHERE run_id = ?").all(req.params.id).forEach((p) => removeUploadedFile(p.file_path));
-  db.prepare("DELETE FROM photos WHERE run_id = ?").run(req.params.id);
-  db.prepare("DELETE FROM checklist_run_items WHERE run_id = ?").run(req.params.id);
-  db.prepare("DELETE FROM checklist_runs WHERE id = ?").run(req.params.id);
+  const files = db.prepare("SELECT file_path FROM photos WHERE run_id = ?").all(req.params.id);
+  db.transaction(() => {
+    logQualityEvent({
+      user: req.user,
+      action: "visit_deleted",
+      subjectType: "checklist_run",
+      subjectId: Number(req.params.id),
+      siteId: run.site_id,
+      occurredAt: req.body?.occurred_at,
+      beforeValue: run.started_at,
+      comment: `${files.length} bilder slettet med besøket`,
+    });
+    db.prepare("DELETE FROM photos WHERE run_id = ?").run(req.params.id);
+    db.prepare("DELETE FROM checklist_run_items WHERE run_id = ?").run(req.params.id);
+    db.prepare("DELETE FROM checklist_runs WHERE id = ?").run(req.params.id);
+  })();
+  files.forEach((p) => removeUploadedFile(p.file_path));
 
   res.json({ ok: true });
 });

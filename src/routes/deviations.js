@@ -4,6 +4,7 @@ import path from "node:path";
 import { db } from "../db.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 import { safeOriginalName, compressUploadedPhoto, imageFileFilter, removeUploadedFile } from "../utils/uploads.js";
+import { logQualityEvent } from "../services/qualityLog.js";
 
 export const deviationsRouter = Router();
 
@@ -278,9 +279,27 @@ deviationsRouter.delete("/:id", requireAuth, requireRole("admin", "manager"), (r
   const { deviation, status, code, error } = getDeviationScoped(req.params.id, req.user);
   if (error) return res.status(status).json({ code, error });
 
-  db.prepare("SELECT file_path FROM photos WHERE deviation_id = ?").all(req.params.id).forEach((p) => removeUploadedFile(p.file_path));
-  db.prepare("DELETE FROM photos WHERE deviation_id = ?").run(req.params.id);
-  db.prepare("DELETE FROM deviations WHERE id = ?").run(req.params.id);
+  const files = db.prepare("SELECT file_path FROM photos WHERE deviation_id = ?").all(req.params.id);
+  // Logged inside the same transaction as the delete, and the files unlinked only once it has
+  // committed — see services/qualityLog.js. An avvik is the part of the documentation a customer
+  // is most likely to ask about later, so its disappearance is the last thing that should be
+  // silent.
+  db.transaction(() => {
+    logQualityEvent({
+      user: req.user,
+      action: "deviation_deleted",
+      subjectType: "deviation",
+      subjectId: Number(req.params.id),
+      siteId: deviation.site_id,
+      roomId: deviation.room_id,
+      occurredAt: req.body?.occurred_at,
+      beforeValue: deviation.title || deviation.description,
+      comment: `status ${deviation.status}, ${files.length} bilder slettet med avviket`,
+    });
+    db.prepare("DELETE FROM photos WHERE deviation_id = ?").run(req.params.id);
+    db.prepare("DELETE FROM deviations WHERE id = ?").run(req.params.id);
+  })();
+  files.forEach((p) => removeUploadedFile(p.file_path));
   recomputeSiteStatus(deviation.site_id);
 
   res.json({ ok: true });

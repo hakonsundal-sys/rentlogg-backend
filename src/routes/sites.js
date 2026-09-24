@@ -6,6 +6,7 @@ import { requireAuth, requireRole } from "../middleware/auth.js";
 import { newQrToken, qrLabelSvgDataUrl } from "../utils/qrcode.js";
 import { findRunForSiteDate, todayInOslo } from "../services/schedule.js";
 import { safeOriginalName, normalizeImageOrientation, documentFileFilter, removeUploadedFile } from "../utils/uploads.js";
+import { logQualityEvent } from "../services/qualityLog.js";
 import { haversineMeters } from "../utils/geo.js";
 import { startEntryForCheckin } from "../services/timeEntries.js";
 
@@ -165,6 +166,27 @@ sitesRouter.delete("/:id", requireAuth, requireRole("admin", "manager"), (req, r
   const deleteCascade = db.transaction((siteId) => {
     const runIds = db.prepare("SELECT id FROM checklist_runs WHERE site_id = ?").all(siteId).map((r) => r.id);
     const deviationIds = db.prepare("SELECT id FROM deviations WHERE site_id = ?").all(siteId).map((d) => d.id);
+
+    // The single most destructive action in the app: every visit, room, avvik, photo and document
+    // for a whole location, in one transaction. Counted before anything is deleted, and written
+    // inside this same transaction so that a location's documentation cannot vanish without a
+    // row saying who removed it and how much went with it. See services/qualityLog.js.
+    const roomCount = db.prepare("SELECT COUNT(*) AS n FROM rooms WHERE site_id = ?").get(siteId).n;
+    const roomRunCount = db
+      .prepare("SELECT COUNT(*) AS n FROM room_runs WHERE room_id IN (SELECT id FROM rooms WHERE site_id = ?)")
+      .get(siteId).n;
+    logQualityEvent({
+      user: req.user,
+      action: "site_deleted",
+      subjectType: "site",
+      subjectId: Number(siteId),
+      siteId: Number(siteId),
+      occurredAt: req.body?.occurred_at,
+      beforeValue: site.name,
+      comment:
+        `${runIds.length} besøk, ${roomCount} rom, ${roomRunCount} rombesøk og ` +
+        `${deviationIds.length} avvik slettet sammen med lokasjonen`,
+    });
 
     if (runIds.length) {
       const placeholders = runIds.map(() => "?").join(",");
