@@ -270,7 +270,11 @@ checklistsRouter.post("/runs/:id/complete", requireAuth, requireRole("cleaner", 
   const initials = (req.body?.initials || "").trim();
   if (!initials) return res.status(400).json({ code: "initials_required_visit", error: "Navn er påkrevd for å fullføre besøket." });
 
-  db.prepare("UPDATE checklist_runs SET completed_at = datetime('now'), signed_initials = ? WHERE id = ?").run(initials, run.id);
+  // Same reason as the room-level completion in rooms.js: signed_initials is what they typed,
+  // signed_by is who they were logged in as, and only the second one is attributable.
+  db.prepare(
+    "UPDATE checklist_runs SET completed_at = datetime('now'), signed_initials = ?, signed_by = ? WHERE id = ?"
+  ).run(initials, req.user.id, run.id);
 
   const hasOpenDeviation = db
     .prepare("SELECT id FROM deviations WHERE site_id = ? AND status != 'resolved'")

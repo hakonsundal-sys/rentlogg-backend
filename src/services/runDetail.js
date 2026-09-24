@@ -5,6 +5,9 @@ import { buildRunHistory } from "./runHistory.js";
 
 const roomRunPhotosStmt = db.prepare("SELECT * FROM photos WHERE room_run_id = ?");
 const cleanerNameStmt = db.prepare("SELECT name FROM users WHERE id = ?");
+const participantsStmt = db.prepare(
+  "SELECT user_name FROM room_run_participants WHERE room_run_id = ? ORDER BY first_action_at"
+);
 // SELECT * (not just id/name/responsible) — isRoomDueOn needs interval_days/monthly_weekday/
 // monthly_occurrence too, to compute `due` per room below.
 const siteRoomsStmt = db.prepare("SELECT * FROM rooms WHERE site_id = ? ORDER BY sort_order, id");
@@ -34,6 +37,15 @@ function buildRoomsForDate(siteId, dateStr) {
       ready_for_approval_at: roomRun?.ready_for_approval_at || null,
       approved_at: roomRun?.approved_at || null,
       approved_by_initials: roomRun?.approved_by_initials || null,
+      // Which side closed the gate. 'customer' is the normal case; anything else means an OKV
+      // user approved in the customer's place, which the report has to say out loud rather than
+      // showing a name that reads as the customer's own sign-off.
+      approved_by_role: roomRun?.approved_by_role || null,
+      approval_override_reason: roomRun?.approval_override_reason || null,
+      // Everyone who actually worked this room today, not just whoever opened it first — see
+      // room_run_participants in schema.sql. Empty for every run recorded before this existed,
+      // which is honest: we genuinely do not know who else was in the room those days.
+      participants: roomRun ? participantsStmt.all(roomRun.id).map((p) => p.user_name) : [],
       note: roomRun?.note || null,
       items: roomRun ? getRoomRunItems(roomRun.id) : [],
       photos: roomRun ? roomRunPhotosStmt.all(roomRun.id) : [],

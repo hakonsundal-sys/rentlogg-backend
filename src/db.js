@@ -327,3 +327,25 @@ ensureColumn("users", "employee_number", "employee_number TEXT");
 // up simply never sees the filters.
 ensureColumn("users", "team_id", "team_id INTEGER REFERENCES teams(id)");
 ensureColumn("users", "employee_group_id", "employee_group_id INTEGER REFERENCES employee_groups(id)");
+
+// Hvem utførte dette, egentlig. signed_initials is free text the client types into the request
+// body — nothing binds it to the account that made the call, so the name on a signed-off room is
+// whatever was typed. For a checklist that was fine; for documentation an auditor leans on, the
+// signature has to be attributable. signed_by/approved_by are that binding, taken from req.user
+// and never from the body. signed_initials stays exactly as it is: it is the cleaner's own
+// record of what they confirmed on the day, and rewriting history is the thing this whole line
+// of work exists to prevent.
+ensureColumn("room_runs", "signed_by", "signed_by INTEGER REFERENCES users(id)");
+ensureColumn("checklist_runs", "signed_by", "signed_by INTEGER REFERENCES users(id)");
+ensureColumn("room_runs", "approved_by", "approved_by INTEGER REFERENCES users(id)");
+// Which side actually closed the approval gate. POST /rooms/runs/:id/approve lets an admin or
+// manager approve in the customer's place when the customer is unreachable, and until now the
+// stored record could not tell that apart from the customer approving themselves — so a report
+// saying "Godkjent av Toril" might have been typed by an OKV admin. Confirmed 2026-09-24 that
+// this does not happen in practice, which makes recording it a precision fix rather than a
+// change of anybody's workflow, and makes the count meaningful: if it starts rising, the
+// customer's own sign-off step has stopped working and we want to find that ourselves.
+ensureColumn("room_runs", "approved_by_role", "approved_by_role TEXT");
+// Why the emergency exit was used. Not yet required by the route — the frontend has to ask for it
+// first, or an admin approval would start failing in production — but recorded whenever sent.
+ensureColumn("room_runs", "approval_override_reason", "approval_override_reason TEXT");

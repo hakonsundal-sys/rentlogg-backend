@@ -39,8 +39,9 @@ function nthWeekdayOfMonth(year, month, weekday, occurrence) {
 // Room runs are stored in UTC; pre-filter to a +/-1 day UTC window, then resolve the exact
 // Oslo calendar day in JS — same approach as schedule.js's site-run lookup.
 const candidateRoomRunsStmt = db.prepare(
-  `SELECT id, started_at, completed_at, cleaner_id, signed_initials, edited_at, edited_by_initials, note,
-          ready_for_approval_at, approved_at, approved_by_initials
+  `SELECT id, started_at, completed_at, cleaner_id, signed_initials, signed_by, edited_at, edited_by_initials, note,
+          ready_for_approval_at, approved_at, approved_by_initials, approved_by, approved_by_role,
+          approval_override_reason
    FROM room_runs
    WHERE room_id = ? AND date(started_at) BETWEEN date(?, '-1 day') AND date(?, '+1 day')
    ORDER BY started_at DESC`

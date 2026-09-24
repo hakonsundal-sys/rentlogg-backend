@@ -681,3 +681,25 @@ CREATE TABLE IF NOT EXISTS quality_log (
 CREATE INDEX IF NOT EXISTS idx_quality_log_subject ON quality_log(subject_type, subject_id, occurred_at);
 CREATE INDEX IF NOT EXISTS idx_quality_log_room ON quality_log(room_id, occurred_at);
 CREATE INDEX IF NOT EXISTS idx_quality_log_site ON quality_log(site_id, occurred_at);
+
+-- Hvem var med i rommet. A room_run is shared per room per day: findOrCreateRoomRunForDate hands
+-- the same row to whoever opens the room first, so its cleaner_id only ever names that person —
+-- see time_entries' own comment above, which is why the timesheet got its own table rather than
+-- reading hours off the checklist. The same flaw is worse for the quality record: at a site like
+-- Nortura Malvik, with 60 rooms and a crew working them in parallel, "who cleaned this room"
+-- currently has one name on it and no way to tell whether that name did the work.
+--
+-- One row per person who actually touched the run — ticking a task, choosing a soap, adding a
+-- photo, writing a note, completing it. user_name is snapshotted beside the id for the same
+-- reason approved_by_name is on time_entries: the documentation has to still name them after
+-- they leave the company.
+CREATE TABLE IF NOT EXISTS room_run_participants (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  room_run_id INTEGER NOT NULL REFERENCES room_runs(id),
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  user_name TEXT NOT NULL,
+  first_action_at TEXT DEFAULT (datetime('now')),
+  UNIQUE(room_run_id, user_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_room_run_participants_run ON room_run_participants(room_run_id);

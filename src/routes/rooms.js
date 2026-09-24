@@ -996,6 +996,25 @@ roomsRouter.post("/:id/reopen", requireAuth, requireRole("cleaner", "admin", "ma
 // Deliberately leaves completed_at/signed_initials untouched: that stays the cleaner's original,
 // honest record of what they confirmed on the day; this is a separate, additive "changed
 // afterward" trail so nobody can silently rewrite a signed-off visit.
+// A room_run is shared per room per day (see room_run_participants in schema.sql), so its
+// cleaner_id only ever names whoever opened the room first. Every route below that changes what
+// the run says calls this, so the record ends up naming everyone who actually worked it rather
+// than one person picked by who got there first.
+//
+// INSERT OR IGNORE: free after that person's first action on that run, and no read-then-write
+// race between two cleaners ticking tasks in the same room at the same moment.
+//
+// Taken from req.user, never from the request body — the whole point is that this one cannot be
+// typed in. Deliberately not called from /approve: an approver is recorded by approved_by, they
+// did not clean the room.
+const insertParticipantStmt = db.prepare(
+  "INSERT OR IGNORE INTO room_run_participants (room_run_id, user_id, user_name) VALUES (?, ?, ?)"
+);
+
+function recordParticipant(runId, user) {
+  insertParticipantStmt.run(Number(runId), user.id, user.name || "");
+}
+
 function stampRoomRunEdit(runId, initials) {
   if (!initials || !initials.trim()) return;
   const run = db.prepare("SELECT completed_at FROM room_runs WHERE id = ?").get(runId);
@@ -1019,6 +1038,7 @@ roomsRouter.patch("/runs/:runId/items/:itemId", requireAuth, requireRole("cleane
   }
   const result = db.prepare("UPDATE room_run_items SET done = ? WHERE id = ? AND room_run_id = ?").run(done ? 1 : 0, req.params.itemId, req.params.runId);
   if (result.changes === 0) return res.status(404).json({ code: "not_found", error: "Not found" });
+  recordParticipant(req.params.runId, req.user);
   stampRoomRunEdit(req.params.runId, initials);
   res.json({ ok: true });
 });
@@ -1055,6 +1075,7 @@ roomsRouter.patch("/runs/:runId/items/:itemId/options/:optionId", requireAuth, r
   if (!itemSelectionSatisfied(req.params.itemId)) {
     db.prepare("UPDATE room_run_items SET done = 0 WHERE id = ? AND room_run_id = ?").run(req.params.itemId, req.params.runId);
   }
+  recordParticipant(req.params.runId, req.user);
   stampRoomRunEdit(req.params.runId, req.body?.initials);
   res.json({ ok: true });
 });
@@ -1083,6 +1104,7 @@ roomsRouter.patch("/runs/:runId/note", requireAuth, requireRole("cleaner", "admi
   if (ownError) return res.status(ownError.status).json({ error: ownError.error });
 
   db.prepare("UPDATE room_runs SET note = ? WHERE id = ?").run(req.body?.note || null, req.params.runId);
+  recordParticipant(req.params.runId, req.user);
   stampRoomRunEdit(req.params.runId, req.body?.initials);
   res.json({ ok: true });
 });
@@ -1098,6 +1120,7 @@ roomsRouter.post("/runs/:runId/items/complete-all", requireAuth, requireRole("cl
   // Deliberately skips flervalg tasks nobody has answered yet — a blanket "merk alle" must not
   // be able to claim a soap was used without saying which one (see itemSelectionSatisfied).
   markAnswerableItemsDoneStmt.run(req.params.runId);
+  recordParticipant(req.params.runId, req.user);
   stampRoomRunEdit(req.params.runId, req.body?.initials);
   res.json({ ok: true });
 });
@@ -1116,12 +1139,20 @@ roomsRouter.post("/runs/:runId/complete", requireAuth, requireRole("cleaner", "a
   const initials = (req.body?.initials || "").trim();
   if (!initials) return res.status(400).json({ code: "initials_required_room", error: "Navn er påkrevd for å fullføre rommet." });
 
+  // signed_initials is what they typed; signed_by is who they were logged in as. Both are kept:
+  // the typed name is the cleaner's own record of the day, the id is what makes it attributable.
+  recordParticipant(roomRun.id, req.user);
+
   if (roomRun.room_requires_approval) {
-    db.prepare("UPDATE room_runs SET ready_for_approval_at = datetime('now'), signed_initials = ? WHERE id = ?").run(initials, roomRun.id);
+    db.prepare(
+      "UPDATE room_runs SET ready_for_approval_at = datetime('now'), signed_initials = ?, signed_by = ? WHERE id = ?"
+    ).run(initials, req.user.id, roomRun.id);
     return res.json({ ok: true, awaitingApproval: true });
   }
 
-  db.prepare("UPDATE room_runs SET completed_at = datetime('now'), signed_initials = ? WHERE id = ?").run(initials, roomRun.id);
+  db.prepare(
+    "UPDATE room_runs SET completed_at = datetime('now'), signed_initials = ?, signed_by = ? WHERE id = ?"
+  ).run(initials, req.user.id, roomRun.id);
   res.json({ ok: true });
 });
 
@@ -1141,9 +1172,36 @@ roomsRouter.post("/runs/:runId/approve", requireAuth, requireRole("customer", "a
   const initials = (req.body?.initials || "").trim();
   if (!initials) return res.status(400).json({ code: "initials_required_approve_room", error: "Navn er påkrevd for å godkjenne rommet." });
 
-  db.prepare(
-    "UPDATE room_runs SET approved_at = datetime('now'), approved_by_initials = ?, completed_at = datetime('now') WHERE id = ?"
-  ).run(initials, roomRun.id);
+  // Who actually closed the gate. An admin or manager approving here is the emergency exit for a
+  // customer who cannot be reached (kept deliberately, 2026-09-24) — but an exit nobody can see
+  // afterwards weakens the very record it exists to rescue, so the role is stored alongside the
+  // typed name and the use of it is logged as its own event. A reason is recorded when sent;
+  // making it mandatory waits until the frontend asks for one, or every admin approval in
+  // production would start failing on a field the UI has no field for.
+  const isOverride = req.user.role !== "customer";
+  const overrideReason = isOverride ? (req.body?.reason || "").trim() || null : null;
+
+  db.transaction(() => {
+    db.prepare(
+      `UPDATE room_runs SET approved_at = datetime('now'), approved_by_initials = ?, approved_by = ?,
+              approved_by_role = ?, approval_override_reason = ?, completed_at = datetime('now')
+       WHERE id = ?`
+    ).run(initials, req.user.id, req.user.role, overrideReason, roomRun.id);
+
+    if (isOverride) {
+      logQualityEvent({
+        user: req.user,
+        action: "approval_override",
+        subjectType: "room_run",
+        subjectId: roomRun.id,
+        siteId: roomRun.room_site_id,
+        roomId: roomRun.room_id,
+        occurredAt: req.body?.occurred_at,
+        afterValue: initials,
+        comment: overrideReason || "Godkjent på kundens vegne, ingen begrunnelse oppgitt",
+      });
+    }
+  })();
   res.json({ ok: true });
 });
 
@@ -1158,6 +1216,7 @@ roomsRouter.post("/runs/:runId/photos", requireAuth, requireRole("cleaner", "adm
   const info = db
     .prepare("INSERT INTO photos (room_run_id, file_path, kind) VALUES (?, ?, ?)")
     .run(req.params.runId, path.join("uploads", storedName), kind);
+  recordParticipant(req.params.runId, req.user);
   stampRoomRunEdit(req.params.runId, req.body.initials);
   res.status(201).json({ id: info.lastInsertRowid, file_path: storedName });
 });
@@ -1190,6 +1249,7 @@ roomsRouter.delete("/runs/:runId/photos/:photoId", requireAuth, requireRole("cle
     db.prepare("DELETE FROM photos WHERE id = ?").run(photo.id);
   })();
   removeUploadedFile(photo.file_path);
+  recordParticipant(req.params.runId, req.user);
   stampRoomRunEdit(req.params.runId, req.body?.initials);
 
   res.json({ ok: true });

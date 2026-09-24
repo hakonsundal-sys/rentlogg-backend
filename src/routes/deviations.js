@@ -264,9 +264,16 @@ deviationsRouter.patch("/:id/approve", requireAuth, requireRole("customer"), (re
           )
           .get(deviation.room_id);
         if (pendingRun) {
+          // This closes a room's approval gate as a side effect of approving an avvik, so it has
+          // to record who did it the same way POST /rooms/runs/:id/approve does — otherwise the
+          // one approval path that nobody explicitly clicked "Godkjenn rom" for would be the one
+          // with no attributable approver on it. Always role 'customer': this route is
+          // customer-only.
           db.prepare(
-            "UPDATE room_runs SET approved_at = datetime('now'), approved_by_initials = ?, completed_at = datetime('now') WHERE id = ?"
-          ).run(trimmedInitials, pendingRun.id);
+            `UPDATE room_runs SET approved_at = datetime('now'), approved_by_initials = ?, approved_by = ?,
+                    approved_by_role = ?, completed_at = datetime('now')
+             WHERE id = ?`
+          ).run(trimmedInitials, req.user.id, req.user.role, pendingRun.id);
         }
       }
     }
