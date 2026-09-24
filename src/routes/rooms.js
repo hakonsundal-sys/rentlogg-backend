@@ -385,6 +385,12 @@ siteRoomsRouter.post("/complete-all-due", requireAuth, requireRole("cleaner", "a
     const completed = [];
     const skipped = [];
     const sentForApproval = [];
+    // Which rooms this sweep actually changed, either way. The caller asks about every room it
+    // thinks is due, and the filters above plus the unanswered-flervalg check below mean that is
+    // usually more rooms than get touched — so a client that wants to undo the sweep has to be
+    // told what to undo. Undoing the requested set instead reopens rooms this never wrote to,
+    // and /rooms/:id/reopen clears ready_for_approval_at and every tick with it.
+    const affected = [];
     for (const room of rooms) {
       const run = findOrCreateTodayRoomRun(room.id, req.user.id);
       markAnswerableItemsDoneStmt.run(run.id);
@@ -406,14 +412,21 @@ siteRoomsRouter.post("/complete-all-due", requireAuth, requireRole("cleaner", "a
           "UPDATE room_runs SET ready_for_approval_at = datetime('now'), signed_initials = ?, signed_by = ? WHERE id = ?"
         ).run(initials, req.user.id, run.id);
         sentForApproval.push(room.name);
+        affected.push(room.id);
         continue;
       }
       db.prepare(
         "UPDATE room_runs SET completed_at = datetime('now'), signed_initials = ?, signed_by = ? WHERE id = ?"
       ).run(initials, req.user.id, run.id);
       completed.push(room.id);
+      affected.push(room.id);
     }
-    return { completedCount: completed.length, skippedRooms: skipped, sentForApprovalRooms: sentForApproval };
+    return {
+      completedCount: completed.length,
+      skippedRooms: skipped,
+      sentForApprovalRooms: sentForApproval,
+      affectedRoomIds: affected,
+    };
   });
 
   res.json(completeAll(dueIncomplete));
