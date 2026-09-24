@@ -23,13 +23,29 @@ const docUpload = multer({
 
 const siteHasCustomerRoomsStmt = db.prepare("SELECT 1 FROM rooms WHERE site_id = ? AND responsible = 'customer' LIMIT 1");
 
+// A site row carries OKV's own operational config next to the facts the customer portal needs.
+// report_recipients is the daily digest's distribution list — often OKV-internal addresses — and
+// a customer opening their own dashboard could read it straight out of the API response. Stripped
+// from every site object a customer can reach; the two call sites below are the only routes that
+// hand that role a whole row (every other customer-facing route returns a site's name, not the
+// row). Kept as a list so the neighbouring internal fields (report_send_hour, and the
+// time_billing_mode/time_fixed_minutes rammetimetall) can be added the same way if they should be
+// hidden too.
+const CUSTOMER_HIDDEN_SITE_FIELDS = ["report_recipients"];
+
+function siteForCustomer(site) {
+  const visible = { ...site };
+  for (const field of CUSTOMER_HIDDEN_SITE_FIELDS) delete visible[field];
+  return visible;
+}
+
 function scopeSitesForUser(user) {
   if (user.role === "customer") {
     const sites = db.prepare("SELECT * FROM sites WHERE client_id = ? ORDER BY name").all(user.client_id);
     // Lets the customer portal show a direct "fill out today's checklist" shortcut only on sites
     // where that's actually possible — most customer sites have no rooms marked responsible, and
     // showing the shortcut there would just open an empty, nothing-to-do checklist.
-    return sites.map((site) => ({ ...site, has_customer_rooms: !!siteHasCustomerRoomsStmt.get(site.id) }));
+    return sites.map((site) => ({ ...siteForCustomer(site), has_customer_rooms: !!siteHasCustomerRoomsStmt.get(site.id) }));
   }
   // company_id is null for a role with no company (only super_admin) — WHERE company_id = ?
   // against null naturally matches nothing, so that role sees no operational sites by default
@@ -417,5 +433,5 @@ sitesRouter.get("/checkin/:qrToken", requireAuth, requireRole("customer"), (req,
   // Same "unknown QR code" message for a genuinely unknown token and one belonging to another
   // client's site — a customer scanning a foreign QR shouldn't learn that a matching site exists.
   if (!site || site.client_id !== req.user.client_id) return res.status(404).json({ code: "unknown_qr_code", error: "Unknown QR code" });
-  res.json({ site: { ...site, has_customer_rooms: !!siteHasCustomerRoomsStmt.get(site.id) } });
+  res.json({ site: { ...siteForCustomer(site), has_customer_rooms: !!siteHasCustomerRoomsStmt.get(site.id) } });
 });
