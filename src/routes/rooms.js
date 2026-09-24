@@ -7,7 +7,7 @@ import { db } from "../db.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 import { todayInOslo } from "../services/schedule.js";
 import { getRoomsForSite, findOrCreateTodayRoomRun, findOrCreateRoomRunForDate, findRoomRunForDate, getMonthlyItemsForSite, getRoomGridForSiteMonth, getRoomRunItems, ensureRunItemOptions } from "../services/rooms.js";
-import { safeOriginalName, normalizeImageOrientation, imageFileFilter, removeUploadedFile, UploadRejectedError } from "../utils/uploads.js";
+import { safeOriginalName, compressUploadedPhoto, imageFileFilter, removeUploadedFile, UploadRejectedError } from "../utils/uploads.js";
 
 export const siteRoomsRouter = Router({ mergeParams: true });
 export const roomsRouter = Router();
@@ -1114,13 +1114,13 @@ roomsRouter.post("/runs/:runId/photos", requireAuth, requireRole("cleaner", "adm
   const ownError = requireCustomerOwnsRoom(req.user, roomRun.room_responsible);
   if (ownError) return res.status(ownError.status).json({ error: ownError.error });
   if (!req.file) return res.status(400).json({ code: "no_file_uploaded", error: "No file uploaded (field name must be 'photo')" });
-  await normalizeImageOrientation(path.join(process.env.UPLOADS_DIR || "uploads", req.file.filename));
+  const storedName = await compressUploadedPhoto(process.env.UPLOADS_DIR || "uploads", req.file.filename);
   const kind = req.body.kind || "general";
   const info = db
     .prepare("INSERT INTO photos (room_run_id, file_path, kind) VALUES (?, ?, ?)")
-    .run(req.params.runId, path.join("uploads", req.file.filename), kind);
+    .run(req.params.runId, path.join("uploads", storedName), kind);
   stampRoomRunEdit(req.params.runId, req.body.initials);
-  res.status(201).json({ id: info.lastInsertRowid, file_path: req.file.filename });
+  res.status(201).json({ id: info.lastInsertRowid, file_path: storedName });
 });
 
 roomsRouter.delete("/runs/:runId/photos/:photoId", requireAuth, requireRole("cleaner", "admin", "manager", "customer"), (req, res) => {

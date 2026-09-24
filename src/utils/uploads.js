@@ -95,3 +95,57 @@ export async function normalizeImageOrientation(absolutePath) {
     console.error("Kunne ikke normalisere bilderetning:", err.message);
   }
 }
+
+// A phone photo lands at 2-4MB, and a cleaning record's photos have to stay retrievable for the
+// documentation's whole retention period (three years, agreed with Nortura 2026-09-24) on a
+// single 1GB Render disk. Nothing in the app ever shows a photo larger than these bounds, so
+// keeping the camera original buys nothing and costs roughly an order of magnitude in disk —
+// services/runReport.js has already re-encoded to 1200px/q72 for every e-mail since 2026-09-16.
+// This does it once, at rest, instead of on every send. Kept a little larger than the report's
+// own bounds (1600px/q80) because a deviation photo is evidence someone may need to zoom into,
+// and that detail can't be recovered once it's been thrown away here.
+//
+// Returns the filename actually stored, which is NOT always the one multer wrote: the bytes
+// become JPEG, so the extension has to follow them. /uploads derives the Content-Type it serves
+// from the stored file's extension (see routes/uploads.js and imageFileFilter above), so leaving
+// a .heic name on JPEG bytes would hand every browser a file it refuses to render. Callers must
+// persist the returned name, never req.file.filename.
+//
+// Falls back to the original file, untouched and under its original name, on any sharp failure —
+// an unreadable or unsupported upload must cost the user a smaller file, never their photo.
+const PHOTO_MAX_EDGE = 1600;
+const PHOTO_JPEG_QUALITY = 80;
+
+// Whether two paths name the same file on this platform. Windows (local dev) is case-insensitive,
+// so "1758-IMG.JPG" and "1758-IMG.jpg" are one file there and two on Linux (production) — getting
+// this wrong in the delete below would unlink the freshly written photo on one of the two.
+function isSamePath(a, b) {
+  const [left, right] = [path.resolve(a), path.resolve(b)];
+  return process.platform === "win32" ? left.toLowerCase() === right.toLowerCase() : left === right;
+}
+
+export async function compressUploadedPhoto(uploadsDir, filename) {
+  const sourcePath = path.join(uploadsDir, filename);
+  const targetName = `${path.basename(filename, path.extname(filename))}.jpg`;
+  const targetPath = path.join(uploadsDir, targetName);
+  // sharp can't read and write the same path in one pipeline, same as normalizeImageOrientation.
+  const tempPath = `${sourcePath}.compressed`;
+
+  try {
+    await sharp(sourcePath)
+      .rotate()
+      .resize(PHOTO_MAX_EDGE, PHOTO_MAX_EDGE, { fit: "inside", withoutEnlargement: true })
+      .jpeg({ quality: PHOTO_JPEG_QUALITY })
+      .toFile(tempPath);
+    await fs.rename(tempPath, targetPath);
+    if (!isSamePath(sourcePath, targetPath)) await fs.rm(sourcePath, { force: true });
+    return targetName;
+  } catch (err) {
+    await fs.rm(tempPath, { force: true });
+    console.error("Kunne ikke komprimere opplastet bilde:", err.message);
+    // The upload still has to be usable, so fall back to what every photo upload did before this
+    // existed: bake in the EXIF rotation and keep the original bytes under the original name.
+    await normalizeImageOrientation(sourcePath);
+    return filename;
+  }
+}

@@ -7,7 +7,7 @@ import { gatherReportPhotos, streamPhotosZip } from "../services/photos.js";
 import { getRunDetail, getVirtualDayDetail, canAccessRun } from "../services/runDetail.js";
 import { getRoomCompletionForSiteDate } from "../services/rooms.js";
 import { toOsloDateStr, todayInOslo, findRunForSiteDate } from "../services/schedule.js";
-import { safeOriginalName, normalizeImageOrientation, imageFileFilter, removeUploadedFile } from "../utils/uploads.js";
+import { safeOriginalName, compressUploadedPhoto, imageFileFilter, removeUploadedFile } from "../utils/uploads.js";
 
 export const checklistsRouter = Router();
 
@@ -287,13 +287,15 @@ checklistsRouter.post("/runs/:id/photos", requireAuth, requireRole("cleaner", "a
   const { status, code, error } = getRunScoped(req.params.id, req.user);
   if (error) return res.status(status).json({ code, error });
   if (!req.file) return res.status(400).json({ code: "no_file_uploaded", error: "No file uploaded (field name must be 'photo')" });
-  await normalizeImageOrientation(path.join(process.env.UPLOADS_DIR || "uploads", req.file.filename));
+  // compressUploadedPhoto returns the name actually stored, which differs from the uploaded one
+  // whenever the source wasn't already a .jpg — persist that, never req.file.filename.
+  const storedName = await compressUploadedPhoto(process.env.UPLOADS_DIR || "uploads", req.file.filename);
   const kind = req.body.kind || "general";
   const info = db
     .prepare("INSERT INTO photos (run_id, file_path, kind) VALUES (?, ?, ?)")
-    .run(req.params.id, path.join("uploads", req.file.filename), kind);
+    .run(req.params.id, path.join("uploads", storedName), kind);
   stampChecklistRunEdit(req.params.id, req.body.initials);
-  res.status(201).json({ id: info.lastInsertRowid, file_path: req.file.filename });
+  res.status(201).json({ id: info.lastInsertRowid, file_path: storedName });
 });
 
 checklistsRouter.delete("/runs/:id/photos/:photoId", requireAuth, requireRole("cleaner", "admin", "manager"), (req, res) => {

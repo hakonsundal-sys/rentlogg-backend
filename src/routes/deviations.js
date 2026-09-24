@@ -3,7 +3,7 @@ import multer from "multer";
 import path from "node:path";
 import { db } from "../db.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
-import { safeOriginalName, normalizeImageOrientation, imageFileFilter, removeUploadedFile } from "../utils/uploads.js";
+import { safeOriginalName, compressUploadedPhoto, imageFileFilter, removeUploadedFile } from "../utils/uploads.js";
 
 export const deviationsRouter = Router();
 
@@ -148,11 +148,11 @@ deviationsRouter.post("/:id/photos", requireAuth, requireRole("admin", "cleaner"
   const { status, code, error } = getDeviationScoped(req.params.id, req.user);
   if (error) return res.status(status).json({ code, error });
   if (!req.file) return res.status(400).json({ code: "no_file_uploaded", error: "No file uploaded (field name must be 'photo')" });
-  await normalizeImageOrientation(path.join(process.env.UPLOADS_DIR || "uploads", req.file.filename));
+  const storedName = await compressUploadedPhoto(process.env.UPLOADS_DIR || "uploads", req.file.filename);
   const info = db
     .prepare("INSERT INTO photos (deviation_id, file_path, kind) VALUES (?, ?, 'general')")
-    .run(req.params.id, path.join("uploads", req.file.filename));
-  res.status(201).json({ id: info.lastInsertRowid, file_path: req.file.filename });
+    .run(req.params.id, path.join("uploads", storedName));
+  res.status(201).json({ id: info.lastInsertRowid, file_path: storedName });
 });
 
 // Sets a site back to 'ok' once it has no more open/in_progress deviations (matches existing behavior).
