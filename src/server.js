@@ -50,6 +50,31 @@ app.use("/uploads", uploadsRouter);
 
 app.get("/health", (req, res) => res.json({ ok: true }));
 
+// Captured at module load. Render's starter plan runs one instance and replaces it on every
+// deploy, so process start is the closest thing this runtime actually knows to "when did the API
+// last change" — a manual restart moves it too, which is why the field is named for what it
+// measures rather than for what it is usually used as.
+const startedAt = new Date().toISOString();
+
+// Set by Render on every build. Absent locally, and that is fine — nothing here may throw at
+// module load, since this file is the whole server's entry point.
+const commit = (process.env.RENDER_GIT_COMMIT || "").slice(0, 7) || null;
+
+let version = null;
+try {
+  version = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
+} catch {
+  // A missing or unreadable package.json is not worth refusing to boot over — the field is
+  // informational and the two below carry the part anyone actually reads.
+}
+
+// Deliberately public, like /health: it carries no data that isn't already in a public repo, and
+// the callers that need it most are the ones with no token — the login screen, and a curl after a
+// deploy. It is also the marker a deploy can be verified against, which /health cannot be: the old
+// instance answers {"ok":true} right up until it is swapped out, so a 200 there proves only that
+// something is running, never that the new code is.
+app.get("/version", (req, res) => res.json({ version, commit, startedAt }));
+
 // Every site's printed QR sticker encodes {PUBLIC_BASE_URL}/checkin/:qrToken — this backend's
 // own domain — because that's the only URL the app can compute at print time. Scanned through
 // the in-app scanner that's just parsed as text and never actually requested, but a phone's
