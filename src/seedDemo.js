@@ -40,7 +40,12 @@ function writeDemoPhoto(filename) {
 
 console.log(`Resetting demo data for "${COMPANY_NAME}"...`);
 
-let company = db.prepare("SELECT * FROM companies WHERE name = ?").get(COMPANY_NAME);
+// DEMO_COMPANY_ID for the same reason seed.js takes SEED_COMPANY_ID: the demo company can be
+// renamed too, and then the name no longer finds it. Unlike seed.js this script may still create
+// one when nothing matches — building a demo tenant is the whole point of it.
+let company = process.env.DEMO_COMPANY_ID
+  ? db.prepare("SELECT * FROM companies WHERE id = ?").get(Number(process.env.DEMO_COMPANY_ID))
+  : db.prepare("SELECT * FROM companies WHERE name = ? COLLATE NOCASE").get(COMPANY_NAME);
 if (!company) {
   const info = db.prepare("INSERT INTO companies (name) VALUES (?)").run(COMPANY_NAME);
   company = { id: info.lastInsertRowid, name: COMPANY_NAME };

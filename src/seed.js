@@ -19,13 +19,36 @@ const TEMPLATES = {
 // row it creates needs to land in a real company or it's invisible to everyone (WHERE
 // company_id = ? never matches NULL). OKV Gruppen is the one company this original seed data
 // has always belonged to; find-or-create it the same way seedDemo.js does for its own company.
-const COMPANY_NAME = "OKV Gruppen";
-let company = db.prepare("SELECT * FROM companies WHERE name = ?").get(COMPANY_NAME);
+// Found by id when SEED_COMPANY_ID says so, because a company can be renamed (super_admin can
+// do it from "Firmaer") and an id cannot. The name is only the fallback for a fresh checkout.
+const COMPANY_NAME = process.env.SEED_COMPANY_NAME || "OKV Gruppen";
+const wantedId = process.env.SEED_COMPANY_ID;
+let company = wantedId
+  ? db.prepare("SELECT * FROM companies WHERE id = ?").get(Number(wantedId))
+  : db.prepare("SELECT * FROM companies WHERE name = ? COLLATE NOCASE").get(COMPANY_NAME);
+
 if (!company) {
+  // The dangerous case: this script used to create whatever it could not find. Once the real
+  // company was renamed, "OKV Gruppen" stopped matching, and a run meant to repair the live
+  // tenant would instead have built a second one beside it — six demo clients, sites, templates
+  // and four users — with nothing to signal that anything was wrong. Creating is only ever right
+  // on an empty database.
+  const finnesFraFor = db.prepare("SELECT COUNT(*) AS n FROM companies").get().n;
+  if (finnesFraFor > 0) {
+    console.error(
+      wantedId
+        ? `Fant ikke firma med id ${wantedId}. Avbryter — vil ikke opprette et nytt.`
+        : `Fant ikke firmaet "${COMPANY_NAME}", men databasen har ${finnesFraFor} firma fra før.\n` +
+          "Er det omdøpt? Kjør på nytt med SEED_COMPANY_ID=<id>, eller SEED_COMPANY_NAME=<navn>.\n" +
+          "Avbryter i stedet for å opprette et firma nummer to."
+    );
+    process.exit(1);
+  }
   const info = db.prepare("INSERT INTO companies (name) VALUES (?)").run(COMPANY_NAME);
   company = { id: info.lastInsertRowid, name: COMPANY_NAME };
 }
 const companyId = company.id;
+console.log(`Seeder inn i firma "${company.name}" (id ${companyId}).`);
 
 // Seed passwords used to be literals here (and in the README), which meant any deployment that
 // ran `npm run seed` shipped with publicly known admin credentials. They now come from the
