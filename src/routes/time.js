@@ -1044,7 +1044,23 @@ timeRouter.patch("/registers/:register/:id", requireAuth, requireRole("admin", "
   if (!row || row.company_id !== req.user.company_id) return res.status(404).json({ code: "not_found", error: "Not found" });
   const fields = ["name", "active", "sort_order"].filter((f) => f in req.body);
   if (fields.length === 0) return res.status(400).json({ code: "no_valid_fields", error: "No valid fields to update" });
-  const values = fields.map((f) => (typeof req.body[f] === "boolean" ? (req.body[f] ? 1 : 0) : req.body[f]));
+  // The field names are a fixed list, but the values came straight off the request. POST above
+  // already refuses a blank name; without the same check here a rename to "" saved a nameless row
+  // that the timesheet's team filter then rendered as an unidentifiable blank, and a name of null
+  // hit the NOT NULL column and surfaced as a 500 rather than a 400.
+  if ("name" in req.body && !(typeof req.body.name === "string" && req.body.name.trim())) {
+    return res.status(400).json({ code: "name_required", error: "Navn er påkrevd." });
+  }
+  // sort_order goes into an INTEGER column; a string or an object reaches better-sqlite3 as an
+  // unbindable value and throws the same unhelpful 500.
+  if ("sort_order" in req.body && !Number.isInteger(req.body.sort_order)) {
+    return res.status(400).json({ code: "invalid_sort_order", error: "sort_order må være et heltall." });
+  }
+  const values = fields.map((f) => {
+    if (f === "name") return req.body.name.trim();
+    if (f === "active") return req.body.active ? 1 : 0;
+    return req.body[f];
+  });
   db.prepare(`UPDATE ${register.table} SET ${fields.map((f) => `${f} = ?`).join(", ")} WHERE id = ?`).run(...values, row.id);
   res.json(listStaffRegister(register, req.user.company_id));
 });
