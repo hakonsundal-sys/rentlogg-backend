@@ -291,7 +291,7 @@ export function listEntries({ companyId, from, to, userId, siteId, orderId, appr
   // "Godkjent"/"Venter", the filter a driftsleder works from: show me only what still needs me.
   if (approval === "approved") conditions.push("t.approved_at IS NOT NULL");
   if (approval === "pending") conditions.push("t.approved_at IS NULL");
-  return db
+  const entries = db
     .prepare(
       `SELECT t.*, s.name AS site_name, u.name AS user_name, sch.assigned_cleaner_id,
               au.name AS assigned_cleaner_name, u.employee_number, o.name AS order_name,
@@ -309,8 +309,39 @@ export function listEntries({ companyId, from, to, userId, siteId, orderId, appr
        ORDER BY t.work_date DESC, t.started_at DESC`
     )
     .all(...params)
-    .map(decorate)
-    .map((entry) => ({ ...entry, lines: getLines(entry.id) }));
+    .map(decorate);
+
+  return withLines(entries);
+}
+
+// Attaches each entry's lines using one query for the whole list rather than getLines per row.
+// This list is what the timesheet, the xlsx and the PDF are all built from, so a month for a whole
+// company is the normal case, not the extreme one — and better-sqlite3 is synchronous on a single
+// connection, so every extra round trip here is time the server spends unable to answer anybody
+// else. A month that returns 3000 entries went from 3001 queries to 2.
+//
+// The id list goes in as placeholders rather than interpolated text: they come from rows we just
+// read, but building SQL by concatenation is a habit worth not having.
+// Read in chunks because an IN list is one bound variable per id, and SQLite caps how many a
+// statement may carry. A year's worth of entries would otherwise trade the slow version for one
+// that throws outright.
+const LINE_LOOKUP_CHUNK = 500;
+
+function withLines(entries) {
+  if (entries.length === 0) return entries;
+
+  const byEntry = new Map(entries.map((e) => [e.id, []]));
+  for (let i = 0; i < entries.length; i += LINE_LOOKUP_CHUNK) {
+    const ids = entries.slice(i, i + LINE_LOOKUP_CHUNK).map((e) => e.id);
+    const rows = db
+      .prepare(
+        `SELECT * FROM time_entry_lines WHERE entry_id IN (${ids.map(() => "?").join(",")})
+         ORDER BY entry_id, kind, sort_order, id`
+      )
+      .all(...ids);
+    for (const line of rows) byEntry.get(line.entry_id)?.push({ ...line, counts_as_work: !!line.counts_as_work });
+  }
+  return entries.map((entry) => ({ ...entry, lines: byEntry.get(entry.id) }));
 }
 
 // --- Planned vs actual ---------------------------------------------------------------------------
