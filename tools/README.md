@@ -24,6 +24,26 @@ hele poenget med steg 2.
 Selve importen gjøres mot produksjons-API-et med en innlogget admin:
 `POST /sites/:siteId/rooms/import-confirm` med `{ rooms: [...] }` fra `rom.json`.
 
+### Steg 3 — PÅKREVD: sett `weekly_days` på hver «(kun …)»-oppgave
+
+**`import-confirm` tar bare en flat liste med oppgavenavn (`tasks: string[]`) — det finnes ingen
+måte å sende ukedager per oppgave i selve importkallet.** `transform.js`s «(kun fr)»/«(kun
+ma+on+fr)»/«(kun to)»-tillegg i navnet er **ren tekst, ikke en ekte begrensning**. Uten et eget
+oppfølgingssteg vises og kan krysses av en slik oppgave **hver dag rommet uansett er oppe**, ikke
+bare dagen navnet lover — akkurat samme feil som ble reparert i hele produksjonen 22.09.2026 (se
+[[project_vest_location_import]], «Union rule adopted … og revisjonen det tvang fram»), og som kom
+tilbake for en helt ny kunde (Lerøy Fossen RS) 25.09.2026 fordi dette steget ikke er en del av
+verktøyet selv.
+
+Etter import: for hver oppgave i `rom.json` med et «(kun …)»-tillegg i navnet, kall
+`PATCH /rooms/:roomId/items/:itemId` med `{ weekly_days: [...] }` — ukedager i **appens** konvensjon
+(`Date#getDay()`: 0=søndag … 6=lørdag), ikke kildens (se ukedagskonvensjon-seksjonen under). Match
+oppgaven på `label` fra import-confirm-svaret sin `rooms[].id` + en påfølgende
+`GET /rooms/:id/items`.
+
+**Kontroller alltid etterpå** at hver `weekly_days`-oppgave faktisk deler minst én dag med rommets
+eget skjema (`GET /rooms/:id/schedule`) — ellers kan oppgaven aldri komme opp i det hele tatt.
+
 ## Slik er malen bygget
 
 Hvert ark med romdata har en header-rad med `Lokale` (grov sone, verdien gjentas nedover via
