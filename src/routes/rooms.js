@@ -9,6 +9,7 @@ import { todayInOslo } from "../services/schedule.js";
 import { getRoomsForSite, findOrCreateTodayRoomRun, findOrCreateRoomRunForDate, findRoomRunForDate, getMonthlyItemsForSite, getRoomGridForSiteMonth, getRoomRunItems, ensureRunItemOptions } from "../services/rooms.js";
 import { safeOriginalName, compressUploadedPhoto, imageFileFilter, removeUploadedFile, UploadRejectedError } from "../utils/uploads.js";
 import { logQualityEvent } from "../services/qualityLog.js";
+import { translatePlanTexts, isTranslatableLanguage, isTranslationConfigured } from "../services/planTranslation.js";
 
 export const siteRoomsRouter = Router({ mergeParams: true });
 export const roomsRouter = Router();
@@ -430,6 +431,51 @@ siteRoomsRouter.post("/complete-all-due", requireAuth, requireRole("cleaner", "a
   });
 
   res.json(completeAll(dueIncomplete));
+});
+
+// Reading aid for cleaners who don't read Norwegian: returns machine translations of this
+// site's room names, task labels and task alternatives, keyed by the Norwegian source text.
+//
+// Nothing is stored. The Norwegian text remains the record — it is what the cleaner signs, what
+// the customer's report prints and what a tilsyn traces — so these translations exist only for
+// the duration of one screen. The route deliberately reads the texts out of the database itself
+// rather than accepting them in the body: the client can't ask us to translate arbitrary text,
+// and it can't smuggle a translated string back in as if it were plan content.
+siteRoomsRouter.post("/translations", requireAuth, async (req, res) => {
+  const { status: scopeStatus, code: scopeCode, error: scopeError } = getSiteScopedForRooms(req.params.siteId, req.user);
+  if (scopeError) return res.status(scopeStatus).json({ code: scopeCode, error: scopeError });
+
+  const language = req.body?.language;
+  if (!isTranslatableLanguage(language)) {
+    return res.status(400).json({ code: "unsupported_language", error: "Ukjent språk." });
+  }
+  if (!isTranslationConfigured()) {
+    return res.status(503).json({ code: "ai_translation_not_configured", error: "Oversettelse er ikke konfigurert ennå." });
+  }
+
+  const rows = db
+    .prepare(
+      `SELECT r.name AS room_name, i.label AS item_label, o.label AS option_label
+         FROM rooms r
+         LEFT JOIN room_checklist_items i ON i.room_id = r.id
+         LEFT JOIN room_checklist_item_options o ON o.item_id = i.id
+        WHERE r.site_id = ?`
+    )
+    .all(req.params.siteId);
+
+  const texts = [];
+  for (const row of rows) {
+    if (row.room_name) texts.push(row.room_name);
+    if (row.item_label) texts.push(row.item_label);
+    if (row.option_label) texts.push(row.option_label);
+  }
+
+  try {
+    res.json({ language, translations: await translatePlanTexts(texts, language) });
+  } catch (err) {
+    console.error("Plan translation failed:", err);
+    res.status(502).json({ code: "ai_service_unavailable", error: "Kunne ikke kontakte AI-tjenesten. Prøv igjen senere." });
+  }
 });
 
 // --- AI PDF import: proposes rooms/tasks without persisting them ---
