@@ -101,9 +101,11 @@ framfor å forsvinne i stillhet.
   `Historikk`, `Endring *`/`Endr *`, `Kommentarer *`, `tid *`, `Årsplan kopi`
 - **Skjulte ark er aldri aktiv plan** — en skjult versjon av et ark er en gammel eller
   ikke-gjeldende utgave, uansett hvor gyldig innholdet ser ut.
-- `Lørd *`/`Lørdag` (roterende lørdagsvask: kolonnene er uke-i-måned 1–5) og `Peri *`/`År *`
-  (periodisk: kolonnene er månedsnummer 1–12). Disse har et annet rutenett og importeres ikke av
-  dette verktøyet.
+- `Lørd *`/`Lørdag` (roterende lørdagsvask: kolonnene er uke-i-måned 1–5). Annet rutenett, ikke
+  importert av dette verktøyet.
+- `Peri *`/`År *` (periodisk: kolonnene er månedsnummer 1–12) — **eget rutenett, eget verktøy: se
+  «Periodiske oppgaver» nederst i denne filen.** Ikke importert av `parse_renholdsplan.ps1`/
+  `transform.js`, men heller ikke lenger bare hoppet over for godt.
 
 **Importer fra .xlsx-en, ikke fra en PDF.** En PDF av planen er som regel ett ark, og du ser
 aldri at resten finnes. Det er nøyaktig slik Domstein Sjømat Bergen mistet hele kontorplanen sin:
@@ -160,3 +162,33 @@ lagret som søndag–torsdag. Ikke anta 0 = mandag fordi rutenettet leses M-T-O-
   COM-objektet — ellers blir det liggende igjen en `EXCEL.EXE` per feil.
 - `.ps1`-filen har ingen BOM, og Windows PowerShell 5.1 leser da æøå i kildekoden feil. Derfor
   bygges «Område» fra `[char]`-koder i stedet for å skrives som literal.
+
+## Periodiske oppgaver (RB04, «Peri N»-ark)
+
+Et eget arkoppsett for oppgaver som ikke følger et ukedagsmønster, men bestemte kalendermåneder —
+«rengjør transportbåndet 2 ganger i året, i april og august». Samme `Lokale`/`Inv/Objekt`/`Frek.`/
+`Merknader`-kolonner som RB01, men de 12 kolonnene rett etter `Merknader` er månedsnummer `1`..`12`
+i stedet for ukedagsbokstaver — derfor et eget skriptpar, ikke en gren i det eksisterende:
+
+```powershell
+.\tools\parse_periodic.ps1 -Path "C:\...\Renholdsplan Kunde 2026-01-01.xlsx" > peri_plan.json
+node tools\transform_periodic.js peri_plan.json peri_tasks.json
+```
+
+Ansvarskolonnen (`x`/`p` = kundens egen) er på samme relative plass som i RB01, bare forskjøvet:
+`Merknader + 13` i stedet for `Merknader + 8`, siden 12 månedskolonner står i mellom i stedet for 7
+ukedagskolonner. Samme skjult-ark-regel. Måneder trenger **ingen** kilde-vs-app-konvertering slik
+ukedager gjør — en kalendermåned er samme tall overalt, ikke posisjonsavhengig.
+
+`transform_periodic.js` skriver ut `{room, task, months}` per oppgave — **ikke**
+`import-confirm`s `rooms[].tasks: string[]`-form. En periodisk oppgave skal inn i et
+**eksisterende** rom (samme Lokale som allerede har sine ukedagsplanlagte søsken), ikke et eget
+«(periodisk)»-rom slik den gamle løsningen gjorde før `room_checklist_item_months` fantes.
+
+**Sjekk alltid om oppgaven allerede finnes i rommet før du oppretter noe nytt.** Oppdaget på
+Hardanger Seafood 2026-09-29: alle 29 periodiske oppgavene fantes allerede som vanlige,
+ubegrensede oppgaver i de samme rommene (samme utstyr, samme navn, importert fra RB01-arket uten
+noen som helst begrensning) — de skulle ikke opprettes på nytt, bare få `months` satt via
+`PATCH /rooms/:id/items/:itemId {months:[...]}` på den eksisterende oppgaven. Å opprette en ny
+oppgave med samme navn ved siden av gir to identiske rader i sjekklisten, og ingen måte å vite
+hvilken av dem en renholder faktisk skal krysse av en gitt dag.
