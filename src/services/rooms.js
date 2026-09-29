@@ -97,8 +97,9 @@ const lastCompletedItemStmt = db.prepare(
    ORDER BY rr.started_at DESC LIMIT 1`
 );
 const itemWeekdaysStmt = db.prepare("SELECT weekday FROM room_checklist_item_weekdays WHERE item_id = ?");
+const itemMonthsStmt = db.prepare("SELECT month FROM room_checklist_item_months WHERE item_id = ?");
 
-// Four modes:
+// Five modes:
 // - interval_days set (mutually exclusive with the fields below — see the PATCH route): due if
 //   never completed, or if it's been >= interval_days since the last time this specific item was
 //   checked off — same "days since last done" logic as isRoomDueOn's interval mode, just scoped
@@ -107,6 +108,13 @@ const itemWeekdaysStmt = db.prepare("SELECT weekday FROM room_checklist_item_wee
 // - monthly_weekday + monthly_occurrence both set: due only on the Nth occurrence of that weekday
 //   in the current calendar month — same "Nth weekday of month" check as isRoomDueOn's monthly
 //   mode.
+// - one or more rows in room_checklist_item_months: due in specific calendar months (a "Peri"/
+//   RB04 source task, e.g. an annual belt clean due in April and August) rather than on a weekday
+//   pattern — checked before weekly_days below so it never falls through to that branch's "no days
+//   set = always due" default. Same "since last done" principle as interval_days, but bounded to
+//   the start of the current calendar month instead of a rolling day count: due once per matched
+//   month, resets at the next matched month (same month next year, or a different matched month
+//   later this year).
 // - one or more rows in room_checklist_item_weekdays: due weekly, on any of those weekdays — e.g.
 //   a task merged out of a room that used to have its own narrower schedule (see "Kontorrenhold"/
 //   "Konditorirenhold", 2026-09-21) and needs its own day(s) now that the room's tasks all share
@@ -125,6 +133,14 @@ export function isItemDueOn(item, dateStr) {
     const [year, month, day] = dateStr.split("-").map(Number);
     const targetDay = nthWeekdayOfMonth(year, month - 1, item.monthly_weekday, item.monthly_occurrence);
     return targetDay === day;
+  }
+  const months = itemMonthsStmt.all(item.id).map((r) => r.month);
+  if (months.length > 0) {
+    const [, month] = dateStr.split("-").map(Number);
+    if (!months.includes(month)) return false;
+    const last = lastCompletedItemStmt.get(item.id);
+    if (!last) return true;
+    return toOsloDateStr(last.started_at) < `${dateStr.slice(0, 7)}-01`;
   }
   const weekdays = new Set(itemWeekdaysStmt.all(item.id).map((r) => r.weekday));
   if (weekdays.size === 0) return true;

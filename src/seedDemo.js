@@ -86,6 +86,7 @@ const wipe = db.transaction(() => {
            (SELECT id FROM room_run_items WHERE room_run_id IN (${ph}))`
       ).run(...roomRunIds);
       db.prepare(`DELETE FROM room_run_items WHERE room_run_id IN (${ph})`).run(...roomRunIds);
+      db.prepare(`DELETE FROM room_run_participants WHERE room_run_id IN (${ph})`).run(...roomRunIds);
     }
     if (deviationIds.length) {
       const ph = deviationIds.map(() => "?").join(",");
@@ -108,6 +109,10 @@ const wipe = db.transaction(() => {
       ).run(...roomIds);
       db.prepare(
         `DELETE FROM room_checklist_item_weekdays WHERE item_id IN
+           (SELECT id FROM room_checklist_items WHERE room_id IN (${ph}))`
+      ).run(...roomIds);
+      db.prepare(
+        `DELETE FROM room_checklist_item_months WHERE item_id IN
            (SELECT id FROM room_checklist_items WHERE room_id IN (${ph}))`
       ).run(...roomIds);
       db.prepare(`DELETE FROM room_checklist_items WHERE room_id IN (${ph})`).run(...roomIds);

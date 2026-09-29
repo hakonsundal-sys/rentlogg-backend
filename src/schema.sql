@@ -207,6 +207,16 @@ CREATE TABLE IF NOT EXISTS room_checklist_item_weekdays (
   UNIQUE(item_id, weekday)
 );
 
+-- A checklist item's "periodic" schedule mode — due in one or more specific calendar months
+-- rather than on a weekday pattern (e.g. an annual belt clean due in April and August). Mirrors
+-- room_checklist_item_weekdays exactly, one row per selected month.
+CREATE TABLE IF NOT EXISTS room_checklist_item_months (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  item_id INTEGER NOT NULL REFERENCES room_checklist_items(id),
+  month INTEGER NOT NULL CHECK (month BETWEEN 1 AND 12),
+  UNIQUE(item_id, month)
+);
+
 -- A checklist item can carry a set of tick-off alternatives ("flervalg") instead of being a
 -- plain done/not-done line: e.g. Sinkaberg's cleaners must record WHICH soap they used that day,
 -- picking one or more from the site's chemical list. An item is a multi-choice item purely by

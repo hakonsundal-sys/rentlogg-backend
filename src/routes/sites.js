@@ -241,6 +241,7 @@ sitesRouter.delete("/:id", requireAuth, requireRole("admin", "manager"), (req, r
              (SELECT id FROM room_run_items WHERE room_run_id IN (${runPlaceholders}))`
         ).run(...roomRunIds);
         db.prepare(`DELETE FROM room_run_items WHERE room_run_id IN (${runPlaceholders})`).run(...roomRunIds);
+        db.prepare(`DELETE FROM room_run_participants WHERE room_run_id IN (${runPlaceholders})`).run(...roomRunIds);
       }
       db.prepare(`DELETE FROM room_runs WHERE room_id IN (${roomPlaceholders})`).run(...roomIds);
       db.prepare(`DELETE FROM room_schedules WHERE room_id IN (${roomPlaceholders})`).run(...roomIds);
@@ -250,6 +251,10 @@ sitesRouter.delete("/:id", requireAuth, requireRole("admin", "manager"), (req, r
       ).run(...roomIds);
       db.prepare(
         `DELETE FROM room_checklist_item_weekdays WHERE item_id IN
+           (SELECT id FROM room_checklist_items WHERE room_id IN (${roomPlaceholders}))`
+      ).run(...roomIds);
+      db.prepare(
+        `DELETE FROM room_checklist_item_months WHERE item_id IN
            (SELECT id FROM room_checklist_items WHERE room_id IN (${roomPlaceholders}))`
       ).run(...roomIds);
       db.prepare(`DELETE FROM room_checklist_items WHERE room_id IN (${roomPlaceholders})`).run(...roomIds);

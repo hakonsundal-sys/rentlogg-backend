@@ -301,6 +301,7 @@ siteRoomsRouter.delete("/", requireAuth, requireRole("admin", "manager"), (req, 
              (SELECT id FROM room_run_items WHERE room_run_id IN (${placeholders}))`
         ).run(...runIds);
         db.prepare(`DELETE FROM room_run_items WHERE room_run_id IN (${placeholders})`).run(...runIds);
+        db.prepare(`DELETE FROM room_run_participants WHERE room_run_id IN (${placeholders})`).run(...runIds);
       }
       db.prepare("DELETE FROM room_runs WHERE room_id = ?").run(roomId);
       db.prepare("DELETE FROM room_schedules WHERE room_id = ?").run(roomId);
@@ -309,6 +310,9 @@ siteRoomsRouter.delete("/", requireAuth, requireRole("admin", "manager"), (req, 
       ).run(roomId);
       db.prepare(
         "DELETE FROM room_checklist_item_weekdays WHERE item_id IN (SELECT id FROM room_checklist_items WHERE room_id = ?)"
+      ).run(roomId);
+      db.prepare(
+        "DELETE FROM room_checklist_item_months WHERE item_id IN (SELECT id FROM room_checklist_items WHERE room_id = ?)"
       ).run(roomId);
       db.prepare("DELETE FROM room_checklist_items WHERE room_id = ?").run(roomId);
       db.prepare("DELETE FROM rooms WHERE id = ?").run(roomId);
@@ -731,6 +735,7 @@ roomsRouter.delete("/:id", requireAuth, requireRole("admin", "manager"), (req, r
            (SELECT id FROM room_run_items WHERE room_run_id IN (${placeholders}))`
       ).run(...runIds);
       db.prepare(`DELETE FROM room_run_items WHERE room_run_id IN (${placeholders})`).run(...runIds);
+      db.prepare(`DELETE FROM room_run_participants WHERE room_run_id IN (${placeholders})`).run(...runIds);
     }
     db.prepare("DELETE FROM room_runs WHERE room_id = ?").run(roomId);
     db.prepare("DELETE FROM room_schedules WHERE room_id = ?").run(roomId);
@@ -739,6 +744,9 @@ roomsRouter.delete("/:id", requireAuth, requireRole("admin", "manager"), (req, r
     ).run(roomId);
     db.prepare(
       "DELETE FROM room_checklist_item_weekdays WHERE item_id IN (SELECT id FROM room_checklist_items WHERE room_id = ?)"
+    ).run(roomId);
+    db.prepare(
+      "DELETE FROM room_checklist_item_months WHERE item_id IN (SELECT id FROM room_checklist_items WHERE room_id = ?)"
     ).run(roomId);
     db.prepare("DELETE FROM room_checklist_items WHERE room_id = ?").run(roomId);
     db.prepare("DELETE FROM rooms WHERE id = ?").run(roomId);
@@ -764,6 +772,14 @@ roomsRouter.get("/:id/items", requireAuth, (req, res) => {
     .all(req.params.id);
   const weekdaysByItem = {};
   weekdayRows.forEach((r) => { (weekdaysByItem[r.item_id] ||= []).push(r.weekday); });
+  const monthRows = db
+    .prepare(
+      `SELECT item_id, month FROM room_checklist_item_months
+       WHERE item_id IN (SELECT id FROM room_checklist_items WHERE room_id = ?) ORDER BY month`
+    )
+    .all(req.params.id);
+  const monthsByItem = {};
+  monthRows.forEach((r) => { (monthsByItem[r.item_id] ||= []).push(r.month); });
   // A task with options is a multi-choice ("flervalg") task — see room_checklist_item_options.
   const optionRows = db
     .prepare(
@@ -776,6 +792,7 @@ roomsRouter.get("/:id/items", requireAuth, (req, res) => {
   res.json(items.map((item) => ({
     ...item,
     weekly_days: weekdaysByItem[item.id] || [],
+    months: monthsByItem[item.id] || [],
     options: optionsByItem[item.id] || [],
   })));
 });
@@ -809,29 +826,43 @@ roomsRouter.patch("/:id/items/:itemId", requireAuth, requireRole("admin", "manag
   if (!existing) return res.status(404).json({ code: "not_found", error: "Not found" });
 
   const updates = {};
-  // null = leave room_checklist_item_weekdays untouched; [] or a day list = replace its rows.
+  // null = leave the corresponding junction table untouched; [] or a day/month list = replace its rows.
   let weeklyDays = null;
+  let months = null;
   if ("label" in req.body) {
     const label = typeof req.body.label === "string" ? req.body.label.trim() : "";
     if (!label) return res.status(400).json({ code: "task_label_required", error: "Oppgavenavn kan ikke være tomt." });
     updates.label = label;
   }
-  // interval_days ("annenhver uke" etc), monthly_weekday/monthly_occurrence ("Månedlig"), and
-  // weekly_days ("Ukentlig", one or more specific weekdays — see room_checklist_item_weekdays) are
-  // three mutually exclusive schedule modes, plus a fourth implicit "every time" (none of them
-  // set) — setting one explicitly clears the other two, same pairing rooms already enforce for
-  // their own interval_days vs monthly_* fields.
+  // interval_days ("annenhver uke" etc), monthly_weekday/monthly_occurrence ("Månedlig"),
+  // weekly_days ("Ukentlig", one or more specific weekdays — see room_checklist_item_weekdays),
+  // and months ("Periodisk", one or more specific calendar months — see
+  // room_checklist_item_months) are four mutually exclusive schedule modes, plus a fifth implicit
+  // "every time" (none of them set) — setting one explicitly clears the other three, same pairing
+  // rooms already enforce for their own interval_days vs monthly_* fields.
   if ("interval_days" in req.body && req.body.interval_days != null) {
     updates.interval_days = req.body.interval_days;
     updates.monthly_weekday = null;
     updates.monthly_occurrence = null;
     weeklyDays = [];
+    months = [];
   } else if ("weekly_days" in req.body) {
     const days = Array.isArray(req.body.weekly_days)
       ? [...new Set(req.body.weekly_days.filter((w) => Number.isInteger(w) && w >= 0 && w <= 6))]
       : [];
     if (days.length === 0) return res.status(400).json({ code: "weekly_days_required", error: "weekly_days må ha minst én dag" });
     weeklyDays = days;
+    months = [];
+    updates.monthly_weekday = null;
+    updates.monthly_occurrence = null;
+    updates.interval_days = null;
+  } else if ("months" in req.body) {
+    const selectedMonths = Array.isArray(req.body.months)
+      ? [...new Set(req.body.months.filter((m) => Number.isInteger(m) && m >= 1 && m <= 12))]
+      : [];
+    if (selectedMonths.length === 0) return res.status(400).json({ code: "months_required", error: "months må ha minst én måned" });
+    months = selectedMonths;
+    weeklyDays = [];
     updates.monthly_weekday = null;
     updates.monthly_occurrence = null;
     updates.interval_days = null;
@@ -840,9 +871,12 @@ roomsRouter.patch("/:id/items/:itemId", requireAuth, requireRole("admin", "manag
     updates.monthly_occurrence = req.body.monthly_occurrence ?? null;
     updates.interval_days = null;
     weeklyDays = [];
+    months = [];
   }
   const fields = Object.keys(updates);
-  if (fields.length === 0 && weeklyDays === null) return res.status(400).json({ code: "no_valid_fields", error: "No valid fields to update" });
+  if (fields.length === 0 && weeklyDays === null && months === null) {
+    return res.status(400).json({ code: "no_valid_fields", error: "No valid fields to update" });
+  }
 
   db.transaction(() => {
     if (fields.length > 0) {
@@ -854,6 +888,11 @@ roomsRouter.patch("/:id/items/:itemId", requireAuth, requireRole("admin", "manag
       const insertItemWeekday = db.prepare("INSERT INTO room_checklist_item_weekdays (item_id, weekday) VALUES (?, ?)");
       weeklyDays.forEach((weekday) => insertItemWeekday.run(req.params.itemId, weekday));
     }
+    if (months !== null) {
+      db.prepare("DELETE FROM room_checklist_item_months WHERE item_id = ?").run(req.params.itemId);
+      const insertItemMonth = db.prepare("INSERT INTO room_checklist_item_months (item_id, month) VALUES (?, ?)");
+      months.forEach((month) => insertItemMonth.run(req.params.itemId, month));
+    }
   })();
 
   res.json({
@@ -862,6 +901,10 @@ roomsRouter.patch("/:id/items/:itemId", requireAuth, requireRole("admin", "manag
       .prepare("SELECT weekday FROM room_checklist_item_weekdays WHERE item_id = ? ORDER BY weekday")
       .all(req.params.itemId)
       .map((r) => r.weekday),
+    months: db
+      .prepare("SELECT month FROM room_checklist_item_months WHERE item_id = ? ORDER BY month")
+      .all(req.params.itemId)
+      .map((r) => r.month),
   });
 });
 
@@ -884,6 +927,7 @@ roomsRouter.delete("/:id/items/:itemId", requireAuth, requireRole("admin", "mana
     ).run(itemId);
     db.prepare("DELETE FROM room_checklist_item_options WHERE item_id = ?").run(itemId);
     db.prepare("DELETE FROM room_checklist_item_weekdays WHERE item_id = ?").run(itemId);
+    db.prepare("DELETE FROM room_checklist_item_months WHERE item_id = ?").run(itemId);
     db.prepare("DELETE FROM room_checklist_items WHERE id = ? AND room_id = ?").run(itemId, roomId);
   });
   deleteItem(req.params.itemId, req.params.id);
