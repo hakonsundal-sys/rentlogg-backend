@@ -228,8 +228,9 @@ const insertRoomRunForDateStmt = db.prepare("INSERT INTO room_runs (room_id, cle
 // kommentaren på room_run_items.measure_* i db.js.
 const insertRoomRunItemStmt = db.prepare(
   `INSERT INTO room_run_items
-     (room_run_id, room_checklist_item_id, label, sort_order, measure_unit, measure_min, measure_max)
-   VALUES (?, ?, ?, ?, ?, ?, ?)`
+     (room_run_id, room_checklist_item_id, label, sort_order,
+      measure_unit, measure_min, measure_max, step_type, contact_seconds, concentration)
+   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 );
 const roomRunByIdStmt = db.prepare("SELECT * FROM room_runs WHERE id = ?");
 
@@ -303,6 +304,9 @@ export function getRoomRunItems(runId) {
     options: optionsByItem[item.id] || [],
     verdict: measurementVerdict(item),
     measure_label: measurementRangeLabel(item),
+    // Sekunder igjen akkurat nå. Klienten teller ned videre selv, men får utgangspunktet fra
+    // serveren — telefonens egen klokke skal ikke kunne avgjøre om en kontakttid er ute.
+    contact_remaining: contactRemainingSeconds(item),
   }));
 }
 
@@ -318,7 +322,8 @@ export function findOrCreateRoomRunForDate(roomId, dateStr, cleanerId) {
   items.forEach((item, i) => {
     const runItemInfo = insertRoomRunItemStmt.run(
       info.lastInsertRowid, item.id, item.label, i,
-      item.measure_unit ?? null, item.measure_min ?? null, item.measure_max ?? null
+      item.measure_unit ?? null, item.measure_min ?? null, item.measure_max ?? null,
+      item.step_type ?? null, item.contact_seconds ?? null, item.concentration ?? null
     );
     snapshotItemOptions(runItemInfo.lastInsertRowid, item.id);
   });
@@ -420,4 +425,32 @@ export function parseMeasurement(raw) {
   const n = typeof raw === "number" ? raw : Number(String(raw).replace(",", "."));
   if (!Number.isFinite(n)) return { ok: false };
   return { ok: true, value: n };
+}
+
+// ---------------------------------------------------------------------------
+// Kontakttid
+// ---------------------------------------------------------------------------
+
+// Sekunder igjen av kontakttiden, regnet fra serverens klokke.
+//   null  → oppgaven har ingen kontakttid, eller tiden er ikke startet
+//   0     → tiden er ute, oppgaven kan kvitteres ut
+//   n > 0 → n sekunder igjen
+//
+// SQLite lagrer datetime('now') som UTC uten sone ("2026-09-30 11:54:17"), så den må leses som
+// UTC eksplisitt. Uten Z-en tolker Date() den som lokal tid, og på norsk sommertid ville
+// kontakttiden sett ut som om den var ferdig to timer før den faktisk er det.
+export function contactRemainingSeconds(runItem, now = Date.now()) {
+  if (!runItem?.contact_seconds || !runItem.contact_started_at) return null;
+  const startedMs = Date.parse(`${runItem.contact_started_at.replace(" ", "T")}Z`);
+  if (Number.isNaN(startedMs)) return null;
+  const elapsed = Math.floor((now - startedMs) / 1000);
+  return Math.max(0, runItem.contact_seconds - elapsed);
+}
+
+// Om oppgaven kan kvitteres ut. En oppgave uten kontakttid passerer alltid, som er hver eneste
+// oppgave som fantes før dette ble bygget.
+export function contactSatisfied(runItem, now = Date.now()) {
+  if (!runItem?.contact_seconds) return true;
+  if (!runItem.contact_started_at) return false;
+  return contactRemainingSeconds(runItem, now) === 0;
 }

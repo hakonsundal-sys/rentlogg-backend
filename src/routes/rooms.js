@@ -6,7 +6,7 @@ import { PDFParse } from "pdf-parse";
 import { db } from "../db.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 import { todayInOslo } from "../services/schedule.js";
-import { getRoomsForSite, findOrCreateTodayRoomRun, findOrCreateRoomRunForDate, findRoomRunForDate, getMonthlyItemsForSite, getRoomGridForSiteMonth, getRoomRunItems, ensureRunItemOptions, measurementVerdict, parseMeasurement } from "../services/rooms.js";
+import { getRoomsForSite, findOrCreateTodayRoomRun, findOrCreateRoomRunForDate, findRoomRunForDate, getMonthlyItemsForSite, getRoomGridForSiteMonth, getRoomRunItems, ensureRunItemOptions, measurementVerdict, parseMeasurement, contactSatisfied, contactRemainingSeconds } from "../services/rooms.js";
 import { safeOriginalName, compressUploadedPhoto, imageFileFilter, removeUploadedFile, UploadRejectedError } from "../utils/uploads.js";
 import { logQualityEvent } from "../services/qualityLog.js";
 import { translatePlanTexts, isTranslatableLanguage, isTranslationConfigured } from "../services/planTranslation.js";
@@ -233,6 +233,12 @@ const markAnswerableItemsDoneStmt = db.prepare(
   `UPDATE room_run_items SET done = 1
    WHERE room_run_id = ?
      AND NOT (measure_unit IS NOT NULL AND measured_value IS NULL)
+     AND NOT (
+       contact_seconds IS NOT NULL AND contact_seconds > 0 AND (
+         contact_started_at IS NULL
+         OR strftime('%s', 'now') - strftime('%s', contact_started_at) < contact_seconds
+       )
+     )
      AND id NOT IN (
        SELECT run_item_id FROM room_run_item_options GROUP BY run_item_id HAVING SUM(selected) = 0
      )`
@@ -827,6 +833,34 @@ function readMeasureDefinition(body) {
   return { unit, min, max };
 }
 
+// Hygienetrinnene et næringsmiddelanlegg vaskes i. Rekkefølgen her er rekkefølgen de utføres i,
+// fra skitnest til reneste — det er den «fra høy til lav risiko» betyr i praksis.
+const STEP_TYPES = ["residue", "clean", "rinse", "disinfect", "control"];
+
+// Leser trinn, kontakttid og konsentrasjon ut av en body. Tom `step_type` betyr «vanlig
+// oppgave» og nullstiller de to andre med seg: en oppgave som ikke lenger er et hygienetrinn
+// skal ikke sitte igjen med en kontakttid ingenting håndhever.
+function readStepDefinition(body) {
+  const stepType = typeof body.step_type === "string" ? body.step_type.trim() : "";
+  if (!stepType) return { step_type: null, contact_seconds: null, concentration: null };
+  if (!STEP_TYPES.includes(stepType)) {
+    return { error: { code: "step_type_invalid", error: "Ukjent hygienetrinn." } };
+  }
+
+  let seconds = null;
+  if (body.contact_seconds !== null && body.contact_seconds !== undefined && body.contact_seconds !== "") {
+    const n = Number(body.contact_seconds);
+    // Øvre grense på fire timer: et tastetrykk for mye skal ikke kunne låse en oppgave ute
+    // resten av skiftet.
+    if (!Number.isFinite(n) || n < 0 || n > 14400) {
+      return { error: { code: "contact_seconds_invalid", error: "Kontakttiden må være mellom 0 og 4 timer." } };
+    }
+    seconds = Math.round(n) || null;
+  }
+  const concentration = typeof body.concentration === "string" ? body.concentration.trim() || null : null;
+  return { step_type: stepType, contact_seconds: seconds, concentration };
+}
+
 roomsRouter.post("/:id/items", requireAuth, requireRole("admin", "manager"), (req, res) => {
   const { status: scopeStatus, error: scopeError } = getRoomScoped(req.params.id, req.user);
   if (scopeError) return res.status(scopeStatus).json({ error: scopeError });
@@ -837,14 +871,21 @@ roomsRouter.post("/:id/items", requireAuth, requireRole("admin", "manager"), (re
   // Er `measure_unit` satt, er oppgaven en måling — se db.js. Grensene er valgfrie hver for seg.
   const measure = readMeasureDefinition(req.body);
   if (measure.error) return res.status(400).json(measure.error);
+  const step = readStepDefinition(req.body);
+  if (step.error) return res.status(400).json(step.error);
 
   const nextSort = db.prepare("SELECT COALESCE(MAX(sort_order), -1) + 1 AS n FROM room_checklist_items WHERE room_id = ?").get(req.params.id).n;
   const info = db
     .prepare(
-      `INSERT INTO room_checklist_items (room_id, label, sort_order, measure_unit, measure_min, measure_max)
-       VALUES (?, ?, ?, ?, ?, ?)`
+      `INSERT INTO room_checklist_items
+         (room_id, label, sort_order, measure_unit, measure_min, measure_max,
+          step_type, contact_seconds, concentration)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
-    .run(req.params.id, label, nextSort, measure.unit, measure.min, measure.max);
+    .run(
+      req.params.id, label, nextSort, measure.unit, measure.min, measure.max,
+      step.step_type, step.contact_seconds, step.concentration
+    );
 
   res.status(201).json(db.prepare("SELECT * FROM room_checklist_items WHERE id = ?").get(info.lastInsertRowid));
 });
@@ -881,6 +922,14 @@ roomsRouter.patch("/:id/items/:itemId", requireAuth, requireRole("admin", "manag
     updates.measure_unit = measure.unit;
     updates.measure_min = measure.min;
     updates.measure_max = measure.max;
+  }
+  // Hygienetrinnet redigeres som ett sett, på samme måte som måledefinisjonen over.
+  if ("step_type" in req.body) {
+    const step = readStepDefinition(req.body);
+    if (step.error) return res.status(400).json(step.error);
+    updates.step_type = step.step_type;
+    updates.contact_seconds = step.contact_seconds;
+    updates.concentration = step.concentration;
   }
   // interval_days ("annenhver uke" etc), monthly_weekday/monthly_occurrence ("Månedlig"),
   // weekly_days ("Ukentlig", one or more specific weekdays — see room_checklist_item_weekdays),
@@ -1213,6 +1262,21 @@ roomsRouter.patch("/runs/:runId/items/:itemId", requireAuth, requireRole("cleane
   if (done && !itemMeasurementSatisfied(req.params.itemId)) {
     return res.status(400).json({ code: "measurement_required", error: "Registrer måleverdien før oppgaven kvitteres ut." });
   }
+  // Kontakttid. Klokka leses på serveren — en telefonklokke kan stilles, og det er nettopp denne
+  // tiden et tilsyn spør om. Svarer med hvor lenge det er igjen, så klienten slipper å gjette.
+  if (done) {
+    const runItemRow = db.prepare("SELECT * FROM room_run_items WHERE id = ?").get(req.params.itemId);
+    if (!contactSatisfied(runItemRow)) {
+      const remaining = contactRemainingSeconds(runItemRow);
+      return res.status(400).json({
+        code: remaining === null ? "contact_not_started" : "contact_time_remaining",
+        error: remaining === null
+          ? "Start kontakttiden før oppgaven kvitteres ut."
+          : `Kontakttiden er ikke ute ennå (${remaining} sekunder igjen).`,
+        remaining,
+      });
+    }
+  }
   const result = db.prepare("UPDATE room_run_items SET done = ? WHERE id = ? AND room_run_id = ?").run(done ? 1 : 0, req.params.itemId, req.params.runId);
   if (result.changes === 0) return res.status(404).json({ code: "not_found", error: "Not found" });
   recordParticipant(req.params.runId, req.user);
@@ -1239,6 +1303,37 @@ function itemMeasurementSatisfied(runItemId) {
   if (!row || !row.measure_unit) return true;
   return row.measured_value !== null && row.measured_value !== undefined;
 }
+
+// Starter kontakttiden på et desinfeksjonstrinn. Tidspunktet settes av serveren, ikke sendes inn
+// av klienten — ellers kunne en telefon med feil klokke, eller en klient som ble endret, påstå at
+// midlet hadde stått lenge nok.
+//
+// Kan startes på nytt: søler man og vasker om igjen, begynner kontakttiden om igjen, og det er
+// riktig oppførsel. Det siste starttidspunktet er det som gjelder.
+roomsRouter.post("/runs/:runId/items/:itemId/contact-start", requireAuth, requireRole("cleaner", "admin", "manager", "customer"), (req, res) => {
+  const { roomRun, status, code, error } = getRoomRunScoped(req.params.runId, req.user);
+  if (error) return res.status(status).json({ code, error });
+  const ownError = requireCustomerOwnsRoom(req.user, roomRun.room_responsible);
+  if (ownError) return res.status(ownError.status).json({ error: ownError.error });
+
+  const runItem = db
+    .prepare("SELECT * FROM room_run_items WHERE id = ? AND room_run_id = ?")
+    .get(req.params.itemId, req.params.runId);
+  if (!runItem) return res.status(404).json({ code: "not_found", error: "Not found" });
+  if (!runItem.contact_seconds) {
+    return res.status(400).json({ code: "no_contact_time", error: "Denne oppgaven har ingen kontakttid." });
+  }
+
+  db.prepare("UPDATE room_run_items SET contact_started_at = datetime('now') WHERE id = ?").run(req.params.itemId);
+  recordParticipant(req.params.runId, req.user);
+
+  const updated = db.prepare("SELECT * FROM room_run_items WHERE id = ?").get(req.params.itemId);
+  res.json({
+    ok: true,
+    contact_started_at: updated.contact_started_at,
+    contact_remaining: contactRemainingSeconds(updated),
+  });
+});
 
 // Registrerer måleverdien. Egen rute av samme grunn som flervalgets option-rute og /approve:
 // én kolonne per rute, så validering og tilgang på hver side holder seg lesbar.

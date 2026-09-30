@@ -83,6 +83,33 @@ function measurementText(item) {
   };
 }
 
+const STEP_LABELS = {
+  residue: "Fjerne rester",
+  clean: "Rengjøre",
+  rinse: "Skylle",
+  disinfect: "Desinfisere",
+  control: "Kontroll",
+};
+
+// Hygienetrinnet, konsentrasjonen og kontakttiden på én linje. Kontakttiden rapporteres med
+// starttidspunktet, ikke bare som «10 min» — det er forskjellen på å dokumentere at midlet sto
+// lenge nok og å påstå at det gjorde det. Returnerer null for en vanlig oppgave.
+function stepText(item) {
+  if (!item.step_type) return null;
+  const parts = [STEP_LABELS[item.step_type] || item.step_type];
+  if (item.concentration) parts.push(item.concentration);
+  if (item.contact_seconds) {
+    const mins = Math.round(item.contact_seconds / 60);
+    const varighet = mins >= 1 ? `${mins} min` : `${item.contact_seconds} sek`;
+    parts.push(
+      item.contact_started_at
+        ? `kontakttid ${varighet}, startet ${item.contact_started_at.slice(11, 16)}`
+        : `kontakttid ${varighet} (ikke startet)`
+    );
+  }
+  return parts.join(" · ");
+}
+
 function buildSections(detail) {
   if (detail.rooms?.length > 0) {
     const isMixed = isMixedResponsibility(detail.rooms);
@@ -132,9 +159,11 @@ export async function buildReportBody(detail) {
           const measureHtml = measure
             ? `<br><span style="font-size:12px;font-weight:600;color:${measure.ok === false ? "#c0392b" : measure.ok === true ? "#0a7a2f" : "#555"};">${escapeHtml(measure.text)}</span>`
             : "";
+          const step = stepText(item);
+          const stepHtml = step ? `<br><span style="color:#555;font-size:12px;">${escapeHtml(step)}</span>` : "";
           return `
           <div style="padding:8px 14px;border:1px solid #ddd;border-top:none;font-size:13px;display:flex;justify-content:space-between;gap:12px;">
-            <span>${num}.${iIdx + 1} ${escapeHtml(item.label)}${chosen ? `<br><span style="color:#555;font-size:12px;">Valgt: ${escapeHtml(chosen)}</span>` : ""}${measureHtml}</span>
+            <span>${num}.${iIdx + 1} ${escapeHtml(item.label)}${stepHtml}${chosen ? `<br><span style="color:#555;font-size:12px;">Valgt: ${escapeHtml(chosen)}</span>` : ""}${measureHtml}</span>
             <span style="white-space:nowrap;font-weight:600;color:${item.done ? "#0a7a2f" : "#c0392b"};">${item.done ? "✓ Utført" : "✗ Ikke utført"}</span>
           </div>`;
         })
@@ -283,6 +312,8 @@ export function buildReportPdf(detail, res) {
       doc.fillColor(item.done ? "green" : "red").text(item.done ? "  ✓ Utført" : "  ✗ Ikke utført");
       const chosen = chosenOptionsText(item);
       if (chosen) doc.fontSize(9).fillColor("gray").text(`    Valgt: ${chosen}`);
+      const step = stepText(item);
+      if (step) doc.fontSize(9).fillColor("gray").text(`    ${step}`);
       const measure = measurementText(item);
       if (measure) {
         doc.fontSize(9)

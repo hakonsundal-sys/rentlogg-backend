@@ -142,6 +142,23 @@ ensureColumn("room_checklist_items", "measure_unit", "measure_unit TEXT");
 ensureColumn("room_checklist_items", "measure_min", "measure_min REAL");
 ensureColumn("room_checklist_items", "measure_max", "measure_max REAL");
 
+// Hygienetrinn. Et næringsmiddelanlegg vaskes i en fast sekvens — fjerne rester, rengjøre,
+// skylle, desinfisere, skylle, kontroll — og en dokumentasjon som bare sier «utført» svarer ikke
+// på hvilket trinn som ble utført. `step_type` navngir trinnet; selve rekkefølgen ligger
+// allerede i `sort_order`, som er der «fra høy til lav risiko» bor.
+//
+// Nullable, og null betyr «vanlig oppgave». Kontorbygg skal ikke plutselig få hygienetrinn.
+// Kjente verdier: residue | clean | rinse | disinfect | control (se STEP_TYPES i routes/rooms.js).
+ensureColumn("room_checklist_items", "step_type", "step_type TEXT");
+
+// Kontakttid og konsentrasjon hører til desinfeksjonstrinnet: «2 %, 10 minutter kontakttid».
+// Uten kontakttiden er desinfeksjonen ikke dokumentert — midlet må stå på flaten lenge nok, og
+// det er nettopp den tiden et tilsyn spør om. `contact_seconds` håndheves (se
+// room_run_items.contact_started_at under); `concentration` er fritekst fordi den skrives som
+// «2 %», «1:100» og «500 ppm» om hverandre i praksis.
+ensureColumn("room_checklist_items", "contact_seconds", "contact_seconds INTEGER");
+ensureColumn("room_checklist_items", "concentration", "concentration TEXT");
+
 // Stable link back to the template item a given day's room_run_item was snapshotted from —
 // room_run_items previously only carried a copy of the label, with no way to reliably tell
 // "was this specific monthly task done this month" from history (a renamed item would silently
@@ -197,6 +214,19 @@ ensureColumn("room_run_items", "measured_at", "measured_at TEXT");
 ensureColumn("room_run_items", "measure_unit", "measure_unit TEXT");
 ensureColumn("room_run_items", "measure_min", "measure_min REAL");
 ensureColumn("room_run_items", "measure_max", "measure_max REAL");
+
+// Trinn, kontakttid og konsentrasjon kopieres ned på besøket av samme grunn som grensene over:
+// endrer noen prosedyren i morgen, skal gårsdagens dokumentasjon fortsatt vise hva som faktisk
+// gjaldt da — hvilket middel i hvilken styrke, og hvor lenge det skulle stå.
+ensureColumn("room_run_items", "step_type", "step_type TEXT");
+ensureColumn("room_run_items", "contact_seconds", "contact_seconds INTEGER");
+ensureColumn("room_run_items", "concentration", "concentration TEXT");
+
+// Når renholderen startet kontakttiden. Dette er det som gjør kontakttiden til dokumentasjon og
+// ikke en påstand: oppgaven kan ikke kvitteres ut før det har gått `contact_seconds` siden dette
+// tidspunktet, og tidspunktet ligger igjen i loggen. Klokka går på serveren, ikke på telefonen —
+// en telefonklokke kan stilles.
+ensureColumn("room_run_items", "contact_started_at", "contact_started_at TEXT");
 
 // Departments started out (2026-09-07) as a per-client sub-grouping with a NOT NULL client_id,
 // before it turned out the actual need was an internal, company-wide region tag (Vest/Sør/Øst/
