@@ -122,6 +122,26 @@ ensureColumn("room_checklist_items", "monthly_occurrence", "monthly_occurrence I
 // completion history to measure "days since last done" against — resolved by the
 // room_run_items.room_checklist_item_id link added below, which this reuses.
 ensureColumn("room_checklist_items", "interval_days", "interval_days INTEGER");
+
+// Måleoppgaver ("ATP-prøve linje 3: maks 150 RLU", "skyllevann: minst 82 °C").
+//
+// Fram til nå kunne Rentlogg ikke registrere et tall i det hele tatt — en oppgave var gjort
+// eller ikke gjort, eventuelt med et valgt alternativ (flervalg). De eneste REAL-kolonnene i
+// hele skjemaet var GPS-koordinater. Det er nok for kontorvask, men ikke for et
+// næringsmiddelanlegg, der selve dokumentasjonen ER måleverdien mot en grenseverdi.
+//
+// `measure_unit` er markøren: er den satt, er oppgaven en måling. Samme implisitte mønster som
+// flervalg, der en rad i room_checklist_item_options gjør oppgaven til et flervalg — ingen ny
+// enum, og ingen migrering av eksisterende rader.
+//
+// Begge grensene er valgfrie og dekker alle tre formene uten et retningsfelt:
+//   bare max → verdien skal være under  (ATP, kimtall)
+//   bare min → verdien skal være over   (temperatur på skyllevann)
+//   begge    → verdien skal være mellom (pH, konsentrasjon)
+ensureColumn("room_checklist_items", "measure_unit", "measure_unit TEXT");
+ensureColumn("room_checklist_items", "measure_min", "measure_min REAL");
+ensureColumn("room_checklist_items", "measure_max", "measure_max REAL");
+
 // Stable link back to the template item a given day's room_run_item was snapshotted from —
 // room_run_items previously only carried a copy of the label, with no way to reliably tell
 // "was this specific monthly task done this month" from history (a renamed item would silently
@@ -165,6 +185,18 @@ ensureColumn("room_runs", "approved_by_initials", "approved_by_initials TEXT");
 // Parallel to room_run_items.done — the customer approver's own per-item sign-off, checked while
 // reviewing the exact same list the cleaner just went through.
 ensureColumn("room_run_items", "approved", "approved INTEGER DEFAULT 0");
+
+// Selve måleverdien, pluss en kopi av grensene som gjaldt da den ble tatt.
+//
+// Kopien er poenget, ikke duplisering av latskap: endrer noen grenseverdien på oppgaven i
+// morgen, skal ikke gårsdagens godkjente prøve plutselig lyse rødt i en revisjon — den ble
+// dømt mot 150 RLU, og det er 150 RLU den skal fortsette å bli vurdert mot. Samme grunn som
+// `label` allerede ligger denormalisert på run-itemet.
+ensureColumn("room_run_items", "measured_value", "measured_value REAL");
+ensureColumn("room_run_items", "measured_at", "measured_at TEXT");
+ensureColumn("room_run_items", "measure_unit", "measure_unit TEXT");
+ensureColumn("room_run_items", "measure_min", "measure_min REAL");
+ensureColumn("room_run_items", "measure_max", "measure_max REAL");
 
 // Departments started out (2026-09-07) as a per-client sub-grouping with a NOT NULL client_id,
 // before it turned out the actual need was an internal, company-wide region tag (Vest/Sør/Øst/

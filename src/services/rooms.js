@@ -223,8 +223,13 @@ const insertRoomRunStmt = db.prepare("INSERT INTO room_runs (room_id, cleaner_id
 // mid-afternoon in Oslo year-round (CET/CEST is UTC+1/+2), so it can never roll into a different
 // Oslo calendar day than the one requested.
 const insertRoomRunForDateStmt = db.prepare("INSERT INTO room_runs (room_id, cleaner_id, started_at) VALUES (?, ?, ?)");
+// Grensene kopieres med inn i øyeblikksbildet, på linje med label. En måling som ble godkjent
+// mot 150 RLU skal fortsatt vurderes mot 150 RLU om noen hever grensen neste år — se
+// kommentaren på room_run_items.measure_* i db.js.
 const insertRoomRunItemStmt = db.prepare(
-  "INSERT INTO room_run_items (room_run_id, room_checklist_item_id, label, sort_order) VALUES (?, ?, ?, ?)"
+  `INSERT INTO room_run_items
+     (room_run_id, room_checklist_item_id, label, sort_order, measure_unit, measure_min, measure_max)
+   VALUES (?, ?, ?, ?, ?, ?, ?)`
 );
 const roomRunByIdStmt = db.prepare("SELECT * FROM room_runs WHERE id = ?");
 
@@ -290,7 +295,15 @@ const runItemOptionsForRunStmt = db.prepare(
 export function getRoomRunItems(runId) {
   const optionsByItem = {};
   runItemOptionsForRunStmt.all(runId).forEach((o) => { (optionsByItem[o.run_item_id] ||= []).push({ ...o, selected: !!o.selected }); });
-  return runItemsStmt.all(runId).map((item) => ({ ...item, options: optionsByItem[item.id] || [] }));
+  // `verdict` og `measure_label` regnes ut her, én gang, i stedet for i hver flate som viser
+  // en måling — renholderens liste, kundens liste, admin, historikk og PDF-en skal aldri kunne
+  // komme til hver sin konklusjon om den samme prøven.
+  return runItemsStmt.all(runId).map((item) => ({
+    ...item,
+    options: optionsByItem[item.id] || [],
+    verdict: measurementVerdict(item),
+    measure_label: measurementRangeLabel(item),
+  }));
 }
 
 export function findOrCreateRoomRunForDate(roomId, dateStr, cleanerId) {
@@ -303,7 +316,10 @@ export function findOrCreateRoomRunForDate(roomId, dateStr, cleanerId) {
       : insertRoomRunForDateStmt.run(roomId, cleanerId || null, `${dateStr} 12:00:00`);
   const items = roomItemsStmt.all(roomId).filter((item) => isItemDueOn(item, dateStr));
   items.forEach((item, i) => {
-    const runItemInfo = insertRoomRunItemStmt.run(info.lastInsertRowid, item.id, item.label, i);
+    const runItemInfo = insertRoomRunItemStmt.run(
+      info.lastInsertRowid, item.id, item.label, i,
+      item.measure_unit ?? null, item.measure_min ?? null, item.measure_max ?? null
+    );
     snapshotItemOptions(runItemInfo.lastInsertRowid, item.id);
   });
   return roomRunByIdStmt.get(info.lastInsertRowid);
@@ -357,4 +373,51 @@ export function getMonthlyItemsForSite(siteId, yearMonth) {
       status,
     };
   });
+}
+
+// ---------------------------------------------------------------------------
+// Måleoppgaver
+// ---------------------------------------------------------------------------
+
+// Én regel for om en måling er innenfor, brukt av API-svar, historikk og rapporter. Ligger her
+// og ikke i hver enkelt rute nettopp fordi en revisjon aldri skal kunne finne to flater i samme
+// system som er uenige om hvorvidt den samme prøven besto.
+//
+// Grensene leses fra run-itemet, ikke fra oppgavemalen: itemet bærer kopien som gjaldt da
+// målingen ble tatt.
+//
+// Returnerer null når det ikke er en måling, eller når verdien mangler ennå — «vet ikke» er en
+// egen tilstand og skal ikke leses som «bestått».
+export function measurementVerdict(runItem) {
+  if (!runItem || !runItem.measure_unit) return null;
+  const value = runItem.measured_value;
+  if (value === null || value === undefined) return null;
+
+  const min = runItem.measure_min;
+  const max = runItem.measure_max;
+  const underMin = min !== null && min !== undefined && value < min;
+  const overMax = max !== null && max !== undefined && value > max;
+  return underMin || overMax ? "fail" : "pass";
+}
+
+// Hvordan grensen skal leses for et menneske: "maks 150 RLU", "minst 82 °C", "5–9 pH".
+// Tom streng når oppgaven ikke har noen grense i det hele tatt — da er målingen ren
+// journalføring, som er et gyldig oppsett (noen vil bare ha tallet loggført).
+export function measurementRangeLabel(item) {
+  if (!item || !item.measure_unit) return "";
+  const { measure_min: min, measure_max: max, measure_unit: unit } = item;
+  const has = (v) => v !== null && v !== undefined;
+  if (has(min) && has(max)) return `${min}–${max} ${unit}`;
+  if (has(max)) return `maks ${max} ${unit}`;
+  if (has(min)) return `minst ${min} ${unit}`;
+  return unit;
+}
+
+// Tallet slik det kom inn, validert. Avviser tomt, ikke-numerisk og uendelig — en måleverdi
+// som ikke er et tall er verre enn ingen måleverdi, fordi den ser ut som dokumentasjon.
+export function parseMeasurement(raw) {
+  if (raw === null || raw === undefined || raw === "") return { ok: false };
+  const n = typeof raw === "number" ? raw : Number(String(raw).replace(",", "."));
+  if (!Number.isFinite(n)) return { ok: false };
+  return { ok: true, value: n };
 }

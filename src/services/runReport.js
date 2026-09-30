@@ -66,6 +66,23 @@ function chosenOptionsText(item) {
   return chosen.length ? chosen.join(", ") : "ingen valgt";
 }
 
+// En måleoppgave sier ingenting i en rapport uten selve tallet og grensen den ble målt mot —
+// "✓ Utført" på en ATP-prøve er akkurat den opplysningen et tilsyn ikke er ute etter.
+// Grensen leses fra run-itemet, altså den som gjaldt da prøven ble tatt, ikke dagens.
+// Returnerer null for en vanlig oppgave.
+function measurementText(item) {
+  if (!item.measure_unit) return null;
+  if (item.measured_value === null || item.measured_value === undefined) {
+    return { text: `Måling: ikke registrert${item.measure_label ? ` (${item.measure_label})` : ""}`, ok: null };
+  }
+  const grense = item.measure_label ? ` (${item.measure_label})` : "";
+  const dom = item.verdict === "fail" ? " — utenfor grense" : item.verdict === "pass" ? " — innenfor" : "";
+  return {
+    text: `Måling: ${item.measured_value} ${item.measure_unit}${grense}${dom}`,
+    ok: item.verdict === "fail" ? false : item.verdict === "pass" ? true : null,
+  };
+}
+
 function buildSections(detail) {
   if (detail.rooms?.length > 0) {
     const isMixed = isMixedResponsibility(detail.rooms);
@@ -111,9 +128,13 @@ export async function buildReportBody(detail) {
       const itemsHtml = section.items
         .map((item, iIdx) => {
           const chosen = chosenOptionsText(item);
+          const measure = measurementText(item);
+          const measureHtml = measure
+            ? `<br><span style="font-size:12px;font-weight:600;color:${measure.ok === false ? "#c0392b" : measure.ok === true ? "#0a7a2f" : "#555"};">${escapeHtml(measure.text)}</span>`
+            : "";
           return `
           <div style="padding:8px 14px;border:1px solid #ddd;border-top:none;font-size:13px;display:flex;justify-content:space-between;gap:12px;">
-            <span>${num}.${iIdx + 1} ${escapeHtml(item.label)}${chosen ? `<br><span style="color:#555;font-size:12px;">Valgt: ${escapeHtml(chosen)}</span>` : ""}</span>
+            <span>${num}.${iIdx + 1} ${escapeHtml(item.label)}${chosen ? `<br><span style="color:#555;font-size:12px;">Valgt: ${escapeHtml(chosen)}</span>` : ""}${measureHtml}</span>
             <span style="white-space:nowrap;font-weight:600;color:${item.done ? "#0a7a2f" : "#c0392b"};">${item.done ? "✓ Utført" : "✗ Ikke utført"}</span>
           </div>`;
         })
@@ -262,6 +283,12 @@ export function buildReportPdf(detail, res) {
       doc.fillColor(item.done ? "green" : "red").text(item.done ? "  ✓ Utført" : "  ✗ Ikke utført");
       const chosen = chosenOptionsText(item);
       if (chosen) doc.fontSize(9).fillColor("gray").text(`    Valgt: ${chosen}`);
+      const measure = measurementText(item);
+      if (measure) {
+        doc.fontSize(9)
+          .fillColor(measure.ok === false ? "red" : measure.ok === true ? "green" : "gray")
+          .text(`    ${measure.text}`);
+      }
     });
 
     if (section.photos?.length) {

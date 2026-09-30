@@ -6,7 +6,7 @@ import { PDFParse } from "pdf-parse";
 import { db } from "../db.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 import { todayInOslo } from "../services/schedule.js";
-import { getRoomsForSite, findOrCreateTodayRoomRun, findOrCreateRoomRunForDate, findRoomRunForDate, getMonthlyItemsForSite, getRoomGridForSiteMonth, getRoomRunItems, ensureRunItemOptions } from "../services/rooms.js";
+import { getRoomsForSite, findOrCreateTodayRoomRun, findOrCreateRoomRunForDate, findRoomRunForDate, getMonthlyItemsForSite, getRoomGridForSiteMonth, getRoomRunItems, ensureRunItemOptions, measurementVerdict, parseMeasurement } from "../services/rooms.js";
 import { safeOriginalName, compressUploadedPhoto, imageFileFilter, removeUploadedFile, UploadRejectedError } from "../utils/uploads.js";
 import { logQualityEvent } from "../services/qualityLog.js";
 import { translatePlanTexts, isTranslatableLanguage, isTranslationConfigured } from "../services/planTranslation.js";
@@ -225,10 +225,14 @@ siteRoomsRouter.get("/", requireAuth, (req, res) => {
 
 // "Tick every task in this run that CAN be ticked" — everything except a flervalg task with no
 // alternative chosen yet, which needs a real answer rather than a bulk sweep (see
-// itemSelectionSatisfied). Shared by the per-room "Merk alle" and the site-wide bulk complete.
+// itemSelectionSatisfied), and except a måleoppgave with no value recorded: et sveip kan ikke
+// gjette hva en ATP-prøve viste, og en påstått måling uten tall er verre enn en manglende
+// avkryssing fordi den ser komplett ut. Shared by the per-room "Merk alle" and the site-wide
+// bulk complete.
 const markAnswerableItemsDoneStmt = db.prepare(
   `UPDATE room_run_items SET done = 1
    WHERE room_run_id = ?
+     AND NOT (measure_unit IS NOT NULL AND measured_value IS NULL)
      AND id NOT IN (
        SELECT run_item_id FROM room_run_item_options GROUP BY run_item_id HAVING SUM(selected) = 0
      )`
@@ -797,6 +801,32 @@ roomsRouter.get("/:id/items", requireAuth, (req, res) => {
   })));
 });
 
+// Leser måledefinisjonen ut av en request-body, delt av POST og PATCH på en oppgave.
+//
+// Tom eller manglende `measure_unit` betyr «ikke en måling», og nullstiller da begge grensene —
+// ellers ville en oppgave som ble gjort om fra måling til vanlig avkryssing beholdt et par
+// foreldreløse grenseverdier som ingenting lenger leser, men som en revisjon ville se.
+function readMeasureDefinition(body) {
+  const unit = typeof body.measure_unit === "string" ? body.measure_unit.trim() : "";
+  if (!unit) return { unit: null, min: null, max: null };
+
+  const num = (raw) => {
+    if (raw === null || raw === undefined || raw === "") return null;
+    const n = typeof raw === "number" ? raw : Number(String(raw).replace(",", "."));
+    return Number.isFinite(n) ? n : NaN;
+  };
+  const min = num(body.measure_min);
+  const max = num(body.measure_max);
+  if (Number.isNaN(min) || Number.isNaN(max)) {
+    return { error: { code: "measure_bounds_invalid", error: "Grenseverdien må være et tall." } };
+  }
+  // En nedre grense over den øvre kan aldri oppfylles, og ville gjort hver eneste prøve rød.
+  if (min !== null && max !== null && min > max) {
+    return { error: { code: "measure_bounds_reversed", error: "Nedre grense kan ikke være høyere enn øvre grense." } };
+  }
+  return { unit, min, max };
+}
+
 roomsRouter.post("/:id/items", requireAuth, requireRole("admin", "manager"), (req, res) => {
   const { status: scopeStatus, error: scopeError } = getRoomScoped(req.params.id, req.user);
   if (scopeError) return res.status(scopeStatus).json({ error: scopeError });
@@ -804,10 +834,17 @@ roomsRouter.post("/:id/items", requireAuth, requireRole("admin", "manager"), (re
   const { label } = req.body;
   if (!label) return res.status(400).json({ code: "label_required", error: "label is required" });
 
+  // Er `measure_unit` satt, er oppgaven en måling — se db.js. Grensene er valgfrie hver for seg.
+  const measure = readMeasureDefinition(req.body);
+  if (measure.error) return res.status(400).json(measure.error);
+
   const nextSort = db.prepare("SELECT COALESCE(MAX(sort_order), -1) + 1 AS n FROM room_checklist_items WHERE room_id = ?").get(req.params.id).n;
   const info = db
-    .prepare("INSERT INTO room_checklist_items (room_id, label, sort_order) VALUES (?, ?, ?)")
-    .run(req.params.id, label, nextSort);
+    .prepare(
+      `INSERT INTO room_checklist_items (room_id, label, sort_order, measure_unit, measure_min, measure_max)
+       VALUES (?, ?, ?, ?, ?, ?)`
+    )
+    .run(req.params.id, label, nextSort, measure.unit, measure.min, measure.max);
 
   res.status(201).json(db.prepare("SELECT * FROM room_checklist_items WHERE id = ?").get(info.lastInsertRowid));
 });
@@ -833,6 +870,17 @@ roomsRouter.patch("/:id/items/:itemId", requireAuth, requireRole("admin", "manag
     const label = typeof req.body.label === "string" ? req.body.label.trim() : "";
     if (!label) return res.status(400).json({ code: "task_label_required", error: "Oppgavenavn kan ikke være tomt." });
     updates.label = label;
+  }
+  // Måledefinisjonen redigeres som ett sett: sendes `measure_unit`, skrives alle tre feltene.
+  // Sendes den ikke, røres de ikke — samme «bare det som faktisk endret seg»-regel som resten
+  // av denne ruten følger. Merk at dette bare treffer malen: besøk som allerede er opprettet
+  // beholder grensene de ble målt mot.
+  if ("measure_unit" in req.body) {
+    const measure = readMeasureDefinition(req.body);
+    if (measure.error) return res.status(400).json(measure.error);
+    updates.measure_unit = measure.unit;
+    updates.measure_min = measure.min;
+    updates.measure_max = measure.max;
   }
   // interval_days ("annenhver uke" etc), monthly_weekday/monthly_occurrence ("Månedlig"),
   // weekly_days ("Ukentlig", one or more specific weekdays — see room_checklist_item_weekdays),
@@ -1159,6 +1207,12 @@ roomsRouter.patch("/runs/:runId/items/:itemId", requireAuth, requireRole("cleane
   if (done && !itemSelectionSatisfied(req.params.itemId)) {
     return res.status(400).json({ code: "no_options_defined", error: "Velg minst ett alternativ for denne oppgaven først." });
   }
+  // Samme resonnement som for flervalg, men strengere konsekvens: en måleoppgave som kvitteres
+  // ut uten tall er dokumentasjon på at prøven ble tatt, uten å si hva den viste. I en revisjon
+  // er det verre enn en manglende avkryssing, fordi den ser komplett ut.
+  if (done && !itemMeasurementSatisfied(req.params.itemId)) {
+    return res.status(400).json({ code: "measurement_required", error: "Registrer måleverdien før oppgaven kvitteres ut." });
+  }
   const result = db.prepare("UPDATE room_run_items SET done = ? WHERE id = ? AND room_run_id = ?").run(done ? 1 : 0, req.params.itemId, req.params.runId);
   if (result.changes === 0) return res.status(404).json({ code: "not_found", error: "Not found" });
   recordParticipant(req.params.runId, req.user);
@@ -1175,6 +1229,61 @@ function itemSelectionSatisfied(runItemId) {
     .get(runItemId);
   return counts.total === 0 || counts.chosen > 0;
 }
+
+// True unless this run item is a measurement with no value recorded yet. A plain task passes,
+// which is every task that existed before measurements did.
+function itemMeasurementSatisfied(runItemId) {
+  const row = db
+    .prepare("SELECT measure_unit, measured_value FROM room_run_items WHERE id = ?")
+    .get(runItemId);
+  if (!row || !row.measure_unit) return true;
+  return row.measured_value !== null && row.measured_value !== undefined;
+}
+
+// Registrerer måleverdien. Egen rute av samme grunn som flervalgets option-rute og /approve:
+// én kolonne per rute, så validering og tilgang på hver side holder seg lesbar.
+//
+// Verdien kan overskrives — en renholder som taster feil skal kunne rette det — men
+// `measured_at` settes på nytt hver gang, og quality_log fanger endringen. En tom verdi
+// nullstiller målingen og huker samtidig av oppgaven, siden den ikke lenger er dokumentert.
+roomsRouter.patch("/runs/:runId/items/:itemId/measurement", requireAuth, requireRole("cleaner", "admin", "manager", "customer"), (req, res) => {
+  const { roomRun, status, code, error } = getRoomRunScoped(req.params.runId, req.user);
+  if (error) return res.status(status).json({ code, error });
+  const ownError = requireCustomerOwnsRoom(req.user, roomRun.room_responsible);
+  if (ownError) return res.status(ownError.status).json({ error: ownError.error });
+
+  const runItem = db
+    .prepare("SELECT * FROM room_run_items WHERE id = ? AND room_run_id = ?")
+    .get(req.params.itemId, req.params.runId);
+  if (!runItem) return res.status(404).json({ code: "not_found", error: "Not found" });
+  if (!runItem.measure_unit) {
+    return res.status(400).json({ code: "not_a_measurement", error: "Denne oppgaven er ikke en måling." });
+  }
+
+  const raw = req.body.value;
+  if (raw === null || raw === undefined || raw === "") {
+    db.prepare("UPDATE room_run_items SET measured_value = NULL, measured_at = NULL, done = 0 WHERE id = ?")
+      .run(req.params.itemId);
+  } else {
+    const parsed = parseMeasurement(raw);
+    if (!parsed.ok) {
+      return res.status(400).json({ code: "measurement_invalid", error: "Måleverdien må være et tall." });
+    }
+    db.prepare("UPDATE room_run_items SET measured_value = ?, measured_at = datetime('now') WHERE id = ?")
+      .run(parsed.value, req.params.itemId);
+  }
+
+  recordParticipant(req.params.runId, req.user);
+  stampRoomRunEdit(req.params.runId, req.body.initials);
+
+  const updated = db.prepare("SELECT * FROM room_run_items WHERE id = ?").get(req.params.itemId);
+  res.json({
+    ok: true,
+    measured_value: updated.measured_value,
+    measured_at: updated.measured_at,
+    verdict: measurementVerdict(updated),
+  });
+});
 
 // Ticking one alternative on a flervalg task. Kept separate from the item PATCH above for the
 // same reason /approve is: one column per route, so each side's validation stays legible.
