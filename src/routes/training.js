@@ -903,7 +903,7 @@ function drawPdfHeader(doc, title, subtitle) {
 // text above it, so it lands in the same place on every page whatever the course is called.
 // Merkevarefargen. Holdes i synk med --brand i frontendens index.css — dette er den eneste
 // hardkodede forekomsten i backend, siden rapport-e-postene er bevisst nøytralt gråtonet.
-const ACCENT = "#6d28d9";
+const ACCENT = "#1e2a38";
 const INK = "#18181b";
 const MUTED = "#71717a";
 
