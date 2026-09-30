@@ -20,6 +20,7 @@ import { companiesRouter } from "./routes/companies.js";
 import { departmentsRouter } from "./routes/departments.js";
 import { uploadsRouter } from "./routes/uploads.js";
 import { modulesRouter } from "./routes/modules.js";
+import { chemicalsRouter } from "./routes/chemicals.js";
 import { trainingRouter } from "./routes/training.js";
 import { timeRouter } from "./routes/time.js";
 import { requireAuth, requireModule } from "./middleware/auth.js";
@@ -102,6 +103,7 @@ app.use("/rooms", roomsRouter);
 app.use("/companies", companiesRouter);
 app.use("/departments", departmentsRouter);
 app.use("/modules", modulesRouter);
+app.use("/chemicals", chemicalsRouter);
 // Gated at the mount rather than per route, so no route inside training.js can ever forget the
 // check — a company without the "Opplæring" module gets 403 module_not_enabled on all of it.
 app.use("/training", requireAuth, requireModule("training"), trainingRouter);

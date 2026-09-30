@@ -228,6 +228,18 @@ ensureColumn("room_run_items", "concentration", "concentration TEXT");
 // en telefonklokke kan stilles.
 ensureColumn("room_run_items", "contact_started_at", "contact_started_at TEXT");
 
+// Et flervalg-alternativ kan peke på en rad i kjemikalieregisteret (se chemicals i schema.sql).
+// Nullable: et alternativ som ikke er et kjemikalie — «mopp», «klut», «damp» — er fortsatt bare
+// en tekst, og skal ikke tvinges inn i registeret.
+ensureColumn("room_checklist_item_options", "chemical_id", "chemical_id INTEGER REFERENCES chemicals(id)");
+
+// Og kopien som følger med ned på besøket, av samme grunn som alt annet her: byttes såpa eller
+// endres doseringen neste år, skal fjorårets dokumentasjon fortsatt vise hva som faktisk ble
+// brukt den dagen, i hvilken styrke.
+ensureColumn("room_run_item_options", "chemical_name", "chemical_name TEXT");
+ensureColumn("room_run_item_options", "chemical_strength", "chemical_strength TEXT");
+ensureColumn("room_run_item_options", "chemical_safety_note", "chemical_safety_note TEXT");
+
 // Departments started out (2026-09-07) as a per-client sub-grouping with a NOT NULL client_id,
 // before it turned out the actual need was an internal, company-wide region tag (Vest/Sør/Øst/
 // Midt) independent of client — see schema.sql's comment on the table. A database created

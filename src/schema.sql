@@ -718,3 +718,27 @@ CREATE TABLE IF NOT EXISTS room_run_participants (
 );
 
 CREATE INDEX IF NOT EXISTS idx_room_run_participants_run ON room_run_participants(room_run_id);
+
+-- Kjemikalieregisteret. Et flervalg-alternativ ("hvilken såpe ble brukt") har hittil bare vært
+-- en tekststreng, som dokumenterer navnet og ingenting annet. For et næringsmiddelanlegg er det
+-- for lite: styrken midlet skal blandes i, hvor lenge det skal stå, og hva renholderen må vite
+-- for å håndtere det trygt, er en del av den samme dokumentasjonen.
+--
+-- Registeret er per bedrift, ikke per lokasjon: det er den samme såpa på tvers av byggene, og en
+-- kopi per bygg ville betydd at en oppdatert dosering måtte rettes ti steder.
+CREATE TABLE IF NOT EXISTS chemicals (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  company_id INTEGER NOT NULL REFERENCES companies(id),
+  name TEXT NOT NULL,
+  -- Fritekst av samme grunn som room_checklist_items.concentration: «2 %», «1:100» og «500 ppm»
+  -- brukes om hverandre, og å normalisere dem ville mistet informasjon.
+  strength TEXT,
+  contact_seconds INTEGER,
+  -- Det renholderen må vite før hun åpner kanna. Kort med vilje — et helt sikkerhetsdatablad
+  -- leses ikke på en telefon med hansker, så lenka til det ligger ved siden av.
+  safety_note TEXT,
+  sds_url TEXT,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_chemicals_company ON chemicals(company_id);

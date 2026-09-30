@@ -6,7 +6,7 @@ import { PDFParse } from "pdf-parse";
 import { db } from "../db.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 import { todayInOslo } from "../services/schedule.js";
-import { getRoomsForSite, findOrCreateTodayRoomRun, findOrCreateRoomRunForDate, findRoomRunForDate, getMonthlyItemsForSite, getRoomGridForSiteMonth, getRoomRunItems, ensureRunItemOptions, measurementVerdict, parseMeasurement, contactSatisfied, contactRemainingSeconds } from "../services/rooms.js";
+import { getRoomsForSite, findOrCreateTodayRoomRun, findOrCreateRoomRunForDate, findRoomRunForDate, getMonthlyItemsForSite, getRoomGridForSiteMonth, getRoomRunItems, ensureRunItemOptions, measurementVerdict, parseMeasurement, contactSatisfied, contactRemainingSeconds, measurementRangeLabel } from "../services/rooms.js";
 import { safeOriginalName, compressUploadedPhoto, imageFileFilter, removeUploadedFile, UploadRejectedError } from "../utils/uploads.js";
 import { logQualityEvent } from "../services/qualityLog.js";
 import { translatePlanTexts, isTranslatableLanguage, isTranslationConfigured } from "../services/planTranslation.js";
@@ -1047,6 +1047,19 @@ function getItemScoped(roomId, itemId, user) {
   return { item };
 }
 
+// Oversetter en innsendt chemical_id til en id vi stoler på:
+//   null  → ikke koblet til registeret (helt normalt — «mopp» er ikke et kjemikalie)
+//   false → oppgitt, men finnes ikke eller hører til en annen bedrift
+// Den siste er hele grunnen til at dette ikke bare skrives rett inn: uten eierskapssjekken
+// kunne en id fra et annet firma lekket deres dosering og sikkerhetsnotat inn i en renholders
+// skjerm. Samme regel som for room_id/run_id ellers i systemet.
+function resolveChemicalId(raw, user) {
+  if (raw === null || raw === undefined || raw === "") return null;
+  const row = db.prepare("SELECT company_id FROM chemicals WHERE id = ?").get(raw);
+  if (!row || row.company_id !== user.company_id) return false;
+  return Number(raw);
+}
+
 roomsRouter.post("/:id/items/:itemId/options", requireAuth, requireRole("admin", "manager"), (req, res) => {
   const { status, code, error } = getItemScoped(req.params.id, req.params.itemId, req.user);
   if (error) return res.status(status).json({ code, error });
@@ -1054,12 +1067,17 @@ roomsRouter.post("/:id/items/:itemId/options", requireAuth, requireRole("admin",
   const label = typeof req.body?.label === "string" ? req.body.label.trim() : "";
   if (!label) return res.status(400).json({ code: "option_label_required", error: "Valgnavn kan ikke være tomt." });
 
+  const chemicalId = resolveChemicalId(req.body?.chemical_id, req.user);
+  if (chemicalId === false) {
+    return res.status(400).json({ code: "chemical_not_found", error: "Fant ikke kjemikaliet." });
+  }
+
   const nextSort = db
     .prepare("SELECT COALESCE(MAX(sort_order), -1) + 1 AS n FROM room_checklist_item_options WHERE item_id = ?")
     .get(req.params.itemId).n;
   const info = db
-    .prepare("INSERT INTO room_checklist_item_options (item_id, label, sort_order) VALUES (?, ?, ?)")
-    .run(req.params.itemId, label, nextSort);
+    .prepare("INSERT INTO room_checklist_item_options (item_id, label, sort_order, chemical_id) VALUES (?, ?, ?, ?)")
+    .run(req.params.itemId, label, nextSort, chemicalId);
 
   res.status(201).json(db.prepare("SELECT * FROM room_checklist_item_options WHERE id = ?").get(info.lastInsertRowid));
 });
@@ -1071,9 +1089,22 @@ roomsRouter.patch("/:id/items/:itemId/options/:optionId", requireAuth, requireRo
   const label = typeof req.body?.label === "string" ? req.body.label.trim() : "";
   if (!label) return res.status(400).json({ code: "option_label_required", error: "Valgnavn kan ikke være tomt." });
 
-  const result = db
-    .prepare("UPDATE room_checklist_item_options SET label = ? WHERE id = ? AND item_id = ?")
-    .run(label, req.params.optionId, req.params.itemId);
+  // Koblingen til registeret skrives bare når klienten faktisk sender den, så en ren
+  // navneendring ikke stilltiende river vekk kjemikaliet alternativet peker på.
+  let result;
+  if ("chemical_id" in (req.body || {})) {
+    const chemicalId = resolveChemicalId(req.body.chemical_id, req.user);
+    if (chemicalId === false) {
+      return res.status(400).json({ code: "chemical_not_found", error: "Fant ikke kjemikaliet." });
+    }
+    result = db
+      .prepare("UPDATE room_checklist_item_options SET label = ?, chemical_id = ? WHERE id = ? AND item_id = ?")
+      .run(label, chemicalId, req.params.optionId, req.params.itemId);
+  } else {
+    result = db
+      .prepare("UPDATE room_checklist_item_options SET label = ? WHERE id = ? AND item_id = ?")
+      .run(label, req.params.optionId, req.params.itemId);
+  }
   if (result.changes === 0) return res.status(404).json({ code: "not_found", error: "Not found" });
 
   res.json(db.prepare("SELECT * FROM room_checklist_item_options WHERE id = ?").get(req.params.optionId));
@@ -1506,7 +1537,41 @@ roomsRouter.post("/runs/:runId/approve", requireAuth, requireRole("customer", "a
   // making it mandatory waits until the frontend asks for one, or every admin approval in
   // production would start failing on a field the UI has no field for.
   const isOverride = req.user.role !== "customer";
-  const overrideReason = isOverride ? (req.body?.reason || "").trim() || null : null;
+  const reason = (req.body?.reason || "").trim() || null;
+  let overrideReason = isOverride ? reason : null;
+
+  // Frigivelse med en måling utenfor grensen.
+  //
+  // Dette er hele poenget med å ha grenseverdier: et rom der ATP-prøven ligger over grensa skal
+  // ikke kunne slippes gjennom med et trykk, som om tallet ikke fantes. Men det skal heller ikke
+  // være umulig — noen ganger er avviket forklart, og produksjonen må i gang. Så veien finnes,
+  // den koster en begrunnelse, og begrunnelsen havner i kvalitetsloggen.
+  //
+  // Dette gjelder ALLE roller, også kunden. En kunde som frigir en linje på tross av et rødt
+  // tall tar en reell beslutning, og den skal være like sporbar som en admin-overstyring.
+  const failed = db
+    .prepare(
+      `SELECT label, measured_value, measure_unit, measure_min, measure_max
+       FROM room_run_items
+       WHERE room_run_id = ? AND measure_unit IS NOT NULL AND measured_value IS NOT NULL
+         AND ((measure_min IS NOT NULL AND measured_value < measure_min)
+           OR (measure_max IS NOT NULL AND measured_value > measure_max))`
+    )
+    .all(roomRun.id);
+
+  if (failed.length > 0 && !reason) {
+    return res.status(409).json({
+      code: "measurement_out_of_limits",
+      error: "En eller flere målinger ligger utenfor grensen. Oppgi en begrunnelse for å frigi likevel.",
+      failed: failed.map((f) => ({
+        label: f.label,
+        value: f.measured_value,
+        unit: f.measure_unit,
+        limit: measurementRangeLabel(f),
+      })),
+    });
+  }
+  if (failed.length > 0) overrideReason = reason;
 
   db.transaction(() => {
     db.prepare(
@@ -1514,6 +1579,26 @@ roomsRouter.post("/runs/:runId/approve", requireAuth, requireRole("customer", "a
               approved_by_role = ?, approval_override_reason = ?, completed_at = datetime('now')
        WHERE id = ?`
     ).run(initials, req.user.id, req.user.role, overrideReason, roomRun.id);
+
+    // Egen hendelse, ikke slått sammen med approval_override: «frigitt selv om ATP-prøven lå
+    // over grensa» og «godkjent på kundens vegne fordi hun ikke tok telefonen» er to helt ulike
+    // ting for den som leser loggen et halvt år senere.
+    if (failed.length > 0) {
+      logQualityEvent({
+        user: req.user,
+        action: "released_out_of_limits",
+        subjectType: "room_run",
+        subjectId: roomRun.id,
+        siteId: roomRun.room_site_id,
+        roomId: roomRun.room_id,
+        occurredAt: req.body?.occurred_at,
+        beforeValue: failed
+          .map((f) => `${f.label}: ${f.measured_value} ${f.measure_unit} (${measurementRangeLabel(f)})`)
+          .join("; "),
+        afterValue: initials,
+        comment: reason,
+      });
+    }
 
     if (isOverride) {
       logQualityEvent({
