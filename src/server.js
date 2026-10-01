@@ -103,7 +103,9 @@ app.use("/rooms", roomsRouter);
 app.use("/companies", companiesRouter);
 app.use("/departments", departmentsRouter);
 app.use("/modules", modulesRouter);
-app.use("/chemicals", chemicalsRouter);
+// Kjemikalieregisteret hører til næringsmiddel-modulen. requireModule er den faktiske porten;
+// at fanen skjules i frontend er kosmetikk (se src/modules.js).
+app.use("/chemicals", requireAuth, requireModule("foodsafety"), chemicalsRouter);
 // Gated at the mount rather than per route, so no route inside training.js can ever forget the
 // check — a company without the "Opplæring" module gets 403 module_not_enabled on all of it.
 app.use("/training", requireAuth, requireModule("training"), trainingRouter);

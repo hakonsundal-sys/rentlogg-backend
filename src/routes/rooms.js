@@ -7,6 +7,7 @@ import { db } from "../db.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 import { todayInOslo } from "../services/schedule.js";
 import { getRoomsForSite, findOrCreateTodayRoomRun, findOrCreateRoomRunForDate, findRoomRunForDate, getMonthlyItemsForSite, getRoomGridForSiteMonth, getRoomRunItems, ensureRunItemOptions, measurementVerdict, parseMeasurement, contactSatisfied, contactRemainingSeconds, measurementRangeLabel } from "../services/rooms.js";
+import { isModuleEnabled } from "../modules.js";
 import { safeOriginalName, compressUploadedPhoto, imageFileFilter, removeUploadedFile, UploadRejectedError } from "../utils/uploads.js";
 import { logQualityEvent } from "../services/qualityLog.js";
 import { translatePlanTexts, isTranslatableLanguage, isTranslationConfigured } from "../services/planTranslation.js";
@@ -812,9 +813,17 @@ roomsRouter.get("/:id/items", requireAuth, (req, res) => {
 // Tom eller manglende `measure_unit` betyr «ikke en måling», og nullstiller da begge grensene —
 // ellers ville en oppgave som ble gjort om fra måling til vanlig avkryssing beholdt et par
 // foreldreløse grenseverdier som ingenting lenger leser, men som en revisjon ville se.
-function readMeasureDefinition(body) {
+function readMeasureDefinition(body, user) {
   const unit = typeof body.measure_unit === "string" ? body.measure_unit.trim() : "";
   if (!unit) return { unit: null, min: null, max: null };
+
+  // Måleoppgaver hører til næringsmiddel-modulen. Porten står her og ikke på hele ruta fordi
+  // vanlige oppgaver må kunne lages av alle — det er feltene som er kjøpt, ikke oppgaven.
+  // Å tømme enheten er alltid lov, også uten modulen, så et firma som sier opp modulen kan
+  // rydde opp i sine egne oppgaver etterpå.
+  if (!isModuleEnabled(user.company_id, "foodsafety")) {
+    return { error: { code: "module_not_enabled", error: "Måleoppgaver krever tilleggsmodulen Næringsmiddel." } };
+  }
 
   const num = (raw) => {
     if (raw === null || raw === undefined || raw === "") return null;
@@ -840,11 +849,15 @@ const STEP_TYPES = ["residue", "clean", "rinse", "disinfect", "control"];
 // Leser trinn, kontakttid og konsentrasjon ut av en body. Tom `step_type` betyr «vanlig
 // oppgave» og nullstiller de to andre med seg: en oppgave som ikke lenger er et hygienetrinn
 // skal ikke sitte igjen med en kontakttid ingenting håndhever.
-function readStepDefinition(body) {
+function readStepDefinition(body, user) {
   const stepType = typeof body.step_type === "string" ? body.step_type.trim() : "";
   if (!stepType) return { step_type: null, contact_seconds: null, concentration: null };
   if (!STEP_TYPES.includes(stepType)) {
     return { error: { code: "step_type_invalid", error: "Ukjent hygienetrinn." } };
+  }
+  // Samme port som for måleoppgaver over, og av samme grunn.
+  if (!isModuleEnabled(user.company_id, "foodsafety")) {
+    return { error: { code: "module_not_enabled", error: "Hygienetrinn krever tilleggsmodulen Næringsmiddel." } };
   }
 
   let seconds = null;
@@ -869,9 +882,9 @@ roomsRouter.post("/:id/items", requireAuth, requireRole("admin", "manager"), (re
   if (!label) return res.status(400).json({ code: "label_required", error: "label is required" });
 
   // Er `measure_unit` satt, er oppgaven en måling — se db.js. Grensene er valgfrie hver for seg.
-  const measure = readMeasureDefinition(req.body);
+  const measure = readMeasureDefinition(req.body, req.user);
   if (measure.error) return res.status(400).json(measure.error);
-  const step = readStepDefinition(req.body);
+  const step = readStepDefinition(req.body, req.user);
   if (step.error) return res.status(400).json(step.error);
 
   const nextSort = db.prepare("SELECT COALESCE(MAX(sort_order), -1) + 1 AS n FROM room_checklist_items WHERE room_id = ?").get(req.params.id).n;
@@ -917,7 +930,7 @@ roomsRouter.patch("/:id/items/:itemId", requireAuth, requireRole("admin", "manag
   // av denne ruten følger. Merk at dette bare treffer malen: besøk som allerede er opprettet
   // beholder grensene de ble målt mot.
   if ("measure_unit" in req.body) {
-    const measure = readMeasureDefinition(req.body);
+    const measure = readMeasureDefinition(req.body, req.user);
     if (measure.error) return res.status(400).json(measure.error);
     updates.measure_unit = measure.unit;
     updates.measure_min = measure.min;
@@ -925,7 +938,7 @@ roomsRouter.patch("/:id/items/:itemId", requireAuth, requireRole("admin", "manag
   }
   // Hygienetrinnet redigeres som ett sett, på samme måte som måledefinisjonen over.
   if ("step_type" in req.body) {
-    const step = readStepDefinition(req.body);
+    const step = readStepDefinition(req.body, req.user);
     if (step.error) return res.status(400).json(step.error);
     updates.step_type = step.step_type;
     updates.contact_seconds = step.contact_seconds;

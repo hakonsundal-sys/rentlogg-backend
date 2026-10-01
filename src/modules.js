@@ -26,6 +26,22 @@ export const MODULES = [
     // not bought it must never end up with half a month of stamped shifts nobody asked for.
     defaultEnabled: false,
   },
+  {
+    key: "foodsafety",
+    name: "Næringsmiddel",
+    description:
+      "Hygienetrinn med kontakttid, måleverdier mot grenseverdi (ATP, temperatur, pH), " +
+      "kjemikalieregister, og sperret linjefrigivelse ved prøve utenfor grensen.",
+    // Et kontorbygg trenger ingenting av dette. Å la en renholdsbedrift som vasker kontorer få
+    // «+ Måling» og «+ Trinn» i oppgaveeditoren er ikke bare støy — det er fem valg til i en
+    // skjerm som allerede har mange, for en bransje der svaret alltid er nei.
+    //
+    // Merk hva denne modulen IKKE skrur av: en måling som allerede ligger på et besøk fortsetter
+    // å virke, og kontakttiden fortsetter å sperre. Modulen styrer hva som kan settes OPP, ikke
+    // hva som allerede er dokumentert — skrur man den av midt i et skift, skal ikke renholderen
+    // plutselig kunne kvittere ut en desinfeksjon uten kontakttid.
+    defaultEnabled: false,
+  },
 ];
 
 const MODULE_BY_KEY = new Map(MODULES.map((m) => [m.key, m]));
