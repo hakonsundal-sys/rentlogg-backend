@@ -154,8 +154,10 @@ deviationsRouter.post("/", requireAuth, requireRole("admin", "cleaner", "manager
       siteId: site_id,
       roomId: room_id || null,
       occurredAt: req.body?.occurred_at,
-      afterValue: `${priority || "medium"} · ${initials.trim()}`,
-      comment: title ? `${title}: ${description}` : description,
+      // afterValue er «hvem», ikke «hva» — leseflaten viser den i kolonnen «Utført av», og
+      // prioriteten hører hjemme i beskrivelsen.
+      afterValue: initials.trim(),
+      comment: `[${priority || "medium"}] ${title ? `${title}: ${description}` : description}`,
     });
     return inserted;
   })();
