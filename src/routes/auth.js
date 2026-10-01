@@ -10,6 +10,19 @@ import { safeOriginalName, normalizeImageOrientation, imageFileFilter } from "..
 import { normalizeLanguage } from "../utils/languages.js";
 import { enabledModulesForCompany } from "../modules.js";
 
+// Firmaets egen profil, hvis det har en — se companies i db.js. Rir med brukeren av samme grunn
+// som modullisten: den avgjør hva flaten VISER, ikke hva kalleren får lov til. En kunde som
+// logger inn på rentlogg.no skal også se sin egen logo, ikke bare den som kommer inn via sitt
+// eget domene, så dette er den andre av de to kildene — GET /branding er den første.
+function companyBranding(companyId) {
+  if (!companyId) return null;
+  const row = db
+    .prepare("SELECT name, brand_color, logo_data_url FROM companies WHERE id = ?")
+    .get(companyId);
+  if (!row || (!row.brand_color && !row.logo_data_url)) return null;
+  return { name: row.name, brand_color: row.brand_color || null, logo_data_url: row.logo_data_url || null };
+}
+
 export const authRouter = Router();
 
 const avatarUpload = multer({
@@ -110,6 +123,7 @@ authRouter.post("/login", loginLimiter, (req, res) => {
       // it decides what the UI shows, not what the caller may do (requireModule does that, per
       // request), so a stale copy in an old token's session can't grant anything.
       modules: enabledModulesForCompany(user.company_id),
+      branding: companyBranding(user.company_id),
     },
   });
 });
@@ -494,7 +508,7 @@ authRouter.get("/me", requireAuth, (req, res) => {
   const user = db
     .prepare("SELECT id, name, email, role, client_id, company_id, avatar_url, phone, created_at, language FROM users WHERE id = ?")
     .get(req.user.id);
-  res.json({ ...user, modules: enabledModulesForCompany(user.company_id) });
+  res.json({ ...user, modules: enabledModulesForCompany(user.company_id), branding: companyBranding(user.company_id) });
 });
 
 authRouter.patch("/me", requireAuth, (req, res) => {

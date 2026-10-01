@@ -5,7 +5,7 @@ import helmet from "helmet";
 import morgan from "morgan";
 import multer from "multer";
 import fs from "node:fs";
-import "./db.js";
+import { db } from "./db.js";
 
 import { authRouter } from "./routes/auth.js";
 import { clientsRouter } from "./routes/clients.js";
@@ -50,6 +50,30 @@ app.use(morgan("dev"));
 app.use("/uploads", uploadsRouter);
 
 app.get("/health", (req, res) => res.json({ ok: true }));
+
+// Hvilket firmas profil hører denne verten til. Bevisst UTEN auth, fordi den brukes av
+// innloggingsskjermen — altså før noen har logget inn, som er hele poenget med white-label:
+// kunden skal se sin egen logo når hun kommer til døra, ikke etterpå.
+//
+// Derfor returnerer den også kun det som er ment å være offentlig: firmanavn, logo og kulør.
+// Ingen id, ingen modulliste, ingen antall brukere. Et oppslag på en ukjent vert gir et tomt
+// svar og ikke 404 — at en vert IKKE er white-labelet er et normalt svar, ikke en feil, og en
+// 404 her ville dessuten bekreftet hvilke verter som finnes for den som gjetter seg gjennom.
+app.get("/branding", (req, res) => {
+  const host = String(req.query.host || req.get("x-rentlogg-host") || "").trim().toLowerCase();
+  if (!host) return res.json({});
+
+  const company = db
+    .prepare("SELECT name, brand_color, logo_data_url FROM companies WHERE custom_domain = ?")
+    .get(host.replace(/:\d+$/, ""));
+  if (!company) return res.json({});
+
+  res.json({
+    name: company.name,
+    brand_color: company.brand_color || null,
+    logo_data_url: company.logo_data_url || null,
+  });
+});
 
 // Captured at module load. Render's starter plan runs one instance and replaces it on every
 // deploy, so process start is the closest thing this runtime actually knows to "when did the API

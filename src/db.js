@@ -102,6 +102,26 @@ ensureColumn("deviations", "customer_approved_by_initials", "customer_approved_b
 //
 // Hvert steg bærer sitt eget tidspunkt og sine egne initialer. Et avvik der alle fire står
 // utfylt med hver sin signatur er forskjellen på «vi fikset det» og dokumentasjon.
+// White-label per bedrift.
+//
+// `brand_color` er én kulør. Resten av profilen (flater, kanter, typografi) er delt, og det er
+// med vilje: en kunde som får full kontroll over paletten lager før eller siden en kombinasjon
+// der statusfargene ikke lenger kan skilles, og grønn/oransje/rød/blå er bærende betydning i
+// denne appen, ikke pynt. Én kulør bytter det som er merkevare, og ingenting som betyr noe.
+//
+// Logoen ligger som data-URI i databasen, ikke som en fil på disk. Det bryter med hvordan
+// bilder ellers lagres her, og grunnen er at logoen må vises FØR innlogging: en fil på disk
+// måtte da serveres av en rute uten auth, og den regelen ble innført etter et reelt hull
+// (se /uploads i feedback_engineering_conventions). En data-URI i et felt /branding returnerer
+// har ingen slik rute, ingen foreldreløse filer ved sletting, og følger med i databasesikker-
+// hetskopien. Størrelsen er begrenset i ruta — en logo er noen kilobyte.
+ensureColumn("companies", "brand_color", "brand_color TEXT");
+ensureColumn("companies", "logo_data_url", "logo_data_url TEXT");
+// Verten kunden når appen på, f.eks. "rent.okv-gruppen.no". Selve utpekingen (DNS, sertifikat,
+// domene lagt til i Vercel, ALLOWED_ORIGINS) er manuelt arbeid per kunde — dette feltet er bare
+// oppslaget som lar appen vite hvilket firma en gitt vert tilhører.
+ensureColumn("companies", "custom_domain", "custom_domain TEXT");
+
 ensureColumn("deviations", "immediate_action", "immediate_action TEXT");
 ensureColumn("deviations", "immediate_action_at", "immediate_action_at TEXT");
 ensureColumn("deviations", "immediate_action_by", "immediate_action_by TEXT");

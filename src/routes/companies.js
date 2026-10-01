@@ -58,3 +58,92 @@ companiesRouter.post("/", requireAuth, requireRole("super_admin"), (req, res) =>
   const info = db.prepare("INSERT INTO companies (name) VALUES (?)").run(name.trim());
   res.status(201).json({ id: info.lastInsertRowid, name: name.trim() });
 });
+
+// Profilen et firma kan sette sitt eget preg på. Se kommentaren på companies i db.js for
+// hvorfor det bare er én kulør, og hvorfor logoen er en data-URI og ikke en fil.
+//
+// super_admin-only, som resten av denne ruteren: white-label er noe Rentlogg slår på for en
+// kunde, ikke noe kunden endrer selv — en admin som skrur om på sin egen logo midt i en
+// arbeidsdag er en supportsak, ikke en funksjon.
+
+// 150 kB. En logo som er større enn dette er et fotografi, ikke en logo, og den skal ikke
+// sendes med hver /branding-forespørsel. Grensen gjelder den ferdige data-URI-en, altså etter
+// base64 — det er den strengen som faktisk går over nettet.
+const MAX_LOGO_CHARS = 150 * 1024;
+
+const ALLOWED_LOGO_TYPES = ["image/png", "image/jpeg", "image/webp", "image/svg+xml"];
+
+function readBranding(body) {
+  const out = {};
+
+  if ("brand_color" in body) {
+    const raw = typeof body.brand_color === "string" ? body.brand_color.trim() : "";
+    if (!raw) {
+      out.brand_color = null;
+    } else if (!/^#[0-9a-fA-F]{6}$/.test(raw)) {
+      // Kun 6-sifret hex. Appen setter denne rett inn i en CSS-variabel, og en vilkårlig streng
+      // der er et injeksjonspunkt — `red; } body { display:none } .x {` er en gyldig «farge»
+      // for en naiv validator.
+      return { error: { code: "brand_color_invalid", error: "Fargen må være på formen #1e2a38." } };
+    } else {
+      out.brand_color = raw.toLowerCase();
+    }
+  }
+
+  if ("logo_data_url" in body) {
+    const raw = typeof body.logo_data_url === "string" ? body.logo_data_url.trim() : "";
+    if (!raw) {
+      out.logo_data_url = null;
+    } else {
+      const m = /^data:([a-z+/-]+);base64,([A-Za-z0-9+/=]+)$/.exec(raw);
+      if (!m) {
+        return { error: { code: "logo_invalid", error: "Logoen må være en base64 data-URI." } };
+      }
+      if (!ALLOWED_LOGO_TYPES.includes(m[1])) {
+        return { error: { code: "logo_type_invalid", error: "Logoen må være PNG, JPG, WEBP eller SVG." } };
+      }
+      if (raw.length > MAX_LOGO_CHARS) {
+        return { error: { code: "logo_too_large", error: "Logoen er for stor. Maks 150 kB." } };
+      }
+      out.logo_data_url = raw;
+    }
+  }
+
+  if ("custom_domain" in body) {
+    const raw = typeof body.custom_domain === "string" ? body.custom_domain.trim().toLowerCase() : "";
+    if (!raw) {
+      out.custom_domain = null;
+    } else if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(raw)) {
+      return { error: { code: "domain_invalid", error: "Oppgi bare verten, f.eks. rent.okv-gruppen.no." } };
+    } else {
+      out.custom_domain = raw;
+    }
+  }
+
+  return out;
+}
+
+companiesRouter.patch("/:id/branding", requireAuth, requireRole("super_admin"), (req, res) => {
+  const company = db.prepare("SELECT * FROM companies WHERE id = ?").get(req.params.id);
+  if (!company) return res.status(404).json({ code: "not_found", error: "Not found" });
+
+  const fields = readBranding(req.body || {});
+  if (fields.error) return res.status(400).json(fields.error);
+
+  // To firmaer på samme vert ville gjort /branding tvetydig, og den ruta velger hvilket
+  // firmas logo en innloggingsside viser.
+  if (fields.custom_domain) {
+    const clash = db
+      .prepare("SELECT id FROM companies WHERE custom_domain = ? AND id != ?")
+      .get(fields.custom_domain, company.id);
+    if (clash) return res.status(409).json({ code: "domain_taken", error: "Domenet er allerede i bruk av et annet firma." });
+  }
+
+  const keys = Object.keys(fields);
+  if (keys.length === 0) return res.status(400).json({ code: "nothing_to_update", error: "Ingenting å endre." });
+
+  db.prepare(`UPDATE companies SET ${keys.map((k) => `${k} = ?`).join(", ")} WHERE id = ?`)
+    .run(...keys.map((k) => fields[k]), company.id);
+
+  res.json(db.prepare("SELECT id, name, brand_color, logo_data_url, custom_domain FROM companies WHERE id = ?").get(company.id));
+});
