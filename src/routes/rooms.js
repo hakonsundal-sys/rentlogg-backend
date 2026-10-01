@@ -817,12 +817,12 @@ function readMeasureDefinition(body, user) {
   const unit = typeof body.measure_unit === "string" ? body.measure_unit.trim() : "";
   if (!unit) return { unit: null, min: null, max: null };
 
-  // Måleoppgaver hører til næringsmiddel-modulen. Porten står her og ikke på hele ruta fordi
+  // Måleoppgaver hører til hygiene-modulen. Porten står her og ikke på hele ruta fordi
   // vanlige oppgaver må kunne lages av alle — det er feltene som er kjøpt, ikke oppgaven.
   // Å tømme enheten er alltid lov, også uten modulen, så et firma som sier opp modulen kan
   // rydde opp i sine egne oppgaver etterpå.
-  if (!isModuleEnabled(user.company_id, "foodsafety")) {
-    return { error: { code: "module_not_enabled", error: "Måleoppgaver krever tilleggsmodulen Næringsmiddel." } };
+  if (!isModuleEnabled(user.company_id, "hygiene")) {
+    return { error: { code: "module_not_enabled", error: "Måleoppgaver krever tilleggsmodulen Hygiene og måling." } };
   }
 
   const num = (raw) => {
@@ -856,8 +856,8 @@ function readStepDefinition(body, user) {
     return { error: { code: "step_type_invalid", error: "Ukjent hygienetrinn." } };
   }
   // Samme port som for måleoppgaver over, og av samme grunn.
-  if (!isModuleEnabled(user.company_id, "foodsafety")) {
-    return { error: { code: "module_not_enabled", error: "Hygienetrinn krever tilleggsmodulen Næringsmiddel." } };
+  if (!isModuleEnabled(user.company_id, "hygiene")) {
+    return { error: { code: "module_not_enabled", error: "Hygienetrinn krever tilleggsmodulen Hygiene og måling." } };
   }
 
   let seconds = null;

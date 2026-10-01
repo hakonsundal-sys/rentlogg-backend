@@ -27,14 +27,20 @@ export const MODULES = [
     defaultEnabled: false,
   },
   {
-    key: "foodsafety",
-    name: "Næringsmiddel",
+    key: "hygiene",
+    name: "Hygiene og måling",
     description:
-      "Hygienetrinn med kontakttid, måleverdier mot grenseverdi (ATP, temperatur, pH), " +
-      "kjemikalieregister, og sperret linjefrigivelse ved prøve utenfor grensen.",
+      "Hygienetrinn i fast sekvens med kontakttid, måleverdier mot grenseverdi (ATP, temperatur, " +
+      "pH), kjemikalieregister, og sperret frigivelse ved prøve utenfor grensen.",
     // Et kontorbygg trenger ingenting av dette. Å la en renholdsbedrift som vasker kontorer få
-    // «+ Måling» og «+ Trinn» i oppgaveeditoren er ikke bare støy — det er fem valg til i en
+    // «+ Måling» og «+ Trinn» i oppgaveeditoren er ikke bare støy — det er to valg til i en
     // skjerm som allerede har mange, for en bransje der svaret alltid er nei.
+    //
+    // Het «Næringsmiddel» til 2026-10-01. Navnet var feil: kontakttid er en DESINFEKSJONS-
+    // funksjon, ikke en matfunksjon, og ATP måles i helsebygg også. Et legesenter, en barnehage
+    // under et utbrudd eller et treningssenter har alle «spray, la det stå ti minutter, tørk
+    // av» — og ingen av dem ville fått tilbud om en modul som het Næringsmiddel. Navnet skal
+    // beskrive hva modulen gjør, ikke hvilken bransje som først spurte etter den.
     //
     // Merk hva denne modulen IKKE skrur av: en måling som allerede ligger på et besøk fortsetter
     // å virke, og kontakttiden fortsetter å sperre. Modulen styrer hva som kan settes OPP, ikke
