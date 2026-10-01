@@ -30,8 +30,8 @@ export const MODULES = [
     key: "hygiene",
     name: "Hygiene og måling",
     description:
-      "Hygienetrinn i fast sekvens med kontakttid, måleverdier mot grenseverdi (ATP, temperatur, " +
-      "pH), kjemikalieregister, og sperret frigivelse ved prøve utenfor grensen.",
+      "Hygienetrinn i fast sekvens med kontakttid som sperrer, måleverdier mot grenseverdi " +
+      "(ATP, temperatur, pH), og sperret frigivelse ved prøve utenfor grensen.",
     // Et kontorbygg trenger ingenting av dette. Å la en renholdsbedrift som vasker kontorer få
     // «+ Måling» og «+ Trinn» i oppgaveeditoren er ikke bare støy — det er to valg til i en
     // skjerm som allerede har mange, for en bransje der svaret alltid er nei.
@@ -46,6 +46,12 @@ export const MODULES = [
     // å virke, og kontakttiden fortsetter å sperre. Modulen styrer hva som kan settes OPP, ikke
     // hva som allerede er dokumentert — skrur man den av midt i et skift, skal ikke renholderen
     // plutselig kunne kvittere ut en desinfeksjon uten kontakttid.
+    //
+    // Kjemikalieregisteret LÅ her til 2026-10-01 og ble flyttet ut i kjernen. Ikke sett det
+    // tilbake: alle renholdsselskap bruker kjemikalier, sikkerhetsnotatet og sikkerhetsdatabladet
+    // er arbeidsmiljø uansett hva som vaskes, og flervalg er kjerne — så med registeret bak
+    // modulen registrerte en kjernefunksjon «Zalo» som naken tekst for alle som ikke hadde kjøpt.
+    // Skillet som ble igjen: registerets kontakttid er informasjon, oppgavens kontakttid sperrer.
     defaultEnabled: false,
   },
 ];

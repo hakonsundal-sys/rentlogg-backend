@@ -127,9 +127,15 @@ app.use("/rooms", roomsRouter);
 app.use("/companies", companiesRouter);
 app.use("/departments", departmentsRouter);
 app.use("/modules", modulesRouter);
-// Kjemikalieregisteret hører til hygiene-modulen. requireModule er den faktiske porten;
-// at fanen skjules i frontend er kosmetikk (se src/modules.js).
-app.use("/chemicals", requireAuth, requireModule("hygiene"), chemicalsRouter);
+// Kjemikalieregisteret er KJERNE, ikke modul. Et kontorvask-firma trenger ingen ATP-grenser,
+// men det bruker Zalo og et desinfeksjonsmiddel, og har like mye bruk for å slå opp styrken.
+// Sikkerhetsnotatet og lenken til sikkerhetsdatabladet er dessuten arbeidsmiljø — det samme
+// uansett hva som vaskes — og flervalg («hvilken såpe») er allerede kjerne, så med registeret
+// bak en betalt modul registrerte en kjernefunksjon «Zalo» som naken tekst for alle andre.
+//
+// Kontakttiden i registeret er INFORMASJON (det leverandøren oppgir). Nedtellingen som faktisk
+// sperrer avkryssingen leser room_checklist_items.contact_seconds, og DEN står i hygiene-modulen.
+app.use("/chemicals", requireAuth, chemicalsRouter);
 // Gated at the mount rather than per route, so no route inside training.js can ever forget the
 // check — a company without the "Opplæring" module gets 403 module_not_enabled on all of it.
 app.use("/training", requireAuth, requireModule("training"), trainingRouter);
