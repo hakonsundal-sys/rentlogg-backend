@@ -133,14 +133,32 @@ deviationsRouter.post("/", requireAuth, requireRole("admin", "cleaner", "manager
     resolvedRunId = latestRun?.id || null;
   }
 
-  const info = db
-    .prepare(
-      `INSERT INTO deviations (site_id, run_id, room_id, room_task_label, reported_by, reported_by_initials, title, description, priority)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    )
-    .run(site_id, resolvedRunId, room_id || null, room_task_label || null, req.user.id, initials.trim(), title || null, description, priority || "medium");
+  // Opprettelsen logges også, ikke bare slettinger og endringer. Et revisjonsspor som bare
+  // forteller hva som ble fjernet, svarer ikke på «når visste dere om dette» — og det er det
+  // første spørsmålet et tilsyn stiller om et avvik.
+  const info = db.transaction(() => {
+    const inserted = db
+      .prepare(
+        `INSERT INTO deviations (site_id, run_id, room_id, room_task_label, reported_by, reported_by_initials, title, description, priority)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(site_id, resolvedRunId, room_id || null, room_task_label || null, req.user.id, initials.trim(), title || null, description, priority || "medium");
 
-  db.prepare("UPDATE sites SET status = 'deviation' WHERE id = ?").run(site_id);
+    db.prepare("UPDATE sites SET status = 'deviation' WHERE id = ?").run(site_id);
+
+    logQualityEvent({
+      user: req.user,
+      action: "deviation_reported",
+      subjectType: "deviation",
+      subjectId: Number(inserted.lastInsertRowid),
+      siteId: site_id,
+      roomId: room_id || null,
+      occurredAt: req.body?.occurred_at,
+      afterValue: `${priority || "medium"} · ${initials.trim()}`,
+      comment: title ? `${title}: ${description}` : description,
+    });
+    return inserted;
+  })();
 
   res.status(201).json({ id: info.lastInsertRowid });
 });
@@ -221,6 +239,98 @@ deviationsRouter.patch("/:id/reply", requireAuth, requireRole("cleaner", "manage
     ).run(assignedTo, req.params.id);
   }
 
+  res.json(db.prepare("SELECT * FROM deviations WHERE id = ?").get(req.params.id));
+});
+
+// De tre utfyllbare stegene i avviksbehandlingen. `reply_text` over er dialogen; disse er
+// strukturen — se kommentaren på deviations i db.js for hvorfor de fire stegene ser slik ut.
+//
+// Hvert steg skrives for seg i stedet for ett stort skjema, fordi de skjer på ulike tidspunkt
+// og ofte av ulike folk: strakstiltaket av renholderen som står der, årsaken av driftslederen
+// dagen etter. Hvert steg bærer derfor sine egne initialer og sitt eget tidsstempel.
+const DEVIATION_STEPS = {
+  immediate: { column: "immediate_action", label: "Strakstiltak" },
+  cause: { column: "root_cause", label: "Årsak" },
+  corrective: { column: "corrective_action", label: "Korrigerende tiltak" },
+};
+
+deviationsRouter.patch("/:id/step/:step", requireAuth, requireRole("admin", "manager", "cleaner"), (req, res) => {
+  const { deviation, status, code, error } = getDeviationScoped(req.params.id, req.user);
+  if (error) return res.status(status).json({ code, error });
+
+  const step = DEVIATION_STEPS[req.params.step];
+  if (!step) return res.status(400).json({ code: "unknown_step", error: "Ukjent steg." });
+
+  const text = typeof req.body?.text === "string" ? req.body.text.trim() : "";
+  const initials = typeof req.body?.initials === "string" ? req.body.initials.trim() : "";
+  if (!text) return res.status(400).json({ code: "step_text_required", error: `${step.label} kan ikke være tomt.` });
+  if (!initials) return res.status(400).json({ code: "initials_required", error: "Navn er påkrevd." });
+
+  // Logges i samme transaksjon som skrivingen, som alt annet i quality_log: et steg som ikke
+  // kan loggføres skal ikke skrives. Se services/qualityLog.js.
+  db.transaction(() => {
+    db.prepare(
+      `UPDATE deviations SET ${step.column} = ?, ${step.column}_at = datetime('now'), ${step.column}_by = ?
+       WHERE id = ?`
+    ).run(text, initials, req.params.id);
+
+    logQualityEvent({
+      user: req.user,
+      action: `deviation_${req.params.step}`,
+      subjectType: "deviation",
+      subjectId: Number(req.params.id),
+      siteId: deviation.site_id,
+      roomId: deviation.room_id,
+      occurredAt: req.body?.occurred_at,
+      beforeValue: deviation[step.column] || null,
+      afterValue: initials,
+      comment: text,
+    });
+  })();
+
+  res.json(db.prepare("SELECT * FROM deviations WHERE id = ?").get(req.params.id));
+});
+
+// Signert lukking. Krever at det korrigerende tiltaket står — et avvik som lukkes uten at noen
+// har sagt hva som hindrer gjentakelse er ikke behandlet, bare ryddet bort. Strakstiltak og
+// årsak kreves ikke: noen avvik er trivielle, og å tvinge fire felt på «lyspære gikk» ville
+// bare lært folk å skrive «n/a» i tre av dem.
+deviationsRouter.patch("/:id/close", requireAuth, requireRole("admin", "manager"), (req, res) => {
+  const { deviation, status, code, error } = getDeviationScoped(req.params.id, req.user);
+  if (error) return res.status(status).json({ code, error });
+
+  const signature = typeof req.body?.signature === "string" ? req.body.signature.trim() : "";
+  if (!signature) return res.status(400).json({ code: "signature_required", error: "Signatur er påkrevd for å lukke avviket." });
+  if (!deviation.corrective_action) {
+    return res.status(409).json({
+      code: "corrective_action_required",
+      error: "Fyll ut korrigerende tiltak før avviket lukkes.",
+    });
+  }
+  if (deviation.closed_at) return res.status(409).json({ code: "already_closed", error: "Avviket er allerede lukket." });
+
+  db.transaction(() => {
+    db.prepare(
+      `UPDATE deviations
+         SET closed_signature = ?, closed_at = datetime('now'),
+             status = 'resolved', resolved_at = COALESCE(resolved_at, datetime('now')), assigned_to = NULL
+       WHERE id = ?`
+    ).run(signature, req.params.id);
+
+    logQualityEvent({
+      user: req.user,
+      action: "deviation_closed",
+      subjectType: "deviation",
+      subjectId: Number(req.params.id),
+      siteId: deviation.site_id,
+      roomId: deviation.room_id,
+      occurredAt: req.body?.occurred_at,
+      afterValue: signature,
+      comment: deviation.corrective_action,
+    });
+  })();
+
+  recomputeSiteStatus(deviation.site_id);
   res.json(db.prepare("SELECT * FROM deviations WHERE id = ?").get(req.params.id));
 });
 

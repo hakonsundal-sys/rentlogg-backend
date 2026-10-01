@@ -1,5 +1,6 @@
 import { Router } from "express";
 import PDFDocument from "pdfkit";
+import { ZipArchive } from "archiver";
 import fs from "node:fs";
 import path from "node:path";
 import { db } from "../db.js";
@@ -176,4 +177,280 @@ reportsRouter.get("/summary.csv", requireAuth, requireRole("admin", "manager"), 
   res.setHeader("Content-Type", "text/csv; charset=utf-8");
   res.setHeader("Content-Disposition", `attachment; filename=rapport-${month}.csv`);
   res.send(csv);
+});
+
+// ---------------------------------------------------------------------------
+// Revisjonssporet
+// ---------------------------------------------------------------------------
+
+// quality_log var fram til nå skrive-bare: hendelsene ble samvittighetsfullt lagret, og ingen
+// kunne lese dem uten å åpne databasen. Et revisjonsspor ingen kan slå opp i er ikke et
+// revisjonsspor — det er en logg man håper man aldri trenger.
+//
+// Låst til admin/manager: raden inneholder hvem som gjorde hva, altså personopplysninger om
+// ansatte. En kunde skal se sin egen dokumentasjon, ikke hvem hos leverandøren som rettet den.
+const QUALITY_ACTION_LABELS = {
+  deviation_reported: "Avvik meldt",
+  deviation_immediate: "Strakstiltak registrert",
+  deviation_cause: "Årsak registrert",
+  deviation_corrective: "Korrigerende tiltak registrert",
+  deviation_closed: "Avvik lukket med signatur",
+  deviation_deleted: "Avvik slettet",
+  released_out_of_limits: "Frigitt tross måling utenfor grensen",
+  approval_override: "Godkjent på kundens vegne",
+  photo_deleted: "Bilde slettet",
+  room_deleted: "Rom slettet",
+  site_deleted: "Lokasjon slettet",
+};
+
+function parseAuditQuery(req) {
+  const from = /^\d{4}-\d{2}-\d{2}$/.test(req.query.from || "") ? req.query.from : null;
+  const to = /^\d{4}-\d{2}-\d{2}$/.test(req.query.to || "") ? req.query.to : null;
+  const siteId = req.query.site_id ? Number(req.query.site_id) : null;
+  const action = typeof req.query.action === "string" && req.query.action ? req.query.action : null;
+  return { from, to, siteId: Number.isFinite(siteId) ? siteId : null, action };
+}
+
+function queryQualityLog({ companyId, from, to, siteId, action, limit = 500 }) {
+  const where = ["q.company_id = ?"];
+  const params = [companyId];
+  // date(occurred_at) så en fra/til-dato tar hele dagen, ikke bare midnatt.
+  if (from) { where.push("date(q.occurred_at) >= ?"); params.push(from); }
+  if (to) { where.push("date(q.occurred_at) <= ?"); params.push(to); }
+  if (siteId) { where.push("q.site_id = ?"); params.push(siteId); }
+  if (action) { where.push("q.action = ?"); params.push(action); }
+
+  return db
+    .prepare(
+      `SELECT q.*, s.name AS site_name, r.name AS room_name
+       FROM quality_log q
+       LEFT JOIN sites s ON s.id = q.site_id
+       LEFT JOIN rooms r ON r.id = q.room_id
+       WHERE ${where.join(" AND ")}
+       ORDER BY q.occurred_at DESC, q.id DESC
+       LIMIT ?`
+    )
+    .all(...params, limit)
+    .map((row) => ({ ...row, action_label: QUALITY_ACTION_LABELS[row.action] || row.action }));
+}
+
+reportsRouter.get("/quality-log", requireAuth, requireRole("admin", "manager"), (req, res) => {
+  res.json(queryQualityLog({ companyId: req.user.company_id, ...parseAuditQuery(req) }));
+});
+
+reportsRouter.get("/quality-log.csv", requireAuth, requireRole("admin", "manager"), (req, res) => {
+  const rows = queryQualityLog({ companyId: req.user.company_id, ...parseAuditQuery(req), limit: 10000 });
+  const header = ["Tidspunkt", "Hendelse", "Lokasjon", "Rom", "Utført av", "Før", "Etter", "Kommentar"];
+  const lines = [header.map(csvEscape).join(",")];
+  for (const r of rows) {
+    lines.push(
+      [r.occurred_at, r.action_label, r.site_name || "", r.room_name || "", r.user_name || "",
+       r.before_value || "", r.after_value || "", r.comment || ""]
+        .map(csvEscape)
+        .join(",")
+    );
+  }
+  // BOM, som summary.csv: uten den viser Excel på norsk Windows æøå som kråketær.
+  res.setHeader("Content-Type", "text/csv; charset=utf-8");
+  res.setHeader("Content-Disposition", 'attachment; filename="revisjonsspor.csv"');
+  res.send(`\ufeff${lines.join("\r\n")}`);
+});
+
+export { queryQualityLog, QUALITY_ACTION_LABELS };
+
+// ---------------------------------------------------------------------------
+// Revisjonsklar eksport
+// ---------------------------------------------------------------------------
+
+// «Alt for denne lokasjonen i denne perioden, i én fil.»
+//
+// Finnes fordi delene allerede lå her hver for seg — besøksrapporter, bilde-zip, sammendrag,
+// revisjonsspor — og det å samle dem var en halvtimes klikking noen måtte gjøre mens en
+// inspektør ventet i resepsjonen. Dette er den halvtimen.
+//
+// Innholdet er bevisst flatt og lesbart uten Rentlogg: en PDF noen kan bla i, og CSV-er som
+// åpner i Excel. En revisjonseksport som krever vårt eget system for å leses er ikke
+// revisjonsklar.
+function isOutsideLimit(m) {
+  if (m.measured_value === null || m.measured_value === undefined) return false;
+  const under = m.measure_min !== null && m.measure_min !== undefined && m.measured_value < m.measure_min;
+  const over = m.measure_max !== null && m.measure_max !== undefined && m.measured_value > m.measure_max;
+  return under || over;
+}
+
+function sendAuditZip(res, { site, from, to, companyName }) {
+  const runs = db
+    .prepare(
+      `SELECT * FROM checklist_runs
+       WHERE site_id = ? AND date(started_at) BETWEEN ? AND ?
+       ORDER BY started_at`
+    )
+    .all(site.id, from, to);
+
+  const deviations = db
+    .prepare(
+      `SELECT * FROM deviations
+       WHERE site_id = ? AND date(created_at) BETWEEN ? AND ?
+       ORDER BY created_at`
+    )
+    .all(site.id, from, to);
+
+  // Målingene i perioden, med grensene som gjaldt DA de ble tatt — de ligger på besøket, ikke
+  // på dagens oppgavemal. Se room_run_items.measure_* i db.js.
+  const measurements = db
+    .prepare(
+      `SELECT rr.started_at, r.name AS room_name, i.label, i.measured_value, i.measure_unit,
+              i.measure_min, i.measure_max, i.measured_at
+       FROM room_run_items i
+       JOIN room_runs rr ON rr.id = i.room_run_id
+       JOIN rooms r ON r.id = rr.room_id
+       WHERE r.site_id = ? AND i.measure_unit IS NOT NULL
+         AND date(rr.started_at) BETWEEN ? AND ?
+       ORDER BY rr.started_at, r.name`
+    )
+    .all(site.id, from, to);
+
+  const auditRows = queryQualityLog({
+    companyId: site.company_id, from, to, siteId: site.id, action: null, limit: 10000,
+  });
+
+  res.setHeader("Content-Type", "application/zip");
+  res.setHeader("Content-Disposition", `attachment; filename=revisjon-${site.id}-${from}_${to}.zip`);
+
+  const archive = new ZipArchive({ zlib: { level: 9 } });
+  archive.on("error", (err) => {
+    console.error("Audit zip error:", err);
+    res.destroy(err);
+  });
+  archive.pipe(res);
+
+  // --- forsiden, som PDF ---
+  const doc = new PDFDocument({ size: "A4", margin: 48 });
+  archive.append(doc, { name: "revisjonsrapport.pdf" });
+
+  const outside = measurements.filter(isOutsideLimit);
+  const within = measurements.filter((m) => m.measured_value !== null && !isOutsideLimit(m)).length;
+
+  doc.fontSize(20).fillColor("#1e2a38").text("Revisjonsdokumentasjon");
+  doc.moveDown(0.3);
+  doc.fontSize(13).fillColor("#556677").text(`${site.name} · ${from} til ${to}`);
+  if (companyName) doc.fontSize(10).text(companyName);
+  doc.moveDown(1);
+
+  doc.fontSize(11).fillColor("#1e2a38");
+  doc.text(`Besøk i perioden: ${runs.length}`);
+  doc.text(`Avvik meldt: ${deviations.length} (lukket med signatur: ${deviations.filter((d) => d.closed_at).length})`);
+  doc.text(`Måleresultater: ${measurements.length} (innenfor: ${within}, utenfor: ${outside.length})`);
+  doc.text(`Hendelser i revisjonssporet: ${auditRows.length}`);
+  doc.moveDown(1);
+
+  if (outside.length > 0) {
+    doc.fontSize(13).fillColor("#dc2626").text("Målinger utenfor grensen");
+    doc.moveDown(0.3);
+    outside.forEach((m) => {
+      if (doc.y > doc.page.height - 80) doc.addPage();
+      const grense = m.measure_max !== null && m.measure_max !== undefined ? `maks ${m.measure_max}` : `minst ${m.measure_min}`;
+      doc.fontSize(10).fillColor("#1e2a38").text(
+        `${String(m.started_at).slice(0, 10)} · ${m.room_name} · ${m.label}: ${m.measured_value} ${m.measure_unit} (${grense})`
+      );
+    });
+    doc.moveDown(1);
+  }
+
+  if (deviations.length > 0) {
+    if (doc.y > doc.page.height - 140) doc.addPage();
+    doc.fontSize(13).fillColor("#1e2a38").text("Avvik");
+    doc.moveDown(0.4);
+    deviations.forEach((d) => {
+      if (doc.y > doc.page.height - 150) doc.addPage();
+      doc.fontSize(11).fillColor("#1e2a38").text(`${String(d.created_at).slice(0, 10)} · ${d.title || "Avvik"} (${d.priority})`);
+      doc.fontSize(9.5).fillColor("#556677").text(d.description || "", { indent: 12 });
+      const steg = [
+        ["Strakstiltak", d.immediate_action, d.immediate_action_by, d.immediate_action_at],
+        ["Årsak", d.root_cause, d.root_cause_by, d.root_cause_at],
+        ["Korrigerende tiltak", d.corrective_action, d.corrective_action_by, d.corrective_action_at],
+      ];
+      steg.forEach((rad) => {
+        const [navn, tekst, av, nar] = rad;
+        if (!tekst) return;
+        doc.fontSize(9.5).fillColor("#1e2a38").text(
+          `${navn}: ${tekst} — ${av || "?"}, ${String(nar || "").slice(0, 16)}`,
+          { indent: 12 }
+        );
+      });
+      doc.fontSize(9.5).fillColor(d.closed_at ? "#16a34a" : "#d97706").text(
+        d.closed_at ? `Lukket og signert av ${d.closed_signature}, ${String(d.closed_at).slice(0, 16)}` : "Ikke lukket",
+        { indent: 12 }
+      );
+      doc.moveDown(0.5);
+    });
+  }
+  doc.end();
+
+  // --- CSV-ene ---
+  const measHeader = ["Dato", "Rom", "Måling", "Verdi", "Enhet", "Nedre grense", "Øvre grense", "Vurdering", "Registrert"];
+  const measLines = [measHeader.map(csvEscape).join(",")];
+  measurements.forEach((m) => {
+    measLines.push(
+      [
+        String(m.started_at).slice(0, 10), m.room_name, m.label,
+        m.measured_value === null || m.measured_value === undefined ? "" : m.measured_value,
+        m.measure_unit,
+        m.measure_min === null || m.measure_min === undefined ? "" : m.measure_min,
+        m.measure_max === null || m.measure_max === undefined ? "" : m.measure_max,
+        m.measured_value === null || m.measured_value === undefined
+          ? "Ikke registrert"
+          : isOutsideLimit(m) ? "Utenfor" : "Innenfor",
+        m.measured_at || "",
+      ].map(csvEscape).join(",")
+    );
+  });
+  archive.append(`﻿${measLines.join("\r\n")}`, { name: "malinger.csv" });
+
+  const auditHeader = ["Tidspunkt", "Hendelse", "Rom", "Utført av", "Før", "Etter", "Kommentar"];
+  const auditLines = [auditHeader.map(csvEscape).join(",")];
+  auditRows.forEach((r) => {
+    auditLines.push(
+      [
+        r.occurred_at, r.action_label, r.room_name || "", r.user_name || "",
+        r.before_value || "", r.after_value || "", r.comment || "",
+      ].map(csvEscape).join(",")
+    );
+  });
+  archive.append(`﻿${auditLines.join("\r\n")}`, { name: "revisjonsspor.csv" });
+
+  // --- bildene ---
+  const photos = gatherReportPhotos(runs);
+  const uploadsDir = process.env.UPLOADS_DIR || "uploads";
+  const used = new Set();
+  photos.forEach((photo) => {
+    const abs = path.join(uploadsDir, path.basename(photo.file_path));
+    if (!fs.existsSync(abs)) return;
+    let name = path.basename(photo.file_path);
+    while (used.has(name)) name = `${Date.now()}-${name}`;
+    used.add(name);
+    archive.file(abs, { name: `bilder/${name}` });
+  });
+
+  archive.finalize();
+}
+
+reportsRouter.get("/sites/:id/revisjon.zip", requireAuth, requireRole("admin", "manager", "customer"), (req, res) => {
+  const site = db.prepare("SELECT * FROM sites WHERE id = ?").get(req.params.id);
+  if (!site) return res.status(404).json({ code: "not_found", error: "Not found" });
+  if (req.user.role === "customer" && site.client_id !== req.user.client_id) {
+    return res.status(403).json({ code: "not_allowed", error: "Not allowed" });
+  }
+  if (req.user.role !== "customer" && site.company_id !== req.user.company_id) {
+    return res.status(403).json({ code: "not_allowed", error: "Not allowed" });
+  }
+
+  const { from, to } = parseAuditQuery(req);
+  if (!from || !to) {
+    return res.status(400).json({ code: "period_required", error: "Oppgi fra- og til-dato (YYYY-MM-DD)." });
+  }
+  if (from > to) return res.status(400).json({ code: "period_reversed", error: "Fra-dato må være før til-dato." });
+
+  const company = db.prepare("SELECT name FROM companies WHERE id = ?").get(site.company_id);
+  sendAuditZip(res, { site, from, to, companyName: company?.name });
 });

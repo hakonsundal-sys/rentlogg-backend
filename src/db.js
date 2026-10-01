@@ -89,6 +89,32 @@ ensureColumn("deviations", "replied_at", "replied_at TEXT");
 ensureColumn("deviations", "assigned_to", "assigned_to TEXT");
 ensureColumn("deviations", "customer_approved_at", "customer_approved_at TEXT");
 ensureColumn("deviations", "customer_approved_by_initials", "customer_approved_by_initials TEXT");
+
+// Avviksbehandling i fire steg.
+//
+// `reply_text` finnes fortsatt og er den uformelle dialogen på saken. Det disse feltene legger
+// til er strukturen et tilsyn faktisk spør etter, og som en fritekstlinje ikke kan svare på:
+//
+//   1. meldt            — hva skjedde (description, bilde, prioritet — fantes fra før)
+//   2. strakstiltak     — hva ble gjort umiddelbart for å gjøre det trygt
+//   3. årsak            — hvorfor skjedde det
+//   4. korrigerende     — hva hindrer at det skjer igjen, og en signatur på lukkingen
+//
+// Hvert steg bærer sitt eget tidspunkt og sine egne initialer. Et avvik der alle fire står
+// utfylt med hver sin signatur er forskjellen på «vi fikset det» og dokumentasjon.
+ensureColumn("deviations", "immediate_action", "immediate_action TEXT");
+ensureColumn("deviations", "immediate_action_at", "immediate_action_at TEXT");
+ensureColumn("deviations", "immediate_action_by", "immediate_action_by TEXT");
+ensureColumn("deviations", "root_cause", "root_cause TEXT");
+ensureColumn("deviations", "root_cause_at", "root_cause_at TEXT");
+ensureColumn("deviations", "root_cause_by", "root_cause_by TEXT");
+ensureColumn("deviations", "corrective_action", "corrective_action TEXT");
+ensureColumn("deviations", "corrective_action_at", "corrective_action_at TEXT");
+ensureColumn("deviations", "corrective_action_by", "corrective_action_by TEXT");
+// Signaturen på lukkingen. Egen fra `resolved_at`, som bare er en statusendring noen kan ha
+// gjort i forbifarten — dette er et navn noen har skrevet under med.
+ensureColumn("deviations", "closed_signature", "closed_signature TEXT");
+ensureColumn("deviations", "closed_at", "closed_at TEXT");
 ensureColumn("room_runs", "edited_at", "edited_at TEXT");
 ensureColumn("room_runs", "edited_by_initials", "edited_by_initials TEXT");
 ensureColumn("checklist_runs", "edited_at", "edited_at TEXT");
