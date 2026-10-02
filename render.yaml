@@ -56,3 +56,30 @@ services:
       # RENDER_EXTERNAL_URL, so it only needs setting if the API ever moves to a custom domain.
       - key: PUBLIC_BASE_URL
         sync: false
+      # ── Sikkerhetskopi til Cloudflare R2 (EU-jurisdiksjon), valgt 2026-10-02 ──
+      #
+      # Uten disse kjører serveren som før, men UTEN sikkerhetskopi: runBackup() hopper over, og
+      # GET /health svarer {"backup":{"stale":true}}. Det er med vilje det eneste sporet — en
+      # manglende backup skal være synlig utenfra, ikke bare i en logg ingen leser.
+      - key: BACKUP_TARGET
+        value: s3
+      # sync: false på alle fire. Endepunktet inneholder Cloudflare-kontoens id, og dette repoet
+      # er offentlig — det hører hjemme i Render-panelet, ikke her.
+      - key: BACKUP_S3_ENDPOINT
+        sync: false
+      - key: BACKUP_S3_BUCKET
+        sync: false
+      # Nøkkelen SKAL være Object Read & Write, ALDRI med slettetilgang. Da kan verken en
+      # kompromittert server eller en feil i koden slette kopihistorikken. Oppbevaringstiden
+      # settes som livssyklusregel på bøtta i Cloudflare-panelet i stedet.
+      - key: BACKUP_S3_ACCESS_KEY_ID
+        sync: false
+      - key: BACKUP_S3_SECRET_ACCESS_KEY
+        sync: false
+      # R2 bryr seg ikke om region, men SDK-en krever at feltet finnes.
+      - key: BACKUP_S3_REGION
+        value: auto
+      # Hvem som får e-post når en kjøring feiler. Står den tom, feiler backupen i stillhet —
+      # og da er /health det eneste som avslører det.
+      - key: BACKUP_ALERT_EMAIL
+        sync: false

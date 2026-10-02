@@ -24,7 +24,8 @@ import { chemicalsRouter } from "./routes/chemicals.js";
 import { trainingRouter } from "./routes/training.js";
 import { timeRouter } from "./routes/time.js";
 import { requireAuth, requireModule } from "./middleware/auth.js";
-import { startDailyReportScheduler } from "./services/scheduler.js";
+import { startDailyReportScheduler, startBackupScheduler } from "./services/scheduler.js";
+import { hoursSinceLastGoodBackup } from "./services/backup.js";
 import { UploadRejectedError } from "./utils/uploads.js";
 
 const uploadsDir = process.env.UPLOADS_DIR || "uploads";
@@ -49,7 +50,27 @@ app.use(express.json());
 app.use(morgan("dev"));
 app.use("/uploads", uploadsRouter);
 
-app.get("/health", (req, res) => res.json({ ok: true }));
+// Fortsatt offentlig og fortsatt billig, men den svarer nå på det spørsmålet som faktisk kan gå
+// galt uten at noen merker det: NÅR gikk sikkerhetskopieringen sist bra.
+//
+// En backup-jobb som slutter å kjøre sender ingen feilmelding — den gjør ingenting, stille. Det
+// er den vanligste måten å oppdage at man ikke hadde noen kopi likevel, og den oppdages typisk
+// den dagen man trenger kopien. Ved å legge alderen her blir fraværet noe en overvåkingstjeneste
+// kan se utenfra, uten tilgang til noe annet.
+//
+// Ingen data lekker: bare et tall i timer og et ja/nei. Ikke hvor kopien ligger, ikke hva den
+// inneholder, ikke om den finnes i det hele tatt utover alderen.
+app.get("/health", (req, res) => {
+  const hours = hoursSinceLastGoodBackup();
+  const maxAge = Number(process.env.BACKUP_MAX_AGE_HOURS ?? 36);
+  res.json({
+    ok: true,
+    backup: {
+      hoursSinceLastGood: hours === null ? null : Number(hours.toFixed(1)),
+      stale: hours === null || hours > maxAge,
+    },
+  });
+});
 
 // Hvilket firmas profil hører denne verten til. Bevisst UTEN auth, fordi den brukes av
 // innloggingsskjermen — altså før noen har logget inn, som er hele poenget med white-label:
@@ -166,3 +187,4 @@ app.use((err, req, res, next) => {
 const port = process.env.PORT || 4000;
 app.listen(port, () => console.log(`Rentlogg backend running on http://localhost:${port}`));
 startDailyReportScheduler();
+startBackupScheduler();

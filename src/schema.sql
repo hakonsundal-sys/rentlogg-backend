@@ -742,3 +742,27 @@ CREATE TABLE IF NOT EXISTS chemicals (
 );
 
 CREATE INDEX IF NOT EXISTS idx_chemicals_company ON chemicals(company_id);
+
+-- Hver kjøring av sikkerhetskopieringen, vellykket eller ikke.
+--
+-- Poenget er ikke revisjon, det er å kunne svare på «skjer det fortsatt». En backup-jobb som
+-- slutter å kjøre sender ingen feilmelding — den gjør ingenting, stille, og det er den vanligste
+-- måten å oppdage at man ikke hadde noen kopi likevel. Med en rad per kjøring kan /health si hvor
+-- gammel den siste vellykkede er, og det er et spørsmål som kan overvåkes utenfra.
+--
+-- Merk at raden som sier «dette gikk bra» skrives ETTER at kopien er tatt, og derfor aldri er med
+-- i sin egen kopi. Den dukker opp i neste. Det er riktig, men verdt å vite når man leser
+-- historikken i en gjenopprettet database.
+CREATE TABLE IF NOT EXISTS backup_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  started_at TEXT NOT NULL,
+  finished_at TEXT,
+  -- 'ok' | 'failed'
+  status TEXT NOT NULL,
+  object_key TEXT,
+  bytes INTEGER,
+  tables INTEGER,
+  error TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_backup_runs_started ON backup_runs(started_at);

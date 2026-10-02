@@ -18,6 +18,8 @@ import zlib from "node:zlib";
 import { pipeline } from "node:stream/promises";
 import Database from "better-sqlite3";
 import { db } from "../db.js";
+import { configuredDriver } from "./backupStorage.js";
+import { sendEmail } from "./mailer.js";
 
 // VACUUM INTO er den eneste riktige måten å kopiere en SQLite-database som er i bruk.
 //
@@ -112,5 +114,76 @@ export async function createVerifiedBackup({ tmpDir = os.tmpdir(), now = new Dat
   } catch (err) {
     fs.rmSync(work, { recursive: true, force: true });
     throw err;
+  }
+}
+
+// ── Hele runden: kopier, verifiser, last opp, skriv ned at det skjedde ──────────────────────
+
+
+const recordStart = db.prepare(
+  "INSERT INTO backup_runs (started_at, status) VALUES (datetime('now'), 'running')"
+);
+const recordDone = db.prepare(
+  `UPDATE backup_runs SET finished_at = datetime('now'), status = ?, object_key = ?,
+     bytes = ?, tables = ?, error = ? WHERE id = ?`
+);
+
+// Alderen på siste VELLYKKEDE kopi, i timer. Null betyr at det aldri har gått bra.
+// Dette er tallet som faktisk betyr noe: at jobben kjørte i natt hjelper ingen hvis den feilet.
+export function hoursSinceLastGoodBackup() {
+  const row = db
+    .prepare("SELECT finished_at FROM backup_runs WHERE status = 'ok' ORDER BY id DESC LIMIT 1")
+    .get();
+  if (!row?.finished_at) return null;
+  const then = Date.parse(`${row.finished_at.replace(" ", "T")}Z`);
+  return (Date.now() - then) / 3_600_000;
+}
+
+// Et varsel som ikke kan stoppe selve jobben: at vi ikke fikk sendt e-post skal aldri være
+// grunnen til at en vellykket kopi rapporteres som mislykket.
+async function alert(subject, body) {
+  const to = process.env.BACKUP_ALERT_EMAIL;
+  if (!to) return;
+  try {
+    await sendEmail({ to, subject, html: `<pre style="font:13px/1.5 monospace">${body}</pre>` });
+  } catch (err) {
+    console.error("Klarte ikke sende backup-varsel:", err.message);
+  }
+}
+
+export async function runBackup({ now = new Date() } = {}) {
+  // Oppsettet leses INNENFOR try-blokken, ikke før den. BACKUP_TARGET=s3 med en manglende nøkkel
+  // kaster allerede i configuredDriver(), og gjorde man det utenfor ville nettopp den feilen —
+  // den mest sannsynlige av alle, en skrivefeil i Render-panelet — vært den ene som verken ble
+  // ført i historikken eller varslet om. Feilkonfigurert backup må feile like høylytt som ødelagt
+  // backup.
+  const runId = recordStart.run().lastInsertRowid;
+  let made = null;
+  let driver = null;
+  try {
+    driver = configuredDriver();
+    if (!driver) {
+      // Ikke en feil: en utvikler som kjører lokalt skal ikke tvinges til å sette opp lagring.
+      // I produksjon er fraværet derimot alvorlig, og det er /health som avslører det — derfor
+      // ryddes raden bort her, så den ikke teller som en kjøring som «skjedde».
+      db.prepare("DELETE FROM backup_runs WHERE id = ?").run(runId);
+      return { skipped: true, reason: "BACKUP_TARGET er ikke satt" };
+    }
+    made = await createVerifiedBackup({ now });
+    const key = `db/${path.basename(made.path)}`;
+    await driver.put(key, made.path);
+    recordDone.run("ok", key, made.gzBytes, made.tables, null, runId);
+    console.log(`Sikkerhetskopi lastet opp: ${key} (${made.gzBytes} bytes) -> ${driver.name}`);
+    return { ok: true, key, bytes: made.gzBytes };
+  } catch (err) {
+    recordDone.run("failed", null, null, null, String(err.message).slice(0, 500), runId);
+    console.error("Sikkerhetskopiering feilet:", err);
+    await alert(
+      "Rentlogg: sikkerhetskopieringen feilet",
+      `Tidspunkt: ${new Date().toISOString()}\nMål: ${driver?.name ?? "(kunne ikke leses — sjekk BACKUP_*-variablene)"}\n\n${err.stack || err.message}`
+    );
+    return { ok: false, error: err.message };
+  } finally {
+    if (made?.workDir) fs.rmSync(made.workDir, { recursive: true, force: true });
   }
 }
