@@ -147,6 +147,14 @@ export function isItemDueOn(item, dateStr) {
   return weekdays.has(weekdayOf(dateStr));
 }
 
+// How many of a room's tasks fall on this date — the same filter findOrCreateRoomRunForDate uses
+// when it materialises a day's run items, so this number is exactly what the cleaner will be
+// shown. Kept here rather than counted off an existing run, because a caller needs the answer
+// before any run exists for the day.
+export function dueItemCountOn(roomId, dateStr) {
+  return roomItemsStmt.all(roomId).filter((item) => isItemDueOn(item, dateStr)).length;
+}
+
 const roomsForSiteStmt = db.prepare("SELECT * FROM rooms WHERE site_id = ? ORDER BY sort_order, id");
 const itemCountStmt = db.prepare("SELECT COUNT(*) AS n FROM room_checklist_items WHERE room_id = ?");
 const lastCleanedStmt = db.prepare(
@@ -163,6 +171,17 @@ export function getRoomsForSite(siteId, dateStr) {
       status: getRoomStatusForDate(room.id, dateStr),
       lastCleanedAt: lastCleanedStmt.get(room.id)?.completed_at || null,
       itemCount: itemCountStmt.get(room.id).n,
+      // How many of those tasks are actually due on this date. The two numbers come apart because
+      // a room carries its own schedule and each task carries its own: a room on a 4-day interval
+      // whose only task runs Mondays and Thursdays is "due" on a Friday with nothing in it. The
+      // periodic-months mode makes that the normal case rather than the odd one — a task due in
+      // March and September leaves its room empty for ten months of the year.
+      //
+      // Callers need both: itemCount says whether the room is a checklist at all, dueItemCount
+      // says whether there is anything to do today. A room with tasks but none due must not be
+      // signed off (see the guard in routes/rooms.js), while a room with no tasks at all is the
+      // legitimate "went in, looked, signing for it" case and stays signable.
+      dueItemCount: dueItemCountOn(room.id, dateStr),
       // Lets a caller (the customer dashboard's "Godkjenn alle rom" card, 2026-09-21) act on a
       // room's run directly — e.g. POST /rooms/runs/:id/approve — without a separate day-detail
       // fetch just to learn which run_id today's activity landed in.

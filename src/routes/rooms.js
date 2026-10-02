@@ -390,6 +390,11 @@ siteRoomsRouter.post("/complete-all-due", requireAuth, requireRole("cleaner", "a
     // again — pressing the button twice would otherwise reset ready_for_approval_at and overwrite
     // whoever originally signed it off with whoever pressed last.
     .filter((r) => r.status !== "awaiting_approval")
+    // A room whose tasks all fall on other days has nothing for this sweep to sign. Left in, it
+    // got a run created, found zero unanswered items, and was completed — or handed to the
+    // customer for approval — on an empty checklist. See nothingDueToday() below for why a room
+    // with no tasks at all is a different, legitimate case and stays in.
+    .filter((r) => r.itemCount === 0 || r.dueItemCount > 0)
     .filter((r) => !only || only.has(r.id));
 
   // A room holding a flervalg task nobody has answered is deliberately left open rather than
@@ -1279,6 +1284,29 @@ function recordParticipant(runId, user) {
   insertParticipantStmt.run(Number(runId), user.id, user.name || "");
 }
 
+// A room whose checklist has tasks, but none of them falling on this day, must not be signable.
+//
+// The room's own schedule and each task's schedule are separate, so they can disagree: a room on a
+// four-day interval whose only task runs Mondays and Thursdays is "due" on a Friday and opens with
+// an empty checklist. Signing that off produced a visit record asserting nothing, and on a room
+// behind the approval gate it asked the customer to put her name to a blank page. The periodic-
+// months mode turns this from an edge case into the normal one — a task due in two months of the
+// year leaves its room empty for the other ten.
+//
+// A room with NO tasks at all is deliberately still signable: "went in, looked at it, signing for
+// the visit" is a real thing cleaners do, and several rooms exist only for that.
+const roomItemTotalStmt = db.prepare("SELECT COUNT(*) AS n FROM room_checklist_items WHERE room_id = ?");
+const runItemTotalStmt = db.prepare("SELECT COUNT(*) AS n FROM room_run_items WHERE room_run_id = ?");
+
+function nothingDueToday(roomRun) {
+  if (runItemTotalStmt.get(roomRun.id).n > 0) return null;
+  if (roomItemTotalStmt.get(roomRun.room_id).n === 0) return null;
+  return {
+    code: "no_tasks_due_today",
+    error: "Ingen av rommets oppgaver er planlagt i dag, så det er ingenting å kvittere ut.",
+  };
+}
+
 function stampRoomRunEdit(runId, initials) {
   if (!initials || !initials.trim()) return;
   const run = db.prepare("SELECT completed_at FROM room_runs WHERE id = ?").get(runId);
@@ -1509,6 +1537,9 @@ roomsRouter.post("/runs/:runId/complete", requireAuth, requireRole("cleaner", "a
 
   const initials = (req.body?.initials || "").trim();
   if (!initials) return res.status(400).json({ code: "initials_required_room", error: "Navn er påkrevd for å fullføre rommet." });
+
+  const nothingDue = nothingDueToday(roomRun);
+  if (nothingDue) return res.status(409).json(nothingDue);
 
   // signed_initials is what they typed; signed_by is who they were logged in as. Both are kept:
   // the typed name is the cleaner's own record of the day, the id is what makes it attributable.
