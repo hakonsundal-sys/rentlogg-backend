@@ -51,7 +51,7 @@ function s3Driver() {
 
   return {
     name: `s3:${bucket}`,
-    async put(key, filePath) {
+    async put(key, filePath, contentType = "application/octet-stream") {
       const { PutObjectCommand } = await import("@aws-sdk/client-s3");
       const c = await client();
       await c.send(
@@ -62,16 +62,31 @@ function s3Driver() {
           // en database som vokser skal ikke kunne ta ned serveren mens den sikkerhetskopieres.
           Body: fs.createReadStream(filePath),
           ContentLength: fs.statSync(filePath).size,
-          ContentType: "application/gzip",
+          ContentType: contentType,
         })
       );
       return key;
     },
+    // Paginert, og det er ikke en detalj: ListObjectsV2 svarer med maks 1000 objekter om gangen.
+    // Uten løkka her ville bildespeilingen fra og med fil nummer 1001 trodd at alt den ikke så
+    // manglet, forsøkt å laste opp på nytt — og blitt avvist av Bucket Lock, som nekter
+    // overskriving. Altså: speilingen ville stoppet med feil, hver natt, så snart biblioteket
+    // passerte tusen filer.
     async list(prefix = "") {
       const { ListObjectsV2Command } = await import("@aws-sdk/client-s3");
       const c = await client();
-      const out = await c.send(new ListObjectsV2Command({ Bucket: bucket, Prefix: prefix }));
-      return (out.Contents || []).map((o) => ({ key: o.Key, size: o.Size, modified: o.LastModified }));
+      const objects = [];
+      let token;
+      do {
+        const out = await c.send(
+          new ListObjectsV2Command({ Bucket: bucket, Prefix: prefix, ContinuationToken: token })
+        );
+        for (const o of out.Contents || []) {
+          objects.push({ key: o.Key, size: o.Size, modified: o.LastModified });
+        }
+        token = out.IsTruncated ? out.NextContinuationToken : undefined;
+      } while (token);
+      return objects;
     },
     async get(key, destPath) {
       const { GetObjectCommand } = await import("@aws-sdk/client-s3");
@@ -89,7 +104,7 @@ function fileDriver() {
   const root = requireEnv("BACKUP_DIR");
   return {
     name: `file:${root}`,
-    async put(key, filePath) {
+    async put(key, filePath, _contentType) {
       const dest = path.join(root, key);
       fs.mkdirSync(path.dirname(dest), { recursive: true });
       fs.copyFileSync(filePath, dest);

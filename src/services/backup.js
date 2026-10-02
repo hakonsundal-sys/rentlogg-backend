@@ -19,6 +19,7 @@ import { pipeline } from "node:stream/promises";
 import Database from "better-sqlite3";
 import { db } from "../db.js";
 import { configuredDriver } from "./backupStorage.js";
+import { mirrorUploads } from "./backupUploads.js";
 import { sendEmail } from "./mailer.js";
 
 // VACUUM INTO er den eneste riktige måten å kopiere en SQLite-database som er i bruk.
@@ -140,7 +141,7 @@ const recordStart = db.prepare(
 );
 const recordDone = db.prepare(
   `UPDATE backup_runs SET finished_at = datetime('now'), status = ?, object_key = ?,
-     bytes = ?, tables = ?, error = ? WHERE id = ?`
+     bytes = ?, tables = ?, error = ?, files_uploaded = ?, files_remaining = ? WHERE id = ?`
 );
 
 // Alderen på siste VELLYKKEDE kopi, i timer. Null betyr at det aldri har gått bra.
@@ -186,12 +187,43 @@ export async function runBackup({ now = new Date() } = {}) {
     }
     made = await createVerifiedBackup({ now });
     const key = `db/${path.basename(made.path)}`;
-    await driver.put(key, made.path);
-    recordDone.run("ok", key, made.gzBytes, made.tables, null, runId);
+    await driver.put(key, made.path, "application/gzip");
     console.log(`Sikkerhetskopi lastet opp: ${key} (${made.gzBytes} bytes) -> ${driver.name}`);
-    return { ok: true, key, bytes: made.gzBytes };
+
+    // Bildene ETTER databasen, og med egen feilhåndtering. Rekkefølgen er et valg: databasen er
+    // den delen som ikke kan gjenskapes fra noe annet, så den skal være i havn før vi bruker tid
+    // på tusenvis av filer. Og en speiling som feiler skal ikke gjøre en vellykket databasekopi
+    // om til en mislykket kjøring — den skal rapporteres, ikke overskygge.
+    let mirror = { uploaded: 0, remaining: 0, failed: 0, errors: [] };
+    try {
+      mirror = await mirrorUploads(driver, {
+        uploadsDir: process.env.UPLOADS_DIR || "uploads",
+        maxPerRun: Number(process.env.BACKUP_MAX_FILES_PER_RUN ?? 5000),
+      });
+      console.log(
+        `Bildespeiling: ${mirror.uploaded} lastet opp, ${mirror.skipped} fantes fra før, ` +
+          `${mirror.failed} feilet, ${mirror.remaining} igjen til neste kjøring`
+      );
+    } catch (err) {
+      console.error("Bildespeilingen feilet:", err);
+      mirror.failed = -1;
+      mirror.errors = [err.message];
+    }
+
+    recordDone.run("ok", key, made.gzBytes, made.tables, null, mirror.uploaded, mirror.remaining, runId);
+
+    // Varsles separat, nettopp fordi kjøringen står som vellykket: uten dette ville en speiling
+    // som feiler hver natt vært helt usynlig bak en grønn databasekopi.
+    if (mirror.failed !== 0) {
+      await alert(
+        "Rentlogg: bildespeilingen feilet (databasekopien gikk bra)",
+        `Tidspunkt: ${new Date().toISOString()}\nFeilet: ${mirror.failed}\n` +
+          `Lastet opp: ${mirror.uploaded}, igjen: ${mirror.remaining}\n\n${(mirror.errors || []).join("\n")}`
+      );
+    }
+    return { ok: true, key, bytes: made.gzBytes, mirror };
   } catch (err) {
-    recordDone.run("failed", null, null, null, String(err.message).slice(0, 500), runId);
+    recordDone.run("failed", null, null, null, String(err.message).slice(0, 500), null, null, runId);
     console.error("Sikkerhetskopiering feilet:", err);
     await alert(
       "Rentlogg: sikkerhetskopieringen feilet",

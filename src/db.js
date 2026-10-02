@@ -294,6 +294,11 @@ ensureColumn("room_run_item_options", "chemical_safety_note", "chemical_safety_n
 // virkelig holde, må PDF-en lagres — se kjemikalieregisteret i routes/chemicals.js.
 ensureColumn("room_run_item_options", "chemical_sds_url", "chemical_sds_url TEXT");
 
+// Bildespeilingens tall i samme rad som databasekopien. Egne kolonner og ikke en ny tabell:
+// det er én nattlig kjøring, og to tabeller ville gjort «gikk det bra i natt?» til en join.
+ensureColumn("backup_runs", "files_uploaded", "files_uploaded INTEGER");
+ensureColumn("backup_runs", "files_remaining", "files_remaining INTEGER");
+
 // Departments started out (2026-09-07) as a per-client sub-grouping with a NOT NULL client_id,
 // before it turned out the actual need was an internal, company-wide region tag (Vest/Sør/Øst/
 // Midt) independent of client — see schema.sql's comment on the table. A database created

@@ -762,7 +762,12 @@ CREATE TABLE IF NOT EXISTS backup_runs (
   object_key TEXT,
   bytes INTEGER,
   tables INTEGER,
-  error TEXT
+  error TEXT,
+  -- Bildespeilingen i samme kjøring: hvor mange filer som ble lastet opp, og hvor mange som
+  -- fortsatt står igjen fordi taket per kjøring slo inn. Står "remaining" over null natt etter
+  -- natt, henger speilingen etter og taket bør heves.
+  files_uploaded INTEGER,
+  files_remaining INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_backup_runs_started ON backup_runs(started_at);
