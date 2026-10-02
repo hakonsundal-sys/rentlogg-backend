@@ -285,6 +285,14 @@ ensureColumn("room_checklist_item_options", "chemical_id", "chemical_id INTEGER 
 ensureColumn("room_run_item_options", "chemical_name", "chemical_name TEXT");
 ensureColumn("room_run_item_options", "chemical_strength", "chemical_strength TEXT");
 ensureColumn("room_run_item_options", "chemical_safety_note", "chemical_safety_note TEXT");
+// Lenken til sikkerhetsdatabladet følger med ned på samme måte. Forskrift om utførelse av arbeid
+// § 2-4 krever at databladet er tilgjengelig «på det enkelte arbeidssted» — for en renholder er
+// det telefonen hennes i bygget, ikke en fane i adminflata. Snapshotes som resten: byttes
+// leverandørens lenke senere, skal fjorårets besøk fortsatt peke på det som gjaldt den dagen.
+//
+// NB: dette er en lenke, ikke databladet. Er dekningen borte, er databladet borte. Skal det
+// virkelig holde, må PDF-en lagres — se kjemikalieregisteret i routes/chemicals.js.
+ensureColumn("room_run_item_options", "chemical_sds_url", "chemical_sds_url TEXT");
 
 // Departments started out (2026-09-07) as a per-client sub-grouping with a NOT NULL client_id,
 // before it turned out the actual need was an internal, company-wide region tag (Vest/Sør/Øst/

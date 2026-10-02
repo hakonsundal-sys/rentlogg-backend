@@ -240,18 +240,20 @@ const roomRunByIdStmt = db.prepare("SELECT * FROM room_runs WHERE id = ?");
 // as-is, never duplicated); otherwise creates one and snapshots the room's task list as of that
 // day — filtered to just that day's due items, so a monthly task in an otherwise-daily room only
 // shows up on its own day instead of nagging the cleaner about it every visit.
-// Henter kjemikaliet med alternativet, så snapshotet under kan ta med dosering og sikkerhetsnotat
-// uten en ekstra spørring per rad.
+// Henter kjemikaliet med alternativet, så snapshotet under kan ta med dosering, sikkerhetsnotat
+// og lenka til sikkerhetsdatabladet uten en ekstra spørring per rad.
 const itemOptionsStmt = db.prepare(
-  `SELECT o.*, c.name AS chem_name, c.strength AS chem_strength, c.safety_note AS chem_safety
+  `SELECT o.*, c.name AS chem_name, c.strength AS chem_strength, c.safety_note AS chem_safety,
+          c.sds_url AS chem_sds
    FROM room_checklist_item_options o
    LEFT JOIN chemicals c ON c.id = o.chemical_id
    WHERE o.item_id = ? ORDER BY o.sort_order, o.id`
 );
 const insertRunItemOptionStmt = db.prepare(
   `INSERT INTO room_run_item_options
-     (run_item_id, option_id, label, sort_order, chemical_name, chemical_strength, chemical_safety_note)
-   VALUES (?, ?, ?, ?, ?, ?, ?)`
+     (run_item_id, option_id, label, sort_order, chemical_name, chemical_strength,
+      chemical_safety_note, chemical_sds_url)
+   VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
 );
 const runItemOptionIdsStmt = db.prepare("SELECT option_id FROM room_run_item_options WHERE run_item_id = ?");
 const nextRunItemOptionSortStmt = db.prepare(
@@ -266,7 +268,8 @@ function snapshotItemOptions(runItemId, templateItemId) {
     .forEach((option, i) =>
       insertRunItemOptionStmt.run(
         runItemId, option.id, option.label, i,
-        option.chem_name ?? null, option.chem_strength ?? null, option.chem_safety ?? null
+        option.chem_name ?? null, option.chem_strength ?? null, option.chem_safety ?? null,
+        option.chem_sds ?? null
       )
     );
 }
@@ -288,7 +291,8 @@ export function ensureRunItemOptions(runId) {
       if (known.has(option.id)) continue;
       insertRunItemOptionStmt.run(
         runItem.id, option.id, option.label, sort++,
-        option.chem_name ?? null, option.chem_strength ?? null, option.chem_safety ?? null
+        option.chem_name ?? null, option.chem_strength ?? null, option.chem_safety ?? null,
+        option.chem_sds ?? null
       );
     }
   }
