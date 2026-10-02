@@ -39,10 +39,21 @@ const app = express();
 app.set("trust proxy", 1);
 // crossOriginResourcePolicy: false — otherwise helmet's default same-origin policy blocks the
 // Vercel-hosted frontend from loading <img src="{API_URL}/uploads/..."> across origins.
-// contentSecurityPolicy: false — GET /reports/runs/:id/html returns a real (inline-styled) HTML
-// report opened directly in a browser tab; a default CSP is aimed at pages rendering untrusted
-// user content, which doesn't apply to this JSON+file API, and would risk breaking that report.
+// contentSecurityPolicy: false here, set by hand just below — helmet's default policy assumes a
+// page that loads its own scripts and styles, which this JSON+file API never serves.
 app.use(helmet({ crossOriginResourcePolicy: false, contentSecurityPolicy: false }));
+// What the API sends is JSON, or a file (photo, PDF, the HTML report) that a person opens. JSON
+// should never be rendered, so everything is denied outright. /uploads and /reports are the
+// exceptions: a locked-down default-src would strip the inline styling off the HTML report and
+// block an image or PDF from showing, so there the only rule is that nothing may frame them.
+app.use((req, res, next) => {
+  const serves = req.path.startsWith("/uploads") || req.path.startsWith("/reports");
+  res.setHeader(
+    "Content-Security-Policy",
+    serves ? "frame-ancestors 'none'" : "default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+  );
+  next();
+});
 // ALLOWED_ORIGINS is a comma-separated list (e.g. "https://rentlogg.no,https://app.rentlogg.no").
 // Left unset on Render (RENDER is set there), no cross-origin caller is allowed at all: a redeploy
 // that loses the variable should fail closed, and render.yaml sets it. Left unset anywhere else —

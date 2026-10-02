@@ -1,8 +1,7 @@
 import { Router } from "express";
 import bcrypt from "bcryptjs";
-import jwt from "jsonwebtoken";
 import { db } from "../db.js";
-import { requireAuth, requireRole } from "../middleware/auth.js";
+import { requireAuth, requireRole, issueToken } from "../middleware/auth.js";
 import { invitationAcceptLimiter } from "../middleware/rateLimits.js";
 import { newQrToken } from "../utils/qrcode.js";
 
@@ -131,6 +130,5 @@ invitationsRouter.post("/:token/accept", invitationAcceptLimiter, (req, res) => 
     id: info.lastInsertRowid, name, role: invitation.role,
     client_id: invitation.client_id, company_id: invitation.company_id,
   };
-  const token = jwt.sign(user, process.env.JWT_SECRET, { expiresIn: "12h" });
-  res.status(201).json({ token, user });
+  res.status(201).json({ token: issueToken(user), user });
 });

@@ -155,8 +155,15 @@ encode the right host without extra configuration.
   (anonymous callers, login) would count several users as one; check `req.ip` before relying on it.
 - **No input-validation library.** Request bodies are checked by hand, route by route —
   consistent, but easy to forget in a new endpoint. `zod` or similar would make it structural.
-- **No token revocation.** Changing or resetting a password doesn't invalidate tokens already
-  issued; the 12h expiry is the only bound on a stale or stolen session.
+- **Sessions are revoked by password change, not by logout.** Every token carries the user's
+  `token_version` (`tv`), and every request looks the user up again: a deactivated account, a
+  changed or reset password, or a role/company change takes effect on the next request instead of
+  after the 12h expiry. Logging out only forgets the token in the browser — a token someone has
+  copied stays valid until the password changes or it expires.
+- **Content-Security-Policy is set in two places.** This API answers `default-src 'none'`
+  (`/uploads` and `/reports` only forbid framing). The frontend's policy lives in
+  `rentlogg-frontend/vercel.json` and hard-codes this API's origin — move the API and that file
+  must change with it, or the app can no longer reach it.
 - **Photos live on the Render disk.** They survive redeploys, but there's no offsite copy — a
   lost disk is lost documentation. S3 or R2 before this gets big.
 - **SQLite is single-server.** Fine for one Render instance; Postgres if this ever needs

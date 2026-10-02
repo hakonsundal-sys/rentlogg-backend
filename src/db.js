@@ -201,10 +201,15 @@ ensureColumn("checklist_runs", "backdated", "backdated INTEGER DEFAULT 0");
 // own department_id; a customer user has no use for this (departments are staff-only).
 ensureColumn("users", "department_id", "department_id INTEGER REFERENCES departments(id)");
 // Deactivating a user (from "Ansatte") blocks future logins without deleting them — keeps their
-// name attached to their existing history (visits, avvik) intact, unlike a hard delete. Doesn't
-// revoke a JWT already issued before deactivation (there's no token-revocation/blacklist in this
-// app) — that session just keeps working until its own 12h expiry.
+// name attached to their existing history (visits, avvik) intact, unlike a hard delete. A session
+// already open is ended too: middleware/auth.js reads this flag on every request.
 ensureColumn("users", "active", "active INTEGER NOT NULL DEFAULT 1");
+// Which generation of login tokens is still honoured for this user. Every token carries the number
+// it was issued under; a password change, an admin reset or a deactivation adds one, which makes
+// all earlier tokens for that person invalid immediately (see issueToken/authenticate in
+// middleware/auth.js). Existing rows start at 0, which is also what a token issued before this
+// column existed counts as, so nobody is logged out by the migration itself.
+ensureColumn("users", "token_version", "token_version INTEGER NOT NULL DEFAULT 0");
 
 // Customer approval gate: a room can be flagged so a customer-side user must approve the
 // cleaner's checklist before the room counts as complete (distinct from rooms.responsible, where

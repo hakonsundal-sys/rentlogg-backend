@@ -1,11 +1,10 @@
 import { Router } from "express";
 import bcrypt from "bcryptjs";
-import jwt from "jsonwebtoken";
 import multer from "multer";
 import path from "node:path";
 import rateLimit from "express-rate-limit";
 import { db } from "../db.js";
-import { requireAuth, requireRole } from "../middleware/auth.js";
+import { requireAuth, requireRole, issueToken, bumpTokenVersion } from "../middleware/auth.js";
 import { safeOriginalName, normalizeImageOrientation, imageFileFilter } from "../utils/uploads.js";
 import { normalizeLanguage } from "../utils/languages.js";
 import { enabledModulesForCompany } from "../modules.js";
@@ -73,14 +72,8 @@ authRouter.post("/login", loginLimiter, (req, res) => {
     return res.status(403).json({ code: "account_deactivated", error: "Denne kontoen er deaktivert. Kontakt en administrator." });
   }
 
-  const token = jwt.sign(
-    { id: user.id, name: user.name, role: user.role, client_id: user.client_id, company_id: user.company_id },
-    process.env.JWT_SECRET,
-    { expiresIn: "12h" }
-  );
-
   res.json({
-    token,
+    token: issueToken(user),
     // language rides in the user object, deliberately not in the JWT — it isn't an authorization
     // claim, and a token minted before someone switched language would keep serving the stale
     // value for the rest of its 12h life.
@@ -376,6 +369,9 @@ authRouter.patch("/users/:id/password", requireAuth, requireRole("admin", "super
 
   const password_hash = bcrypt.hashSync(password, 10);
   db.prepare("UPDATE users SET password_hash = ? WHERE id = ?").run(password_hash, req.params.id);
+  // The reason an admin resets a password is usually that the old one is out of the person's hands
+  // — lost phone, someone else knowing it — so every session already open under it ends now.
+  bumpTokenVersion(req.params.id);
   res.json({ ok: true });
 });
 
@@ -402,10 +398,10 @@ authRouter.patch("/users/:id/role", requireAuth, requireRole("admin", "super_adm
 // Blocks/restores login without touching any of a user's existing history (visits, avvik, schedule
 // assignments) — the reversible alternative to DELETE below. Admin-only (or super_admin, across
 // every company); can't target yourself for the same lockout reason as the role endpoint above.
-// Doesn't force out a session already issued before deactivation (no token-revocation in this app
-// — see db.js's comment on the column) so this takes effect on that person's *next* login attempt,
-// not necessarily immediately. Also "Kundebrukere"'s deactivate/reactivate — the same reversible
-// block-login concept applies just as well to a customer account.
+// Takes effect at once: the auth middleware reads the active flag on every request, and the token
+// version is bumped here so that reactivating the account later does not bring an old session back
+// to life. Also "Kundebrukere"'s deactivate/reactivate — the same reversible block-login concept
+// applies just as well to a customer account.
 authRouter.patch("/users/:id/active", requireAuth, requireRole("admin", "super_admin"), (req, res) => {
   const { target, status, code, error } = getStaffTarget(req.params.id, req.user, { allowCustomer: true });
   if (error) return res.status(status).json({ code, error });
@@ -413,6 +409,7 @@ authRouter.patch("/users/:id/active", requireAuth, requireRole("admin", "super_a
   if (typeof req.body.active !== "boolean") return res.status(400).json({ code: "invalid_active_flag", error: "active må være true eller false" });
 
   db.prepare("UPDATE users SET active = ? WHERE id = ?").run(req.body.active ? 1 : 0, req.params.id);
+  bumpTokenVersion(req.params.id);
   res.json(db.prepare(`SELECT ${STAFF_FIELDS} FROM users WHERE id = ?`).get(req.params.id));
 });
 
@@ -515,9 +512,11 @@ authRouter.patch("/me/password", requireAuth, (req, res) => {
   }
 
   db.prepare("UPDATE users SET password_hash = ? WHERE id = ?").run(bcrypt.hashSync(newPassword, 10), req.user.id);
-  // Tokens already issued stay valid until they expire — there's no revocation list, and the 12h
-  // lifetime is the bound on that. Worth knowing before treating this as "kick everyone out".
-  res.json({ ok: true });
+  // Every other session under the old password ends — that is the point of changing it. This one
+  // would end with them, so the response carries a fresh token for the caller to continue on.
+  bumpTokenVersion(req.user.id);
+  const fresh = db.prepare("SELECT id, name, role, client_id, company_id, token_version FROM users WHERE id = ?").get(req.user.id);
+  res.json({ ok: true, token: issueToken(fresh) });
 });
 
 authRouter.post("/me/avatar", requireAuth, avatarUpload.single("avatar"), async (req, res) => {
