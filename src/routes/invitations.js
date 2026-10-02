@@ -3,6 +3,7 @@ import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import { db } from "../db.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
+import { invitationAcceptLimiter } from "../middleware/rateLimits.js";
 import { newQrToken } from "../utils/qrcode.js";
 
 export const invitationsRouter = Router();
@@ -109,7 +110,7 @@ invitationsRouter.get("/:token", (req, res) => {
 });
 
 // Public: no auth, creates the account and logs the new user in immediately.
-invitationsRouter.post("/:token/accept", (req, res) => {
+invitationsRouter.post("/:token/accept", invitationAcceptLimiter, (req, res) => {
   const { invitation, error } = findValidInvitation(req.params.token);
   if (error) return res.status(error === "not_found" ? 404 : 410).json({ code: "invitation_invalid", error: "Invitasjonen er ikke gyldig" });
 

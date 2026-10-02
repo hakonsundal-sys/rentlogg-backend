@@ -5,7 +5,7 @@ import helmet from "helmet";
 import morgan from "morgan";
 import multer from "multer";
 import fs from "node:fs";
-import "./db.js";
+import { db } from "./db.js";
 
 import { authRouter } from "./routes/auth.js";
 import { clientsRouter } from "./routes/clients.js";
@@ -24,6 +24,7 @@ import { chemicalsRouter } from "./routes/chemicals.js";
 import { trainingRouter } from "./routes/training.js";
 import { timeRouter } from "./routes/time.js";
 import { requireAuth, requireModule } from "./middleware/auth.js";
+import { apiLimiter } from "./middleware/rateLimits.js";
 import { startDailyReportScheduler, startBackupScheduler } from "./services/scheduler.js";
 import { hoursSinceLastGoodBackup } from "./services/backup.js";
 import { UploadRejectedError } from "./utils/uploads.js";
@@ -33,6 +34,9 @@ if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
 if (!fs.existsSync(`${uploadsDir}/avatars`)) fs.mkdirSync(`${uploadsDir}/avatars`, { recursive: true });
 
 const app = express();
+// Render puts one proxy in front of the process, so without this req.ip is the proxy's address and
+// every rate limit below would count the whole company as one caller.
+app.set("trust proxy", 1);
 // crossOriginResourcePolicy: false — otherwise helmet's default same-origin policy blocks the
 // Vercel-hosted frontend from loading <img src="{API_URL}/uploads/..."> across origins.
 // contentSecurityPolicy: false — GET /reports/runs/:id/html returns a real (inline-styled) HTML
@@ -40,14 +44,24 @@ const app = express();
 // user content, which doesn't apply to this JSON+file API, and would risk breaking that report.
 app.use(helmet({ crossOriginResourcePolicy: false, contentSecurityPolicy: false }));
 // ALLOWED_ORIGINS is a comma-separated list (e.g. "https://rentlogg.no,https://app.rentlogg.no").
-// Left unset, this keeps today's "reflect any origin" behavior instead of breaking prod against
-// a guessed domain — real impact is low anyway since every request carries its auth as a Bearer
-// header, not a cookie, so a foreign origin can't ride an ambient credential either way. Still
-// worth setting once the frontend's real domain(s) are known.
+// Left unset on Render (RENDER is set there), no cross-origin caller is allowed at all: a redeploy
+// that loses the variable should fail closed, and render.yaml sets it. Left unset anywhere else —
+// a developer's machine — every origin is answered, so the local frontend on another port works
+// without configuration.
 const allowedOrigins = (process.env.ALLOWED_ORIGINS || "").split(",").map((o) => o.trim()).filter(Boolean);
-app.use(cors(allowedOrigins.length ? { origin: allowedOrigins } : {}));
+const corsOptions = allowedOrigins.length ? { origin: allowedOrigins } : process.env.RENDER ? { origin: false } : {};
+app.use(cors(corsOptions));
 app.use(express.json());
-app.use(morgan("dev"));
+// The query string is left out of the log on purpose: /uploads takes the login token as ?token=
+// (an <img> cannot send a header), so logging the whole URL put a valid token in the log for every
+// photo. Control characters are replaced so a crafted URL cannot forge a log line.
+morgan.token("path", (req) =>
+  Array.from((req.originalUrl || req.url || "").split("?")[0], (c) => {
+    const n = c.charCodeAt(0);
+    return n < 32 || n === 127 || n === 0x2028 || n === 0x2029 ? "?" : c;
+  }).join("")
+);
+app.use(morgan(":method :path :status :response-time ms - :res[content-length]"));
 app.use("/uploads", uploadsRouter);
 
 // Fortsatt offentlig og fortsatt billig, men den svarer nå på det spørsmålet som faktisk kan gå
@@ -60,11 +74,34 @@ app.use("/uploads", uploadsRouter);
 //
 // Ingen data lekker: bare et tall i timer og et ja/nei. Ikke hvor kopien ligger, ikke hva den
 // inneholder, ikke om den finnes i det hele tatt utover alderen.
+//
+// Svaret har også to ting som faktisk kan være ødelagt mens prosessen fortsatt svarer: databasen
+// (en enkel spørring — 503 hvis den feiler, så Render ser en syk tjeneste i stedet for en frisk
+// en) og ledig plass på disken. Full disk melder bare `diskLow` og feiler ikke helsesjekken:
+// Render ville startet instansen på nytt i en løkke, og en omstart gir ikke mer plass.
 app.get("/health", (req, res) => {
+  let dbOk = true;
+  try {
+    db.prepare("SELECT 1").get();
+  } catch {
+    dbOk = false;
+  }
+
+  let diskLow = null;
+  try {
+    const stats = fs.statfsSync(uploadsDir);
+    const freeMB = (stats.bavail * stats.bsize) / (1024 * 1024);
+    diskLow = freeMB < Number(process.env.DISK_LOW_MB ?? 100);
+  } catch {
+    // Unknown on a platform without statfs — absent rather than a guess.
+  }
+
   const hours = hoursSinceLastGoodBackup();
   const maxAge = Number(process.env.BACKUP_MAX_AGE_HOURS ?? 36);
-  res.json({
-    ok: true,
+  res.status(dbOk ? 200 : 503).json({
+    ok: dbOk,
+    db: dbOk,
+    diskLow,
     backup: {
       hoursSinceLastGood: hours === null ? null : Number(hours.toFixed(1)),
       stale: hours === null || hours > maxAge,
@@ -110,6 +147,11 @@ app.get("/checkin/:qrToken", (req, res) => {
   const frontendUrl = process.env.PUBLIC_FRONTEND_URL || "https://rentlogg.no";
   res.redirect(302, `${frontendUrl}/?checkin=${encodeURIComponent(req.params.qrToken)}`);
 });
+
+// After /health, /version, /checkin and /uploads on purpose: monitoring and Render's own health
+// check poll the first two constantly, the third is a stateless redirect, and /uploads streams
+// files behind its own token check — none of them should count against a person's allowance.
+app.use(apiLimiter);
 
 app.use("/auth", authRouter);
 app.use("/clients", clientsRouter);

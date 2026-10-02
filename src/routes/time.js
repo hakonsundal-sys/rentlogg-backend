@@ -2,6 +2,7 @@ import { Router } from "express";
 import { db } from "../db.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 import { todayInOslo } from "../services/schedule.js";
+import { csvEscape } from "../utils/csv.js";
 import { sendTimesheetPdf, sendXlsx } from "../services/timeExport.js";
 import {
   computePlannedVsActual, decimalHours, findOpenEntry, formatMinutes, getEntry,
@@ -1174,12 +1175,6 @@ timeRouter.get("/attention", requireAuth, requireRole("admin", "manager"), (req,
 });
 
 // --- CSV -----------------------------------------------------------------------------------------
-
-function csvEscape(value) {
-  const str = String(value ?? "");
-  if (/[",\n]/.test(str)) return `"${str.replace(/"/g, '""')}"`;
-  return str;
-}
 
 const STATUS_LABELS = {
   closed: "Fullført",

@@ -5,6 +5,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { PDFParse } from "pdf-parse";
 import { db } from "../db.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
+import { translationLimiter, pdfImportLimiter } from "../middleware/rateLimits.js";
 import { todayInOslo } from "../services/schedule.js";
 import { getRoomsForSite, findOrCreateTodayRoomRun, findOrCreateRoomRunForDate, findRoomRunForDate, getMonthlyItemsForSite, getRoomGridForSiteMonth, getRoomRunItems, ensureRunItemOptions, measurementVerdict, parseMeasurement, contactSatisfied, contactRemainingSeconds, measurementRangeLabel } from "../services/rooms.js";
 import { isModuleEnabled } from "../modules.js";
@@ -461,7 +462,7 @@ siteRoomsRouter.post("/complete-all-due", requireAuth, requireRole("cleaner", "a
 // the duration of one screen. The route deliberately reads the texts out of the database itself
 // rather than accepting them in the body: the client can't ask us to translate arbitrary text,
 // and it can't smuggle a translated string back in as if it were plan content.
-siteRoomsRouter.post("/translations", requireAuth, async (req, res) => {
+siteRoomsRouter.post("/translations", requireAuth, translationLimiter, async (req, res) => {
   const { status: scopeStatus, code: scopeCode, error: scopeError } = getSiteScopedForRooms(req.params.siteId, req.user);
   if (scopeError) return res.status(scopeStatus).json({ code: scopeCode, error: scopeError });
 
@@ -500,7 +501,7 @@ siteRoomsRouter.post("/translations", requireAuth, async (req, res) => {
 
 // --- AI PDF import: proposes rooms/tasks without persisting them ---
 
-siteRoomsRouter.post("/import-pdf", requireAuth, requireRole("admin", "manager"), pdfUpload.single("pdf"), async (req, res) => {
+siteRoomsRouter.post("/import-pdf", requireAuth, requireRole("admin", "manager"), pdfImportLimiter, pdfUpload.single("pdf"), async (req, res) => {
   const { status: scopeStatus, error: scopeError } = getSiteScopedForRooms(req.params.siteId, req.user);
   if (scopeError) return res.status(scopeStatus).json({ error: scopeError });
   if (!process.env.ANTHROPIC_API_KEY) {

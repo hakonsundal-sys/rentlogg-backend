@@ -5,7 +5,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { db } from "../db.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
+import { digestRunLimiter } from "../middleware/rateLimits.js";
 import { computeMonthlyReport } from "../services/schedule.js";
+import { csvEscape } from "../utils/csv.js";
 import { gatherReportPhotos, streamPhotosZip } from "../services/photos.js";
 import { getRunDetail, canAccessRun } from "../services/runDetail.js";
 import { buildReportHtml, buildReportPdf } from "../services/runReport.js";
@@ -128,7 +130,7 @@ reportsRouter.get("/runs/:id/pdf", requireAuth, (req, res) => {
 
 // Manual trigger for the daily digest — lets an admin verify/re-send for a specific date
 // (optionally scoped to one site) without waiting for the 07:00 scheduler.
-reportsRouter.post("/daily-digest/run", requireAuth, requireRole("admin"), async (req, res) => {
+reportsRouter.post("/daily-digest/run", requireAuth, requireRole("admin"), digestRunLimiter, async (req, res) => {
   const dateStr = req.body?.date || yesterdayInOslo();
   const results = await sendDailyReports(dateStr, req.body?.site_id || undefined, req.user.company_id, req.body?.recipients || undefined);
   res.json({ date: dateStr, ...results });
@@ -144,12 +146,6 @@ function parseSummaryQuery(req) {
 reportsRouter.get("/summary", requireAuth, requireRole("admin", "manager"), (req, res) => {
   res.json(computeMonthlyReport({ ...parseSummaryQuery(req), companyId: req.user.company_id }));
 });
-
-function csvEscape(value) {
-  const str = String(value ?? "");
-  if (/[",\n]/.test(str)) return `"${str.replace(/"/g, '""')}"`;
-  return str;
-}
 
 const STATUS_LABELS = { completed: "Fullført", in_progress: "Pågår", missing: "Manglende" };
 

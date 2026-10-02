@@ -36,31 +36,12 @@ const loginLimiter = rateLimit({
 // see the comment on POST /login below.
 const DUMMY_PASSWORD_HASH = bcrypt.hashSync("no-such-user-timing-guard", 10);
 
-// Self-closing bootstrap: this used to be a fully open "create any account, any role" endpoint
-// with no guard at all — a real security hole. Now it can only ever create the very first
-// super_admin (Rentlogg's own operator account, company_id null); once one exists, it's
-// permanently closed. Every other account (company admins, managers, cleaners, customers) is
-// created via the invitation flow instead (see invitations.js).
-authRouter.post("/register", (req, res) => {
-  const { name, email, password, role } = req.body;
-  const superAdminExists = db.prepare("SELECT 1 FROM users WHERE role = 'super_admin'").get();
-  if (superAdminExists) {
-    return res.status(403).json({ code: "signup_closed", error: "Registrering er stengt. Kontakt en administrator for tilgang." });
-  }
-  if (!name || !email || !password || role !== "super_admin") {
-    return res.status(400).json({ code: "superadmin_fields_required", error: "name, email, password er påkrevd, og role må være 'super_admin'." });
-  }
-
-  const existing = db.prepare("SELECT id FROM users WHERE email = ?").get(email);
-  if (existing) return res.status(409).json({ code: "email_taken", error: "Email already registered" });
-
-  const password_hash = bcrypt.hashSync(password, 10);
-  const info = db
-    .prepare("INSERT INTO users (name, email, password_hash, role, client_id, company_id) VALUES (?, ?, ?, 'super_admin', NULL, NULL)")
-    .run(name, email, password_hash);
-
-  res.status(201).json({ id: info.lastInsertRowid, name, email, role: "super_admin" });
-});
+// There is deliberately no registration endpoint. One existed that created the first super_admin
+// for whoever called it first while none existed — fine until a restored or fresh database is
+// briefly reachable, at which point the first stranger to find it owns every company. The first
+// super_admin is now created from a shell with `npm run superadmin`, which needs access to the
+// machine rather than just to the URL. Every other account (company admins, managers, cleaners,
+// customers) is created by an admin or through the invitation flow (see invitations.js).
 
 authRouter.post("/login", loginLimiter, (req, res) => {
   // Every write path stores the email lower-cased, but this lookup compared it byte for byte, so
