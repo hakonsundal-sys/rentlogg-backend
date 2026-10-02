@@ -83,9 +83,24 @@ export async function gzipFile(sourcePath, destPath) {
 // Filnavnet bærer datoen fordi det er det eneste som betyr noe når man leter etter en kopi under
 // press: «den fra før importen gikk galt». Oslo-dato, ikke UTC, av samme grunn som alt annet
 // datostemplet i dette systemet.
+// Klokkeslettet er med, og det er ikke pynt: bøtta har en Bucket Lock på 30 dager (satt
+// 2026-10-02), og en lås hindrer OVERSKRIVING like mye som sletting. Med bare dato i navnet
+// ville en kjøring nummer to samme døgn — en omstart klokka tre som nullstiller vakten i
+// scheduler.js, eller en manuell kjøring — forsøkt å skrive over gårsdagens... dagens objekt, og
+// blitt avvist av låsen. Resultatet hadde vært en feilrad og en varsel-e-post for noe som i
+// virkeligheten gikk helt fint. Hver kjøring får sitt eget objekt i stedet; 90-dagersregelen
+// rydder dem bort uansett hvor mange det ble.
+//
+// Datoen står fortsatt først, fordi det er den man leter etter under press («den fra før
+// importen gikk galt») og fordi det gir riktig sortering på navn alene.
 export function backupFileName(now = new Date()) {
-  const date = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Oslo" }).format(now);
-  return `rentlogg-${date}.sqlite.gz`;
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Europe/Oslo",
+    year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", hour12: false,
+  }).formatToParts(now);
+  const get = (type) => parts.find((p) => p.type === type).value;
+  return `rentlogg-${get("year")}-${get("month")}-${get("day")}T${get("hour")}${get("minute")}.sqlite.gz`;
 }
 
 // Hele den lokale halvdelen: konsistent kopi → kontroll → komprimering. Returnerer stien til den
