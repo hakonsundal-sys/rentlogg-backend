@@ -112,9 +112,10 @@ Around 140 endpoints across these routers — see `src/routes/` for the detail, 
 
 Two things worth knowing before using the API:
 
-- `POST /auth/register` is **not** open registration. It creates the very first `super_admin`
-  and then permanently closes itself (`403 signup_closed`). Every other account is created by
-  an admin (`POST /auth/users`) or through the invitation flow.
+- There is **no registration endpoint**. The first `super_admin` is created from a shell with
+  `npm run superadmin -- "Navn" e-post` (password from `SUPERADMIN_PASSWORD`, or generated and
+  printed once). Every other account is created by an admin (`POST /auth/users`) or through the
+  invitation flow.
 - `PATCH /auth/users/:id/password` deliberately refuses admin targets — an admin can't be reset
   by a co-admin. Admins change their own password with `PATCH /auth/me/password`, which
   requires the current one.
@@ -145,8 +146,13 @@ encode the right host without extra configuration.
   www is what sits in the `Origin` header of every API call. Setting the apex alone, which is
   the obvious-looking value, blocks every browser request and takes the app down for all users
   with no code change to point at; the symptom is "Failed to fetch" rather than a status code.
-  Left entirely unset, CORS falls back to reflecting any origin, which is safe-ish but wide.
-- **Rate limiting covers login only** (`src/routes/auth.js`). Nothing else is bounded.
+  Left entirely unset on Render, CORS now answers no cross-origin caller at all (it fails closed);
+  off Render it answers every origin, so local development needs no configuration.
+- **Rate limits** live in `src/middleware/rateLimits.js`: a generous per-user (per-IP when
+  anonymous) ceiling on the whole API, tight ones on AI translation, AI PDF import, the digest
+  e-mail and invitation accept, and the stricter one on `/auth/login`. `trust proxy` is set to 1 —
+  if Render's chain ever has more than one hop in front of the process, the IP-keyed buckets
+  (anonymous callers, login) would count several users as one; check `req.ip` before relying on it.
 - **No input-validation library.** Request bodies are checked by hand, route by route —
   consistent, but easy to forget in a new endpoint. `zod` or similar would make it structural.
 - **No token revocation.** Changing or resetting a password doesn't invalidate tokens already
@@ -155,9 +161,6 @@ encode the right host without extra configuration.
   lost disk is lost documentation. S3 or R2 before this gets big.
 - **SQLite is single-server.** Fine for one Render instance; Postgres if this ever needs
   concurrent writes across instances, or managed backups.
-- **`multer` is pinned to 1.x.** 2.x has a safer API and is worth migrating to.
-- **`nodemailer` is still a dependency** but nothing imports it — a leftover from the Gmail SMTP
-  setup that Resend replaced. Safe to remove.
 
 ## Import tooling
 
