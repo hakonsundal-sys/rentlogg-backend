@@ -331,13 +331,13 @@ function sendAuditZip(res, { site, from, to, companyName }) {
   const outside = measurements.filter(isOutsideLimit);
   const within = measurements.filter((m) => m.measured_value !== null && !isOutsideLimit(m)).length;
 
-  doc.fontSize(20).fillColor("#1e2a38").text("Revisjonsdokumentasjon");
+  doc.fontSize(20).fillColor("#6d28d9").text("Revisjonsdokumentasjon");
   doc.moveDown(0.3);
-  doc.fontSize(13).fillColor("#556677").text(`${site.name} · ${from} til ${to}`);
+  doc.fontSize(13).fillColor("#71717a").text(`${site.name} · ${from} til ${to}`);
   if (companyName) doc.fontSize(10).text(companyName);
   doc.moveDown(1);
 
-  doc.fontSize(11).fillColor("#1e2a38");
+  doc.fontSize(11).fillColor("#18181b");
   doc.text(`Besøk i perioden: ${runs.length}`);
   doc.text(`Avvik meldt: ${deviations.length} (lukket med signatur: ${deviations.filter((d) => d.closed_at).length})`);
   doc.text(`Måleresultater: ${measurements.length} (innenfor: ${within}, utenfor: ${outside.length})`);
@@ -350,7 +350,7 @@ function sendAuditZip(res, { site, from, to, companyName }) {
     outside.forEach((m) => {
       if (doc.y > doc.page.height - 80) doc.addPage();
       const grense = m.measure_max !== null && m.measure_max !== undefined ? `maks ${m.measure_max}` : `minst ${m.measure_min}`;
-      doc.fontSize(10).fillColor("#1e2a38").text(
+      doc.fontSize(10).fillColor("#18181b").text(
         `${String(m.started_at).slice(0, 10)} · ${m.room_name} · ${m.label}: ${m.measured_value} ${m.measure_unit} (${grense})`
       );
     });
@@ -359,12 +359,12 @@ function sendAuditZip(res, { site, from, to, companyName }) {
 
   if (deviations.length > 0) {
     if (doc.y > doc.page.height - 140) doc.addPage();
-    doc.fontSize(13).fillColor("#1e2a38").text("Avvik");
+    doc.fontSize(13).fillColor("#18181b").text("Avvik");
     doc.moveDown(0.4);
     deviations.forEach((d) => {
       if (doc.y > doc.page.height - 150) doc.addPage();
-      doc.fontSize(11).fillColor("#1e2a38").text(`${String(d.created_at).slice(0, 10)} · ${d.title || "Avvik"} (${d.priority})`);
-      doc.fontSize(9.5).fillColor("#556677").text(d.description || "", { indent: 12 });
+      doc.fontSize(11).fillColor("#18181b").text(`${String(d.created_at).slice(0, 10)} · ${d.title || "Avvik"} (${d.priority})`);
+      doc.fontSize(9.5).fillColor("#71717a").text(d.description || "", { indent: 12 });
       const steg = [
         ["Strakstiltak", d.immediate_action, d.immediate_action_by, d.immediate_action_at],
         ["Årsak", d.root_cause, d.root_cause_by, d.root_cause_at],
@@ -373,7 +373,7 @@ function sendAuditZip(res, { site, from, to, companyName }) {
       steg.forEach((rad) => {
         const [navn, tekst, av, nar] = rad;
         if (!tekst) return;
-        doc.fontSize(9.5).fillColor("#1e2a38").text(
+        doc.fontSize(9.5).fillColor("#18181b").text(
           `${navn}: ${tekst} — ${av || "?"}, ${String(nar || "").slice(0, 16)}`,
           { indent: 12 }
         );
