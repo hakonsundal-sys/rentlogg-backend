@@ -74,7 +74,7 @@ const lastCompletedRoomRunStmt = db.prepare(
 // way a fixed "every 30 days" interval would across 28/30/31-day months.
 // Weekday mode: today's Oslo weekday matches a room_schedules row.
 // No schedule configured at all: never "due" (but still open-able ad hoc).
-export function isRoomDueOn(room, dateStr) {
+function roomScheduleSaysDue(room, dateStr) {
   if (room.interval_days != null) {
     const last = lastCompletedRoomRunStmt.get(room.id);
     if (!last) return true;
@@ -89,6 +89,30 @@ export function isRoomDueOn(room, dateStr) {
   const weekdays = new Set(roomScheduleWeekdaysStmt.all(room.id).map((r) => r.weekday));
   if (weekdays.size === 0) return false;
   return weekdays.has(weekdayOf(dateStr));
+}
+
+// A room is due when its own schedule says so AND it has something to do that day.
+//
+// The two schedules are separate — the room carries one, each task carries one — so they can
+// disagree, and until now only the room's was consulted here. A room on a four-day interval whose
+// only task runs Mondays and Thursdays was "due" every Friday with an empty checklist: it sat in
+// the cleaner's list all day, counted against her completion number, and showed up as a missed
+// room in the reports. The periodic-months mode makes that the normal shape rather than the odd
+// one, since a task due in two months leaves its room empty for the other ten.
+//
+// Note the direction. This NARROWS: a room that was not due by its own schedule is still not due,
+// and nothing new becomes due. Deriving the room's schedule FROM its tasks instead — the obvious-
+// sounding version — would do the opposite and break badly, because isItemDueOn returns true for a
+// task with no schedule of its own. That true means "no further restriction", not "due every day",
+// so reading it as the room's own answer would make every ordinary room due daily.
+//
+// A room with no tasks at all keeps its own schedule as the only answer, which is what makes
+// "went in, looked at it, signing for the visit" still work.
+export function isRoomDueOn(room, dateStr) {
+  if (!roomScheduleSaysDue(room, dateStr)) return false;
+  const items = roomItemsStmt.all(room.id);
+  if (items.length === 0) return true;
+  return items.some((item) => isItemDueOn(item, dateStr));
 }
 
 const lastCompletedItemStmt = db.prepare(
