@@ -471,3 +471,8 @@ ensureColumn("room_runs", "approved_by_role", "approved_by_role TEXT");
 // Why the emergency exit was used. Not yet required by the route — the frontend has to ask for it
 // first, or an admin approval would start failing in production — but recorded whenever sent.
 ensureColumn("room_runs", "approval_override_reason", "approval_override_reason TEXT");
+
+// «Kun sjekkliste»: firmaet er ikke et renholdsfirma, og skal bare se Sjekklister-modulen — ingen
+// kunder, lokasjoner, vaskeplan eller renholdsavvik. Rent visningsvalg i frontend; dataene og
+// rutene er de samme, og et firma uten rom har uansett ingenting å vise der. Se src/modules.js.
+ensureColumn("companies", "checklist_only", "checklist_only INTEGER NOT NULL DEFAULT 0");

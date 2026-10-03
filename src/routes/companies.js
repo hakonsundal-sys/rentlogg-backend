@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { db } from "../db.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
-import { isKnownModule, modulesWithStatus, setModuleEnabled } from "../modules.js";
+import { isKnownModule, modulesWithStatus, setModuleEnabled, setChecklistOnly } from "../modules.js";
 
 export const companiesRouter = Router();
 
@@ -30,6 +30,21 @@ companiesRouter.patch("/:id/modules", requireAuth, requireRole("super_admin"), (
 
   setModuleEnabled(company.id, module_key, enabled, req.user.id);
   res.json({ id: company.id, modules: modulesWithStatus(company.id) });
+});
+
+// «Kun sjekkliste»: the company doesn't do cleaning and should only see the Sjekklister module.
+// Same operator-only rule as the module toggles above. Answers with the module list too, since
+// turning this on also turns the checklist module on (see setChecklistOnly).
+companiesRouter.patch("/:id/checklist-only", requireAuth, requireRole("super_admin"), (req, res) => {
+  const { enabled } = req.body;
+  const company = db.prepare("SELECT id FROM companies WHERE id = ?").get(req.params.id);
+  if (!company) return res.status(404).json({ code: "not_found", error: "Not found" });
+  if (typeof enabled !== "boolean") {
+    return res.status(400).json({ code: "enabled_required", error: "enabled må være true eller false" });
+  }
+
+  setChecklistOnly(company.id, enabled, req.user.id);
+  res.json({ id: company.id, checklist_only: enabled ? 1 : 0, modules: modulesWithStatus(company.id) });
 });
 
 // Renaming a tenant. The name is display-only — every relation in the app hangs off company_id,

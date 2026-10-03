@@ -54,7 +54,22 @@ export const MODULES = [
     // Skillet som ble igjen: registerets kontakttid er informasjon, oppgavens kontakttid sperrer.
     defaultEnabled: false,
   },
+  {
+    key: "checklist",
+    // Navnet valgt av Håkon 2026-10-03.
+    name: "Sjekk det – det er kjekt det",
+    description:
+      "Enkle sjekklister uten renholdsfokus: punkter som krysses av som OK, avvik eller ikke " +
+      "relevant, med kommentar og bilde, og en logg med PDF per utfylling.",
+    // To bruksmåter med samme modul. Et renholdsfirma kan ha den ved siden av alt annet, til egne
+    // interne rutiner (bilsjekk, vernerunde). Et firma som ikke driver renhold i det hele tatt får
+    // i tillegg «Kun sjekkliste» (companies.checklist_only), som skjuler renholdsflatene — og det
+    // valget skrur denne modulen på av seg selv, se setChecklistOnly nedenfor.
+    defaultEnabled: false,
+  },
 ];
+
+export const MODULE_CHECKLIST = "checklist";
 
 const MODULE_BY_KEY = new Map(MODULES.map((m) => [m.key, m]));
 
@@ -105,4 +120,24 @@ export function setModuleEnabled(companyId, key, enabled, byUserId) {
      ON CONFLICT(company_id, module_key)
      DO UPDATE SET enabled = excluded.enabled, enabled_at = excluded.enabled_at, enabled_by = excluded.enabled_by`
   ).run(companyId, key, enabled ? 1 : 0, byUserId ?? null);
+}
+
+// Whether a company is a checklist-only customer (no cleaning at all). Display-only: the frontend
+// uses it to swap the cleaning surfaces for the Sjekklister module, and it rides on the user object
+// next to `modules` for the same reason modules do — it decides what is shown, not what is allowed.
+export function isChecklistOnly(companyId) {
+  if (!companyId) return false;
+  const row = db.prepare("SELECT checklist_only FROM companies WHERE id = ?").get(companyId);
+  return !!row?.checklist_only;
+}
+
+// Turning checklist-only ON also turns the checklist module on: a company that sees nothing but
+// Sjekklister and then gets 403 module_not_enabled on every one of its requests is a setup mistake
+// nobody should be able to make. Turning it OFF leaves the module alone — the company may well keep
+// using the lists alongside the cleaning surfaces it now sees again.
+export function setChecklistOnly(companyId, enabled, byUserId) {
+  db.transaction(() => {
+    db.prepare("UPDATE companies SET checklist_only = ? WHERE id = ?").run(enabled ? 1 : 0, companyId);
+    if (enabled) setModuleEnabled(companyId, MODULE_CHECKLIST, true, byUserId);
+  })();
 }

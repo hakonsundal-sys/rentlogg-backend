@@ -7,7 +7,7 @@ import { db } from "../db.js";
 import { requireAuth, requireRole, issueToken, bumpTokenVersion } from "../middleware/auth.js";
 import { safeOriginalName, normalizeImageOrientation, imageFileFilter } from "../utils/uploads.js";
 import { normalizeLanguage } from "../utils/languages.js";
-import { enabledModulesForCompany } from "../modules.js";
+import { enabledModulesForCompany, isChecklistOnly } from "../modules.js";
 
 export const authRouter = Router();
 
@@ -84,6 +84,7 @@ authRouter.post("/login", loginLimiter, (req, res) => {
       // it decides what the UI shows, not what the caller may do (requireModule does that, per
       // request), so a stale copy in an old token's session can't grant anything.
       modules: enabledModulesForCompany(user.company_id),
+      checklist_only: isChecklistOnly(user.company_id),
     },
   });
 });
@@ -441,6 +442,9 @@ authRouter.delete("/users/:id", requireAuth, requireRole("admin", "super_admin")
     // plan, not history, and is cleared below like the scheduling links are.
     opplæring: db.prepare("SELECT COUNT(*) AS n FROM training_records WHERE user_id = ?").get(req.params.id).n,
     "registrerte opplæringer": db.prepare("SELECT COUNT(*) AS n FROM training_records WHERE registered_by = ?").get(req.params.id).n,
+    // Sjekkliste-utfyllinger, også utkast: user_id er en fremmednøkkel, og et halvt utfylt skjema
+    // er like mye noe den ansatte har gjort som et innsendt.
+    sjekklister: db.prepare("SELECT COUNT(*) AS n FROM simple_checklist_submissions WHERE user_id = ?").get(req.params.id).n,
   };
   const withHistory = Object.entries(counts).filter(([, n]) => n > 0);
   if (withHistory.length > 0) {
@@ -472,7 +476,7 @@ authRouter.get("/me", requireAuth, (req, res) => {
   const user = db
     .prepare("SELECT id, name, email, role, client_id, company_id, avatar_url, phone, created_at, language FROM users WHERE id = ?")
     .get(req.user.id);
-  res.json({ ...user, modules: enabledModulesForCompany(user.company_id) });
+  res.json({ ...user, modules: enabledModulesForCompany(user.company_id), checklist_only: isChecklistOnly(user.company_id) });
 });
 
 authRouter.patch("/me", requireAuth, (req, res) => {

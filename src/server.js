@@ -23,6 +23,7 @@ import { modulesRouter } from "./routes/modules.js";
 import { chemicalsRouter } from "./routes/chemicals.js";
 import { trainingRouter } from "./routes/training.js";
 import { timeRouter } from "./routes/time.js";
+import { simpleChecklistsRouter } from "./routes/simpleChecklists.js";
 import { requireAuth, requireModule } from "./middleware/auth.js";
 import { apiLimiter } from "./middleware/rateLimits.js";
 import { startDailyReportScheduler, startBackupScheduler } from "./services/scheduler.js";
@@ -193,6 +194,9 @@ app.use("/training", requireAuth, requireModule("training"), trainingRouter);
 // check-in (POST /sites/checkin/:qrToken), which stays ungated for everyone and checks the module
 // itself via startEntryForCheckin.
 app.use("/time", requireAuth, requireModule("timeclock"), timeRouter);
+// Sjekklister: same gating at the mount. Not to be confused with /checklists above, which is the
+// old site-level checklist of the cleaning product.
+app.use("/simple-checklists", requireAuth, requireModule("checklist"), simpleChecklistsRouter);
 
 // Without this, a rejected upload (most commonly a phone photo over the size limit — modern
 // camera HDR/high-res shots routinely exceed what a "reasonable" limit looks like on paper)

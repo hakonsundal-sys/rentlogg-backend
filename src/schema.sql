@@ -771,3 +771,93 @@ CREATE TABLE IF NOT EXISTS backup_runs (
 );
 
 CREATE INDEX IF NOT EXISTS idx_backup_runs_started ON backup_runs(started_at);
+
+-- Sjekklister: en enkel modul for bedrifter som ikke driver renhold. Et bakeri, en butikk eller et
+-- verksted som skal krysse av for åpningsrutinen, ukentlig brannrunde eller kontroll av truck har
+-- ingen kunder, ingen lokasjoner med QR-kode og ingen rom — bare en liste med punkter og en logg
+-- over hvem som fylte den ut, når, og hva som ikke var i orden.
+--
+-- Bevisst egne tabeller og ikke rooms/room_runs med nye navn: rom-maskineriet er bygget rundt
+-- kunde → lokasjon → rom → besøk per dag, med kundegodkjenning, kontakttid, vaskeplan og QR-
+-- innsjekk vevd inn i hver rute. Å skjule alt det for et bakeri ville betydd betingelser i
+-- renholdsflaten folk bruker hver dag, og den har krasjet til blank skjerm av mindre.
+--
+-- Samme plan/hendelse-deling som resten av appen: simple_checklists er hva som SKAL gjøres,
+-- simple_checklist_submissions er hva som faktisk ble gjort. Punktets tekst kopieres ned på svaret
+-- ved oppstart, så en omformulert sjekkliste aldri skriver om hva forrige måneds logg sier.
+CREATE TABLE IF NOT EXISTS simple_checklists (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  company_id INTEGER NOT NULL REFERENCES companies(id),
+  name TEXT NOT NULL,
+  description TEXT,
+  -- Hvilke ukedager lista skal fylles ut, kommaseparert i Date#getDay()-konvensjonen som resten av
+  -- appen bruker (0 = søndag). NULL eller tom = «ved behov»: lista kan fylles ut når som helst,
+  -- men regnes aldri som manglende.
+  weekdays TEXT,
+  -- Arkivert i stedet for slettet når lista har utfyllinger, så loggen beholder lenken sin.
+  active INTEGER NOT NULL DEFAULT 1,
+  sort_order INTEGER DEFAULT 0,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS simple_checklist_items (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  checklist_id INTEGER NOT NULL REFERENCES simple_checklists(id),
+  label TEXT NOT NULL,
+  -- Kort forklaring under punktet («Termometeret henger på innsiden av døra»).
+  help_text TEXT,
+  sort_order INTEGER DEFAULT 0,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
+-- Én utfylling. Uten submitted_at er den et utkast som tilhører den som startet den; med
+-- submitted_at er den låst og står i loggen. Lista, navnet og personen kopieres ned for samme
+-- grunn som overalt ellers: loggen skal fortsatt si hvem og hva etter at lista er omdøpt eller
+-- den ansatte har sluttet.
+CREATE TABLE IF NOT EXISTS simple_checklist_submissions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  company_id INTEGER NOT NULL REFERENCES companies(id),
+  checklist_id INTEGER REFERENCES simple_checklists(id),
+  checklist_name TEXT NOT NULL,
+  user_id INTEGER REFERENCES users(id),
+  user_name TEXT NOT NULL,
+  -- Kalenderdagen i Europe/Oslo utfyllingen gjelder. Settes på nytt ved innsending, så et utkast
+  -- startet før midnatt og sendt etter havner på dagen det faktisk ble ferdig.
+  work_date TEXT NOT NULL,
+  started_at TEXT DEFAULT (datetime('now')),
+  submitted_at TEXT,
+  note TEXT,
+  deviation_count INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS simple_checklist_answers (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  submission_id INTEGER NOT NULL REFERENCES simple_checklist_submissions(id),
+  -- Nullstilles (ikke kaskadert) når punktet slettes fra lista — svaret står.
+  item_id INTEGER REFERENCES simple_checklist_items(id),
+  label TEXT NOT NULL,
+  help_text TEXT,
+  sort_order INTEGER DEFAULT 0,
+  -- NULL = ikke besvart ennå. 'ok' = i orden, 'deviation' = ikke i orden (krever kommentar),
+  -- 'na' = ikke relevant i dag.
+  status TEXT CHECK (status IN ('ok', 'deviation', 'na')),
+  comment TEXT,
+  answered_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS simple_checklist_photos (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  submission_id INTEGER NOT NULL REFERENCES simple_checklist_submissions(id),
+  -- Satt når bildet hører til ett bestemt punkt (typisk dokumentasjon av et avvik), ellers et
+  -- bilde av utfyllingen som helhet.
+  answer_id INTEGER REFERENCES simple_checklist_answers(id),
+  file_path TEXT NOT NULL,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_simple_checklists_company ON simple_checklists(company_id, sort_order);
+CREATE INDEX IF NOT EXISTS idx_simple_checklist_items_list ON simple_checklist_items(checklist_id, sort_order);
+CREATE INDEX IF NOT EXISTS idx_simple_checklist_submissions_company ON simple_checklist_submissions(company_id, work_date);
+CREATE INDEX IF NOT EXISTS idx_simple_checklist_submissions_list ON simple_checklist_submissions(checklist_id, work_date);
+CREATE INDEX IF NOT EXISTS idx_simple_checklist_answers_submission ON simple_checklist_answers(submission_id, sort_order);
+CREATE INDEX IF NOT EXISTS idx_simple_checklist_photos_submission ON simple_checklist_photos(submission_id);

@@ -141,5 +141,25 @@ uploadsRouter.get("/:filename", requireAuthQueryOrHeader, (req, res) => {
     return sendStoredFile(res, null, evidence.file_path);
   }
 
+  // Sjekkliste-bilder. Samme regel som rutene i routes/simpleChecklists.js: ansatte i firmaet som
+  // eier utfyllingen, aldri en kunde, og bare mens firmaet har modulen. Et utkast er bare eierens.
+  const checklistPhoto = db
+    .prepare(
+      `SELECT p.file_path, s.company_id, s.user_id, s.submitted_at
+       FROM simple_checklist_photos p JOIN simple_checklist_submissions s ON s.id = p.submission_id
+       WHERE instr(p.file_path, ?) > 0`
+    )
+    .get(filename);
+
+  if (checklistPhoto && path.basename(checklistPhoto.file_path) === filename) {
+    const allowed =
+      req.user.role !== "customer" &&
+      isModuleEnabled(req.user.company_id, "checklist") &&
+      checklistPhoto.company_id === req.user.company_id &&
+      (checklistPhoto.submitted_at || checklistPhoto.user_id === req.user.id);
+    if (!allowed) return res.status(403).json({ code: "not_allowed", error: "Not allowed" });
+    return sendStoredFile(res, null, checklistPhoto.file_path);
+  }
+
   res.status(404).json({ code: "not_found", error: "Not found" });
 });
