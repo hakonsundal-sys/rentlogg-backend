@@ -1,5 +1,5 @@
 import { db } from "../db.js";
-import { getRoomCompletionForSiteDate } from "./rooms.js";
+import { getRoomCompletionForSiteDate, newDueContext } from "./rooms.js";
 
 // Weekday convention throughout this module: JS Date#getDay() — 0=Sunday..6=Saturday.
 // Render runs in UTC, so "today" and any per-day matching must be computed in Europe/Oslo
@@ -29,6 +29,10 @@ function weekdayOf(dateStr) {
 }
 
 export function toOsloDateStr(sqliteDatetime) {
+  // Oslo is UTC+1 or UTC+2, so before 22:00 UTC the Oslo calendar day is the UTC day. That is nine
+  // timestamps in ten, and it avoids an Intl conversion (~1 µs) for each — which adds up when a month
+  // of history is read to answer "when was this last done".
+  if (sqliteDatetime.length >= 13 && Number(sqliteDatetime.slice(11, 13)) < 22) return sqliteDatetime.slice(0, 10);
   const iso = `${sqliteDatetime.replace(" ", "T")}Z`;
   return OSLO_DATE.format(new Date(iso));
 }
@@ -118,6 +122,9 @@ export function computeMonthlyReport({ month, siteId, departmentId, companyId })
   let completedDays = 0;
   let missingDays = 0;
   const rows = [];
+  // One memo for the whole month: every site is asked about every planned day, and each answer reads
+  // the same rooms, tasks and completion history.
+  const dueCtx = newDueContext();
 
   for (let day = 1; day <= totalDays; day++) {
     const dateStr = formatDate(year, mon, day);
@@ -136,7 +143,7 @@ export function computeMonthlyReport({ month, siteId, departmentId, companyId })
       // to the flat-run check for a non-room site, or a room-based one with nothing due that
       // particular day (rare — the site-level weekly plan and each room's own schedule aren't
       // required to agree).
-      const roomCompletion = getRoomCompletionForSiteDate(site.id, dateStr);
+      const roomCompletion = getRoomCompletionForSiteDate(site.id, dateStr, dueCtx);
       let completed, tasksCompleted, tasksTotal;
       if (roomCompletion && roomCompletion.dueCount > 0) {
         tasksTotal = roomCompletion.dueCount;

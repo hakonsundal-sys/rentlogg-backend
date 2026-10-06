@@ -61,10 +61,81 @@ export function getRoomStatusForDate(roomId, dateStr) {
 }
 
 const roomScheduleWeekdaysStmt = db.prepare("SELECT weekday FROM room_schedules WHERE room_id = ?");
-const lastCompletedRoomRunStmt = db.prepare(
-  `SELECT completed_at FROM room_runs WHERE room_id = ? AND completed_at IS NOT NULL
-   ORDER BY completed_at DESC LIMIT 1`
+// Candidates for "the last completion BEFORE this day". The bound is UTC midnight of that day, which
+// is later than the start of the Oslo day (22:00/23:00 UTC the evening before), so a few completions
+// from the first hours of the Oslo day itself slip in — the caller drops them by their Oslo date.
+// LIMIT is generous for exactly that reason; normally one or two rows come back.
+const completedRoomRunsBeforeStmt = db.prepare(
+  `SELECT completed_at FROM room_runs WHERE room_id = ? AND completed_at IS NOT NULL AND completed_at < ?
+   ORDER BY completed_at DESC LIMIT 10`
 );
+
+// The Oslo calendar day of the most recent completion that happened on a day BEFORE `dateStr`, or null.
+//
+// Everything below that says "due again N days after it was last done" asks this question about the
+// day being evaluated, not about now. It used to read the latest completion of all time, which for
+// today includes today's own: the moment a task was ticked, "was it done recently?" became yes, the
+// task and then its room turned not-due FOR THE SAME DAY it had just been done, and the room fell out
+// of the cleaner's list into "Ikke planlagt", its counter changed from 1/1 to 0/0, the reports lost it
+// from the day's due rooms, and bulk-complete skipped it. For a past day it was worse: every day
+// before the last cleaning read as not due, so the vaskeplan showed history that never happened.
+function lastCompletionDayBefore(rows, field, dateStr) {
+  for (const row of rows) {
+    const day = toOsloDateStr(row[field]);
+    if (day < dateStr) return day;
+  }
+  return null;
+}
+
+// A memo for ONE request that evaluates many days or many rooms (the vaskeplan grid, the monthly
+// report): each room's tasks, each task's plan and each task's completion history are read once and
+// then answered from memory. Without it, asking about a task on 30 days meant 30 queries for the same
+// rows — and since "due" now depends on the history before each day, an interval-heavy site went from
+// 10 ms to 200 ms for one month of the grid. Nothing is cached across requests: history changes.
+//
+// `history: false` memoises only the plans, not the completion history. A caller that asks about ONE
+// day (the cleaner's room list) is better served by the bounded query for "the last completion before
+// this day" than by loading every task's whole history to answer it once.
+export function newDueContext({ history = true } = {}) {
+  const ctx = { roomItems: new Map(), itemWeekdays: new Map(), itemMonths: new Map(), roomWeekdays: new Map() };
+  if (history) {
+    ctx.itemDoneDays = new Map();
+    ctx.roomDoneDays = new Map();
+  }
+  return ctx;
+}
+
+function memoed(map, key, load) {
+  if (!map) return load();
+  if (!map.has(key)) map.set(key, load());
+  return map.get(key);
+}
+
+// Greatest day in an ascending list that is strictly before dateStr, or null.
+function latestDayBefore(days, dateStr) {
+  let lo = 0;
+  let hi = days.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (days[mid] < dateStr) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo > 0 ? days[lo - 1] : null;
+}
+
+const roomDoneStmt = db.prepare("SELECT completed_at FROM room_runs WHERE room_id = ? AND completed_at IS NOT NULL");
+const itemDoneStmt = db.prepare(
+  `SELECT rr.started_at FROM room_run_items rri JOIN room_runs rr ON rr.id = rri.room_run_id
+   WHERE rri.room_checklist_item_id = ? AND rri.done = 1`
+);
+
+function roomLastDoneDayBefore(roomId, dateStr, ctx) {
+  if (!ctx?.roomDoneDays) {
+    return lastCompletionDayBefore(completedRoomRunsBeforeStmt.all(roomId, `${dateStr} 00:00:00`), "completed_at", dateStr);
+  }
+  const days = memoed(ctx.roomDoneDays, roomId, () => roomDoneStmt.all(roomId).map((r) => toOsloDateStr(r.completed_at)).sort());
+  return latestDayBefore(days, dateStr);
+}
 
 // Interval mode: due if never cleaned, or if it's been >= interval_days since the last
 // completion (computed from the real last completed_at, not a fixed anchor — so changing
@@ -74,11 +145,10 @@ const lastCompletedRoomRunStmt = db.prepare(
 // way a fixed "every 30 days" interval would across 28/30/31-day months.
 // Weekday mode: today's Oslo weekday matches a room_schedules row.
 // No schedule configured at all: never "due" (but still open-able ad hoc).
-function roomScheduleSaysDue(room, dateStr) {
+function roomScheduleSaysDue(room, dateStr, ctx) {
   if (room.interval_days != null) {
-    const last = lastCompletedRoomRunStmt.get(room.id);
-    if (!last) return true;
-    const lastOsloDay = toOsloDateStr(last.completed_at);
+    const lastOsloDay = roomLastDoneDayBefore(room.id, dateStr, ctx);
+    if (!lastOsloDay) return true;
     return daysBetween(lastOsloDay, dateStr) >= room.interval_days;
   }
   if (room.monthly_weekday != null && room.monthly_occurrence != null) {
@@ -86,7 +156,7 @@ function roomScheduleSaysDue(room, dateStr) {
     const targetDay = nthWeekdayOfMonth(year, month - 1, room.monthly_weekday, room.monthly_occurrence);
     return targetDay === day;
   }
-  const weekdays = new Set(roomScheduleWeekdaysStmt.all(room.id).map((r) => r.weekday));
+  const weekdays = memoed(ctx?.roomWeekdays, room.id, () => new Set(roomScheduleWeekdaysStmt.all(room.id).map((r) => r.weekday)));
   if (weekdays.size === 0) return false;
   return weekdays.has(weekdayOf(dateStr));
 }
@@ -108,18 +178,26 @@ function roomScheduleSaysDue(room, dateStr) {
 //
 // A room with no tasks at all keeps its own schedule as the only answer, which is what makes
 // "went in, looked at it, signing for the visit" still work.
-export function isRoomDueOn(room, dateStr) {
-  if (!roomScheduleSaysDue(room, dateStr)) return false;
-  const items = roomItemsStmt.all(room.id);
+export function isRoomDueOn(room, dateStr, ctx) {
+  if (!roomScheduleSaysDue(room, dateStr, ctx)) return false;
+  const items = memoed(ctx?.roomItems, room.id, () => roomItemsStmt.all(room.id));
   if (items.length === 0) return true;
-  return items.some((item) => isItemDueOn(item, dateStr));
+  return items.some((item) => isItemDueOn(item, dateStr, ctx));
 }
 
-const lastCompletedItemStmt = db.prepare(
+// See completedRoomRunsBeforeStmt for why the bound is UTC midnight and the LIMIT is not 1.
+const completedItemRunsBeforeStmt = db.prepare(
   `SELECT rr.started_at FROM room_run_items rri JOIN room_runs rr ON rr.id = rri.room_run_id
-   WHERE rri.room_checklist_item_id = ? AND rri.done = 1
-   ORDER BY rr.started_at DESC LIMIT 1`
+   WHERE rri.room_checklist_item_id = ? AND rri.done = 1 AND rr.started_at < ?
+   ORDER BY rr.started_at DESC LIMIT 10`
 );
+function itemLastDoneDayBefore(itemId, dateStr, ctx) {
+  if (!ctx?.itemDoneDays) {
+    return lastCompletionDayBefore(completedItemRunsBeforeStmt.all(itemId, `${dateStr} 00:00:00`), "started_at", dateStr);
+  }
+  const days = memoed(ctx.itemDoneDays, itemId, () => itemDoneStmt.all(itemId).map((r) => toOsloDateStr(r.started_at)).sort());
+  return latestDayBefore(days, dateStr);
+}
 const itemWeekdaysStmt = db.prepare("SELECT weekday FROM room_checklist_item_weekdays WHERE item_id = ?");
 const itemMonthsStmt = db.prepare("SELECT month FROM room_checklist_item_months WHERE item_id = ?");
 
@@ -146,11 +224,10 @@ const itemMonthsStmt = db.prepare("SELECT month FROM room_checklist_item_months 
 //   monthly_occurrence null); extended to a set of days (2026-09-21, "Kontor (kun ma+to)") since a
 //   task can legitimately need more than one specific day per week.
 // - none of the above: due every time the room is (the pre-existing default, unrestricted).
-export function isItemDueOn(item, dateStr) {
+export function isItemDueOn(item, dateStr, ctx) {
   if (item.interval_days != null) {
-    const last = lastCompletedItemStmt.get(item.id);
-    if (!last) return true;
-    const lastOsloDay = toOsloDateStr(last.started_at);
+    const lastOsloDay = itemLastDoneDayBefore(item.id, dateStr, ctx);
+    if (!lastOsloDay) return true;
     return daysBetween(lastOsloDay, dateStr) >= item.interval_days;
   }
   if (item.monthly_weekday != null && item.monthly_occurrence != null) {
@@ -158,15 +235,15 @@ export function isItemDueOn(item, dateStr) {
     const targetDay = nthWeekdayOfMonth(year, month - 1, item.monthly_weekday, item.monthly_occurrence);
     return targetDay === day;
   }
-  const months = itemMonthsStmt.all(item.id).map((r) => r.month);
+  const months = memoed(ctx?.itemMonths, item.id, () => itemMonthsStmt.all(item.id).map((r) => r.month));
   if (months.length > 0) {
     const [, month] = dateStr.split("-").map(Number);
     if (!months.includes(month)) return false;
-    const last = lastCompletedItemStmt.get(item.id);
-    if (!last) return true;
-    return toOsloDateStr(last.started_at) < `${dateStr.slice(0, 7)}-01`;
+    const lastOsloDay = itemLastDoneDayBefore(item.id, dateStr, ctx);
+    if (!lastOsloDay) return true;
+    return lastOsloDay < `${dateStr.slice(0, 7)}-01`;
   }
-  const weekdays = new Set(itemWeekdaysStmt.all(item.id).map((r) => r.weekday));
+  const weekdays = memoed(ctx?.itemWeekdays, item.id, () => new Set(itemWeekdaysStmt.all(item.id).map((r) => r.weekday)));
   if (weekdays.size === 0) return true;
   return weekdays.has(weekdayOf(dateStr));
 }
@@ -175,8 +252,8 @@ export function isItemDueOn(item, dateStr) {
 // when it materialises a day's run items, so this number is exactly what the cleaner will be
 // shown. Kept here rather than counted off an existing run, because a caller needs the answer
 // before any run exists for the day.
-export function dueItemCountOn(roomId, dateStr) {
-  return roomItemsStmt.all(roomId).filter((item) => isItemDueOn(item, dateStr)).length;
+export function dueItemCountOn(roomId, dateStr, ctx) {
+  return memoed(ctx?.roomItems, roomId, () => roomItemsStmt.all(roomId)).filter((item) => isItemDueOn(item, dateStr, ctx)).length;
 }
 
 const roomsForSiteStmt = db.prepare("SELECT * FROM rooms WHERE site_id = ? ORDER BY sort_order, id");
@@ -187,11 +264,12 @@ const lastCleanedStmt = db.prepare(
 );
 
 export function getRoomsForSite(siteId, dateStr) {
+  const ctx = newDueContext({ history: false }); // the room check and the task count below read the same rows
   return roomsForSiteStmt.all(siteId).map((room) => {
     const run = findRoomRunForDate(room.id, dateStr);
     return {
       ...room,
-      dueToday: isRoomDueOn(room, dateStr),
+      dueToday: isRoomDueOn(room, dateStr, ctx),
       status: getRoomStatusForDate(room.id, dateStr),
       lastCleanedAt: lastCleanedStmt.get(room.id)?.completed_at || null,
       itemCount: itemCountStmt.get(room.id).n,
@@ -205,7 +283,7 @@ export function getRoomsForSite(siteId, dateStr) {
       // says whether there is anything to do today. A room with tasks but none due must not be
       // signed off (see the guard in routes/rooms.js), while a room with no tasks at all is the
       // legitimate "went in, looked, signing for it" case and stays signable.
-      dueItemCount: dueItemCountOn(room.id, dateStr),
+      dueItemCount: dueItemCountOn(room.id, dateStr, ctx),
       // Lets a caller (the customer dashboard's "Godkjenn alle rom" card, 2026-09-21) act on a
       // room's run directly — e.g. POST /rooms/runs/:id/approve — without a separate day-detail
       // fetch just to learn which run_id today's activity landed in.
@@ -223,10 +301,12 @@ export function getRoomsForSite(siteId, dateStr) {
 // if the cleaner tapped that after finishing 2 of 29 rooms. This instead counts the rooms that
 // were actually due that day and how many of them were actually completed. Returns null for a
 // site with no rooms at all, so callers can tell "not room-based" apart from "room-based, 0 due".
-export function getRoomCompletionForSiteDate(siteId, dateStr) {
+// `ctx` (see newDueContext) lets a caller that asks about many days — the monthly report — share the
+// reads between them.
+export function getRoomCompletionForSiteDate(siteId, dateStr, ctx) {
   const rooms = roomsForSiteStmt.all(siteId);
   if (rooms.length === 0) return null;
-  const dueRooms = rooms.filter((room) => isRoomDueOn(room, dateStr));
+  const dueRooms = rooms.filter((room) => isRoomDueOn(room, dateStr, ctx));
   const completedCount = dueRooms.filter((room) => getRoomStatusForDate(room.id, dateStr) === "completed").length;
   return { dueCount: dueRooms.length, completedCount, totalRooms: rooms.length };
 }
@@ -242,13 +322,14 @@ export function getRoomGridForSiteMonth(siteId, year, month) {
   const totalDays = new Date(Date.UTC(year, month, 0)).getUTCDate();
   const today = todayInOslo();
   const runsByDate = {};
+  const ctx = newDueContext();
 
   const roomRows = rooms.map((room) => {
     const days = {};
     for (let day = 1; day <= totalDays; day++) {
       const dateStr = `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
       if (dateStr > today) break;
-      days[dateStr] = isRoomDueOn(room, dateStr) ? getRoomStatusForDate(room.id, dateStr) : "not_due";
+      days[dateStr] = isRoomDueOn(room, dateStr, ctx) ? getRoomStatusForDate(room.id, dateStr) : "not_due";
       if (!(dateStr in runsByDate)) runsByDate[dateStr] = findRunForSiteDate(siteId, dateStr)?.id || null;
     }
     return { id: room.id, name: room.name, responsible: room.responsible, days };
