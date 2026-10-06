@@ -476,6 +476,8 @@ authRouter.delete("/users/:id", requireAuth, requireRole("admin", "super_admin")
     // they are foreign keys too, and they blocked the delete just as silently.
     db.prepare("UPDATE training_courses SET created_by = NULL WHERE created_by = ?").run(id);
     db.prepare("UPDATE company_modules SET enabled_by = NULL WHERE enabled_by = ?").run(id);
+    // Hvem som fulgte opp et sjekkliste-avvik står også som navn på raden; lenken slippes.
+    db.prepare("UPDATE simple_checklist_answers SET followup_by = NULL WHERE followup_by = ?").run(id);
     db.prepare("DELETE FROM users WHERE id = ?").run(id);
   });
   deleteUser(req.params.id);

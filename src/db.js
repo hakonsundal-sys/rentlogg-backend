@@ -497,6 +497,50 @@ ensureColumn("room_runs", "approval_override_reason", "approval_override_reason 
 // rutene er de samme, og et firma uten rom har uansett ingenting å vise der. Se src/modules.js.
 ensureColumn("companies", "checklist_only", "checklist_only INTEGER NOT NULL DEFAULT 0");
 
+// Sjekk det: målepunkter. Samme form som room_checklist_items (se måleoppgavene): measure_unit satt
+// = punktet er en måling, grensene er valgfrie hver for seg. Grensene og enheten kopieres ned på
+// svaret ved oppstart, så en grense som endres senere aldri flytter dommen over en gammel måling.
+ensureColumn("simple_checklist_items", "measure_unit", "measure_unit TEXT");
+ensureColumn("simple_checklist_items", "measure_min", "measure_min REAL");
+ensureColumn("simple_checklist_items", "measure_max", "measure_max REAL");
+ensureColumn("simple_checklist_answers", "measure_unit", "measure_unit TEXT");
+ensureColumn("simple_checklist_answers", "measure_min", "measure_min REAL");
+ensureColumn("simple_checklist_answers", "measure_max", "measure_max REAL");
+ensureColumn("simple_checklist_answers", "measured_value", "measured_value REAL");
+// Oppfølging av et avvik: hva lederen gjorde med det, og hvem. Skrives én gang og låses — en
+// oppfølging som kan skrives om i etterkant er ikke dokumentasjon på at noe ble gjort.
+ensureColumn("simple_checklist_answers", "followup_action", "followup_action TEXT");
+ensureColumn("simple_checklist_answers", "followup_by", "followup_by INTEGER REFERENCES users(id)");
+ensureColumn("simple_checklist_answers", "followup_by_name", "followup_by_name TEXT");
+ensureColumn("simple_checklist_answers", "followup_at", "followup_at TEXT");
+
+// Sjekk det, runde 3. Frist og antall per dag på lista: «innen kl. 09:00», «2 ganger daglig»
+// (temperatur morgen og kveld). due_time er "HH:MM" i Europe/Oslo; times_per_day NULL betyr 1.
+ensureColumn("simple_checklists", "due_time", "due_time TEXT");
+ensureColumn("simple_checklists", "times_per_day", "times_per_day INTEGER");
+// QR-kode per liste, laget første gang noen ber om den. Unik indeks her og ikke i schema.sql:
+// schema.sql kjøres før ensureColumn, og på en eksisterende base finnes ikke kolonnen ennå da.
+ensureColumn("simple_checklists", "qr_token", "qr_token TEXT");
+db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_simple_checklists_qr ON simple_checklists(qr_token)");
+// Punkt som ikke kan sendes inn uten bilde. Kopieres ned på svaret som resten av oppsettet.
+ensureColumn("simple_checklist_items", "requires_photo", "requires_photo INTEGER NOT NULL DEFAULT 0");
+ensureColumn("simple_checklist_answers", "requires_photo", "requires_photo INTEGER NOT NULL DEFAULT 0");
+
+// Sjekk det, månedlige planer (se services/checklistSchedule.js). schedule_mode NULL = ukedager som
+// før, så eksisterende lister er uendret. month_day: 1–31, eller -1 for siste dag i måneden.
+ensureColumn("simple_checklists", "schedule_mode", "schedule_mode TEXT");
+ensureColumn("simple_checklists", "month_day", "month_day INTEGER");
+
+// Sjekk det, offline: en utfylling startet uten nett sendes inn i én forespørsel når telefonen får
+// dekning (POST /simple-checklists/:id/submit-complete). client_key er telefonens egen nøkkel for
+// utfyllingen; offline-køen kan sende samme forespørsel to ganger (svaret kom aldri fram), og
+// nøkkelen er det som gjør at den andre bare får tilbake den første i stedet for et duplikat.
+// client_completed_at er når den ble fylt ut på telefonen; submitted_at er når serveren fikk den.
+ensureColumn("simple_checklist_submissions", "client_key", "client_key TEXT");
+ensureColumn("simple_checklist_submissions", "completed_offline", "completed_offline INTEGER NOT NULL DEFAULT 0");
+ensureColumn("simple_checklist_submissions", "client_completed_at", "client_completed_at TEXT");
+db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_simple_checklist_submissions_client_key ON simple_checklist_submissions(company_id, client_key)");
+
 // Lookup indexes for the hot read paths. Last, because several cover columns added by ensureColumn
 // above — see the note at the top of dbIndexes.js.
 ensureIndexes(db);

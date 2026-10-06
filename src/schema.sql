@@ -861,3 +861,14 @@ CREATE INDEX IF NOT EXISTS idx_simple_checklist_submissions_company ON simple_ch
 CREATE INDEX IF NOT EXISTS idx_simple_checklist_submissions_list ON simple_checklist_submissions(checklist_id, work_date);
 CREATE INDEX IF NOT EXISTS idx_simple_checklist_answers_submission ON simple_checklist_answers(submission_id, sort_order);
 CREATE INDEX IF NOT EXISTS idx_simple_checklist_photos_submission ON simple_checklist_photos(submission_id);
+
+-- Sjekk det: innstillinger per firma for den daglige oppsummeringen på e-post. Én rad per firma,
+-- opprettet første gang en admin lagrer. Ingen rad = ingen e-post.
+CREATE TABLE IF NOT EXISTS simple_checklist_settings (
+  company_id INTEGER PRIMARY KEY REFERENCES companies(id),
+  -- Kommaseparerte adresser, validert i ruta.
+  report_recipients TEXT,
+  -- Klokketime i Europe/Oslo (0–23). NULL = 07.
+  report_hour INTEGER,
+  updated_at TEXT DEFAULT (datetime('now'))
+);

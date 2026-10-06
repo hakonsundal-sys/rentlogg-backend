@@ -1,6 +1,7 @@
 import { yesterdayInOslo } from "./schedule.js";
 import { sendDailyReports } from "./dailyReportJob.js";
 import { runBackup } from "./backup.js";
+import { sendChecklistDigestsForHour } from "./checklistDigest.js";
 
 // 07:00 Europe/Oslo is the default for any site that hasn't set its own report_send_hour (e.g.
 // a location whose report should land after its own opening routine instead) — see sites.js's
@@ -32,6 +33,14 @@ export function startDailyReportScheduler() {
         console.log(
           `Daglig rapport-utsending (kl ${String(hour).padStart(2, "0")}:00): ${results.sent} sendt, ${results.skipped} hoppet over, ${results.failed} feilet`
         );
+      }
+      // Sjekk det-oppsummeringene i samme time, men i egen try: en feil der skal ikke kunne stoppe
+      // renholdsrapportene over, og en uventet feil skal ikke bli en unhandled rejection.
+      try {
+        const sc = await sendChecklistDigestsForHour(hour);
+        if (sc.sent || sc.failed) console.log(`Sjekk det-oppsummering (kl ${hour}): ${sc.sent} sendt, ${sc.failed} feilet`);
+      } catch (err) {
+        console.error("Sjekk det-oppsummeringen feilet uventet:", err);
       }
     }
   }, 60_000);
