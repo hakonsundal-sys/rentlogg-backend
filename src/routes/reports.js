@@ -191,6 +191,8 @@ const QUALITY_ACTION_LABELS = {
   deviation_cause: "Årsak registrert",
   deviation_corrective: "Korrigerende tiltak registrert",
   deviation_closed: "Avvik lukket med signatur",
+  deviation_categorised: "Avvikskategori satt",
+  deviation_due_date: "Frist satt",
   deviation_deleted: "Avvik slettet",
   released_out_of_limits: "Frigitt tross måling utenfor grensen",
   approval_override: "Godkjent på kundens vegne",

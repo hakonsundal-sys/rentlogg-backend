@@ -182,7 +182,48 @@ function recomputeSiteStatus(siteId) {
   if (!stillOpen) db.prepare("UPDATE sites SET status = 'ok' WHERE id = ?").run(siteId);
 }
 
+// Avvikskategoriene fra styresaken. Nøkkelen lagres, etiketten vises — samme mønster som
+// STEP_TYPES i rooms.js, og frontend har sin egen kopi som MÅ holdes i synk med denne.
+// Backend er porten som faktisk avviser en ukjent verdi.
+//
+// Hvorfor dette er den ene endringen som låser opp resten: «gjentakende avvik» og «avvik per
+// type» står på styresakens liste over det systemet skal løse, og ingen av dem kan regnes ut av
+// fritekst. Uten kategori er trendanalyse umulig uansett hvor pent dashbordet tegnes.
+export const DEVIATION_CATEGORIES = {
+  hms: "HMS-avvik",
+  kvalitet: "Kvalitetsavvik",
+  kundeklage: "Kundeklage",
+  naestenulykke: "Nestenulykke",
+  forbedring: "Forbedringsforslag",
+};
+
 const DEVIATION_PATCH_FIELDS = ["title", "description", "priority"];
+
+// Tom streng betyr «fjern», ikke «ugyldig» — et avvik skal kunne settes tilbake til ukategorisert
+// av den som oppdager at forrige kategorisering var feil. Det er en del av å kunne rette seg.
+function readCategory(raw) {
+  const value = typeof raw === "string" ? raw.trim() : "";
+  if (!value) return { value: null };
+  if (!(value in DEVIATION_CATEGORIES)) {
+    return { error: { code: "deviation_category_invalid", error: "Ukjent avvikskategori." } };
+  }
+  return { value };
+}
+
+// ISO-dato, og den må være en ekte dato: "2026-02-31" parser i JS til 3. mars, og en frist som
+// stilltiende flytter seg er verre enn ingen frist.
+function readDueDate(raw) {
+  const value = typeof raw === "string" ? raw.trim() : "";
+  if (!value) return { value: null };
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return { error: { code: "deviation_due_date_invalid", error: "Fristen må være på formen 2026-10-31." } };
+  }
+  const d = new Date(`${value}T00:00:00Z`);
+  if (Number.isNaN(d.getTime()) || d.toISOString().slice(0, 10) !== value) {
+    return { error: { code: "deviation_due_date_invalid", error: "Fristen er ikke en gyldig dato." } };
+  }
+  return { value };
+}
 
 deviationsRouter.patch("/:id", requireAuth, requireRole("admin", "manager"), (req, res) => {
   const { deviation, status, code, error } = getDeviationScoped(req.params.id, req.user);
@@ -193,6 +234,48 @@ deviationsRouter.patch("/:id", requireAuth, requireRole("admin", "manager"), (re
     const setClause = fields.map((f) => `${f} = ?`).join(", ");
     const values = fields.map((f) => req.body[f]);
     db.prepare(`UPDATE deviations SET ${setClause} WHERE id = ?`).run(...values, req.params.id);
+  }
+
+  // Kategori og frist har egen behandling og ikke plass i DEVIATION_PATCH_FIELDS over: de
+  // valideres, og de LOGGES. Å omklassifisere et avvik i ettertid — en personskade som blir til
+  // et «forbedringsforslag» — er nøyaktig den endringen en revisor vil kunne se at noen gjorde,
+  // og av hvem. Derfor før og etter i kvalitetsloggen, i samme transaksjon som skrivingen.
+  if ("category" in req.body) {
+    const { value, error: catError } = readCategory(req.body.category);
+    if (catError) return res.status(400).json(catError);
+    if (value !== deviation.category) {
+      db.transaction(() => {
+        db.prepare("UPDATE deviations SET category = ? WHERE id = ?").run(value, req.params.id);
+        logQualityEvent({
+          user: req.user,
+          action: "deviation_categorised",
+          subjectType: "deviation",
+          subjectId: Number(req.params.id),
+          siteId: deviation.site_id,
+          beforeValue: deviation.category ? DEVIATION_CATEGORIES[deviation.category] : "Ikke satt",
+          afterValue: value ? DEVIATION_CATEGORIES[value] : "Ikke satt",
+        });
+      })();
+    }
+  }
+
+  if ("due_date" in req.body) {
+    const { value, error: dueError } = readDueDate(req.body.due_date);
+    if (dueError) return res.status(400).json(dueError);
+    if (value !== deviation.due_date) {
+      db.transaction(() => {
+        db.prepare("UPDATE deviations SET due_date = ? WHERE id = ?").run(value, req.params.id);
+        logQualityEvent({
+          user: req.user,
+          action: "deviation_due_date",
+          subjectType: "deviation",
+          subjectId: Number(req.params.id),
+          siteId: deviation.site_id,
+          beforeValue: deviation.due_date || "Ingen frist",
+          afterValue: value || "Ingen frist",
+        });
+      })();
+    }
   }
 
   if ("status" in req.body) {

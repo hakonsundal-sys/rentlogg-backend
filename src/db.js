@@ -115,6 +115,18 @@ ensureColumn("deviations", "corrective_action_by", "corrective_action_by TEXT");
 // gjort i forbifarten — dette er et navn noen har skrevet under med.
 ensureColumn("deviations", "closed_signature", "closed_signature TEXT");
 ensureColumn("deviations", "closed_at", "closed_at TEXT");
+
+// Kategori og frist. De to feltene styresaken ber om som ikke fantes, og de som gjør
+// trendanalyse mulig i det hele tatt: «gjentakende avvik» og «avvik per type» kan ikke regnes
+// ut av fritekst.
+//
+// NULLBAR MED VILJE, og den skal ikke etterfylles maskinelt. Et avvik meldt før kategoriene
+// fantes ble ikke kategorisert, og å gjette seg til en verdi i ettertid ville satt en påstand
+// inn i dokumentasjonen som ingen har tatt stilling til. Blindsonen i statistikken er ekte, og
+// den skal være synlig som «Ikke satt» heller enn skjult bak en antakelse.
+ensureColumn("deviations", "category", "category TEXT");
+// ISO-dato (YYYY-MM-DD), ikke tidsstempel: en frist på et avvik er en dag, ikke et klokkeslett.
+ensureColumn("deviations", "due_date", "due_date TEXT");
 ensureColumn("room_runs", "edited_at", "edited_at TEXT");
 ensureColumn("room_runs", "edited_by_initials", "edited_by_initials TEXT");
 ensureColumn("checklist_runs", "edited_at", "edited_at TEXT");
