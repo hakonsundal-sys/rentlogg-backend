@@ -39,11 +39,31 @@ uploadsRouter.get("/avatars/:filename", requireAuthQueryOrHeader, (req, res) => 
   sendStoredFile(res, "avatars", owner.avatar_url);
 });
 
+// How a stored file_path is matched against the requested filename. Every writer stores
+// path.join("uploads", name), i.e. "uploads/name" (or "uploads\name" on a Windows dev machine), so
+// the normal lookup is an exact match the photo/document indexes can answer in microseconds. The old
+// `instr(file_path, ?)` could not use any index and scanned every row of up to five tables per image
+// — one request per thumbnail. It is kept as a second pass (`legacy`) that runs only when nothing
+// matched exactly, so a row stored in some older form still resolves exactly as before.
+function matchOn(column, filename, legacy) {
+  return legacy
+    ? { sql: `instr(${column}, ?) > 0`, args: [filename] }
+    : { sql: `${column} IN (?, ?)`, args: [`uploads/${filename}`, `uploads\\${filename}`] };
+}
+
 uploadsRouter.get("/:filename", requireAuthQueryOrHeader, (req, res) => {
   const { filename } = req.params;
+  if (serveByFilename(req, res, filename, false)) return;
+  if (serveByFilename(req, res, filename, true)) return;
+  res.status(404).json({ code: "not_found", error: "Not found" });
+});
 
+// Looks the file up in each place it can live and applies that place's own access rule. Returns
+// true once it has answered (served the file or refused it), false when no row matched.
+function serveByFilename(req, res, filename, legacy) {
   // A photo hangs off exactly one of three parents (run/deviation/room_run) — join all three
   // and coalesce, same shape as getRunDetail/getDeviationScoped/getRoomRunScoped use elsewhere.
+  const byPhoto = matchOn("p.file_path", filename, legacy);
   const photo = db
     .prepare(
       `SELECT p.file_path,
@@ -57,26 +77,28 @@ uploadsRouter.get("/:filename", requireAuthQueryOrHeader, (req, res) => {
        LEFT JOIN room_runs rr ON rr.id = p.room_run_id
        LEFT JOIN rooms room ON room.id = rr.room_id
        LEFT JOIN sites rrs ON rrs.id = room.site_id
-       WHERE instr(p.file_path, ?) > 0`
+       WHERE ${byPhoto.sql}`
     )
-    .get(filename);
+    .get(...byPhoto.args);
 
   if (photo && path.basename(photo.file_path) === filename) {
     const allowed =
       req.user.role === "customer"
         ? photo.site_client_id === req.user.client_id
         : photo.site_company_id === req.user.company_id;
-    if (!allowed) return res.status(403).json({ code: "not_allowed", error: "Not allowed" });
-    return sendStoredFile(res, null, photo.file_path);
+    if (!allowed) return refuse(res);
+    sendStoredFile(res, null, photo.file_path);
+    return true;
   }
 
+  const byDoc = matchOn("sd.file_path", filename, legacy);
   const doc = db
     .prepare(
       `SELECT sd.file_path, sd.visibility, s.client_id, s.company_id
        FROM site_documents sd JOIN sites s ON s.id = sd.site_id
-       WHERE instr(sd.file_path, ?) > 0`
+       WHERE ${byDoc.sql}`
     )
-    .get(filename);
+    .get(...byDoc.args);
 
   if (doc && path.basename(doc.file_path) === filename) {
     const allowed =
@@ -84,8 +106,9 @@ uploadsRouter.get("/:filename", requireAuthQueryOrHeader, (req, res) => {
     // Mirrors GET /sites/:id/documents' own visibility filter — a staff-only document shouldn't
     // become fetchable by a customer just because they learned its filename some other way.
     const visibleTo = req.user.role === "customer" ? ["customer", "both"] : ["staff", "both"];
-    if (!allowed || !visibleTo.includes(doc.visibility)) return res.status(403).json({ code: "not_allowed", error: "Not allowed" });
-    return sendStoredFile(res, null, doc.file_path);
+    if (!allowed || !visibleTo.includes(doc.visibility)) return refuse(res);
+    sendStoredFile(res, null, doc.file_path);
+    return true;
   }
 
   // Training ("Opplæring") files, in the module's own two sensitivities. Both branches also require
@@ -95,6 +118,7 @@ uploadsRouter.get("/:filename", requireAuthQueryOrHeader, (req, res) => {
 
   // Course material: slide images, narration audio, the routine PDF attached to a course. Readable
   // by any staff member in the owning company — it's the training itself, not anyone's record of it.
+  const byMaterial = matchOn("file_path", filename, legacy);
   const material = db
     .prepare(
       `SELECT file_path, company_id FROM (
@@ -106,20 +130,20 @@ uploadsRouter.get("/:filename", requireAuthQueryOrHeader, (req, res) => {
          UNION ALL
          SELECT s.audio_path, c.company_id FROM training_slides s JOIN training_courses c ON c.id = s.course_id
            WHERE s.audio_path IS NOT NULL
-       ) WHERE instr(file_path, ?) > 0`
+       ) WHERE ${byMaterial.sql}`
     )
-    .get(filename);
+    .get(...byMaterial.args);
 
   if (material && path.basename(material.file_path) === filename) {
-    if (!trainingEnabled || material.company_id !== req.user.company_id) {
-      return res.status(403).json({ code: "not_allowed", error: "Not allowed" });
-    }
-    return sendStoredFile(res, null, material.file_path);
+    if (!trainingEnabled || material.company_id !== req.user.company_id) return refuse(res);
+    sendStoredFile(res, null, material.file_path);
+    return true;
   }
 
   // A record's evidence (an external course certificate) is personnel data, so it follows the
   // stricter rule the training routes themselves use: the person it belongs to, or an admin/manager
   // in the same company — never a colleague.
+  const byEvidence = matchOn("r.file_path", filename, legacy);
   const evidence = db
     .prepare(
       `SELECT r.file_path, r.user_id, c.company_id FROM
@@ -129,27 +153,29 @@ uploadsRouter.get("/:filename", requireAuthQueryOrHeader, (req, res) => {
           -- same rule rather than getting its own looser one.
           SELECT signature_path, user_id, course_id FROM training_records WHERE signature_path IS NOT NULL) r
        JOIN training_courses c ON c.id = r.course_id
-       WHERE instr(r.file_path, ?) > 0`
+       WHERE ${byEvidence.sql}`
     )
-    .get(filename);
+    .get(...byEvidence.args);
 
   if (evidence && path.basename(evidence.file_path) === filename) {
     const managesStaff = req.user.role === "admin" || req.user.role === "manager";
     const allowed =
       trainingEnabled && evidence.company_id === req.user.company_id && (evidence.user_id === req.user.id || managesStaff);
-    if (!allowed) return res.status(403).json({ code: "not_allowed", error: "Not allowed" });
-    return sendStoredFile(res, null, evidence.file_path);
+    if (!allowed) return refuse(res);
+    sendStoredFile(res, null, evidence.file_path);
+    return true;
   }
 
   // Sjekkliste-bilder. Samme regel som rutene i routes/simpleChecklists.js: ansatte i firmaet som
   // eier utfyllingen, aldri en kunde, og bare mens firmaet har modulen. Et utkast er bare eierens.
+  const byChecklist = matchOn("p.file_path", filename, legacy);
   const checklistPhoto = db
     .prepare(
       `SELECT p.file_path, s.company_id, s.user_id, s.submitted_at
        FROM simple_checklist_photos p JOIN simple_checklist_submissions s ON s.id = p.submission_id
-       WHERE instr(p.file_path, ?) > 0`
+       WHERE ${byChecklist.sql}`
     )
-    .get(filename);
+    .get(...byChecklist.args);
 
   if (checklistPhoto && path.basename(checklistPhoto.file_path) === filename) {
     const allowed =
@@ -157,9 +183,15 @@ uploadsRouter.get("/:filename", requireAuthQueryOrHeader, (req, res) => {
       isModuleEnabled(req.user.company_id, "checklist") &&
       checklistPhoto.company_id === req.user.company_id &&
       (checklistPhoto.submitted_at || checklistPhoto.user_id === req.user.id);
-    if (!allowed) return res.status(403).json({ code: "not_allowed", error: "Not allowed" });
-    return sendStoredFile(res, null, checklistPhoto.file_path);
+    if (!allowed) return refuse(res);
+    sendStoredFile(res, null, checklistPhoto.file_path);
+    return true;
   }
 
-  res.status(404).json({ code: "not_found", error: "Not found" });
-});
+  return false;
+}
+
+function refuse(res) {
+  res.status(403).json({ code: "not_allowed", error: "Not allowed" });
+  return true;
+}

@@ -24,7 +24,7 @@ export function gatherReportPhotos(runs) {
 
   const roomRunCandidatesStmt = db.prepare(
     `SELECT id, started_at FROM room_runs
-     WHERE room_id = ? AND date(started_at) BETWEEN date(?, '-1 day') AND date(?, '+1 day')`
+     WHERE room_id = ? AND started_at >= date(?, '-1 day') AND started_at < date(?, '+2 day')`
   );
   const roomPhotosStmt = db.prepare("SELECT * FROM photos WHERE room_run_id = ?");
 

@@ -65,6 +65,16 @@ export const digestRunLimiter = limiter({
   error: "For mange utsendinger. Prøv igjen senere.",
 });
 
+// Changing your own password checks the old one with bcrypt, which is deliberately slow. Without a
+// limit of its own, the general ceiling (2000 per 15 minutes) let one logged-in user keep the server
+// busy with it, and it also let a stolen session guess the current password at that rate.
+export const passwordChangeLimiter = limiter({
+  windowMs: 15 * 60 * 1000,
+  limit: 10,
+  code: "too_many_requests",
+  error: "For mange forsøk. Prøv igjen om litt.",
+});
+
 // Anonymous by nature, so it is bound by IP. Accepting an invitation is something a person does
 // once; anyone guessing tokens does it many times.
 export const invitationAcceptLimiter = limiter({

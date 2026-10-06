@@ -7,6 +7,7 @@ import { db } from "../db.js";
 import { requireAuth, requireRole, issueToken, bumpTokenVersion } from "../middleware/auth.js";
 import { safeOriginalName, normalizeImageOrientation, imageFileFilter } from "../utils/uploads.js";
 import { normalizeLanguage } from "../utils/languages.js";
+import { passwordChangeLimiter } from "../middleware/rateLimits.js";
 import { enabledModulesForCompany, isChecklistOnly } from "../modules.js";
 
 export const authRouter = Router();
@@ -47,7 +48,7 @@ const DUMMY_PASSWORD_HASH = bcrypt.hashSync("no-such-user-timing-guard", 10);
 // machine rather than just to the URL. Every other account (company admins, managers, cleaners,
 // customers) is created by an admin or through the invitation flow (see invitations.js).
 
-authRouter.post("/login", loginLimiter, (req, res) => {
+authRouter.post("/login", loginLimiter, async (req, res) => {
   // Every write path stores the email lower-cased, but this lookup compared it byte for byte, so
   // a phone that capitalises the first letter of a field — or a paste that carried a trailing
   // space — failed with a plain "invalid_credentials" that looks exactly like a wrong password.
@@ -65,7 +66,11 @@ authRouter.post("/login", loginLimiter, (req, res) => {
   // hash keeps the response time the same either way, so a timing difference can't be used to
   // enumerate which emails have accounts (an unknown email used to return near-instantly, since
   // `!user ||` short-circuited before bcrypt ever ran).
-  const passwordOk = bcrypt.compareSync(password, user?.password_hash || DUMMY_PASSWORD_HASH);
+  //
+  // The async compare, not compareSync: a compare costs ~70 ms of pure CPU, and the synchronous one
+  // held the only thread every user shares for all of it — twenty simultaneous wrong passwords
+  // stalled even /health for 1.4 s. The async version hands the thread back between rounds.
+  const passwordOk = await bcrypt.compare(password, user?.password_hash || DUMMY_PASSWORD_HASH);
   if (!user || !passwordOk) {
     return res.status(401).json({ code: "invalid_credentials", error: "Invalid email or password" });
   }
@@ -509,18 +514,18 @@ authRouter.patch("/me", requireAuth, (req, res) => {
 // co-admin), which left admins with no way to rotate their own credentials at all. Requires the
 // current password even though the caller is already authenticated: a JWT lives 12h, so a borrowed
 // or forgotten session shouldn't be enough to take the account over permanently.
-authRouter.patch("/me/password", requireAuth, (req, res) => {
+authRouter.patch("/me/password", requireAuth, passwordChangeLimiter, async (req, res) => {
   const { currentPassword, newPassword } = req.body;
-  if (!newPassword || newPassword.length < 8) {
+  if (typeof newPassword !== "string" || newPassword.length < 8) {
     return res.status(400).json({ code: "password_too_short_8", error: "Passordet må være minst 8 tegn." });
   }
 
   const user = db.prepare("SELECT password_hash FROM users WHERE id = ?").get(req.user.id);
-  if (!user || !bcrypt.compareSync(currentPassword || "", user.password_hash)) {
+  if (!user || !(await bcrypt.compare(typeof currentPassword === "string" ? currentPassword : "", user.password_hash))) {
     return res.status(403).json({ code: "current_password_wrong", error: "Nåværende passord er feil." });
   }
 
-  db.prepare("UPDATE users SET password_hash = ? WHERE id = ?").run(bcrypt.hashSync(newPassword, 10), req.user.id);
+  db.prepare("UPDATE users SET password_hash = ? WHERE id = ?").run(await bcrypt.hash(newPassword, 10), req.user.id);
   // Every other session under the old password ends — that is the point of changing it. This one
   // would end with them, so the response carries a fresh token for the caller to continue on.
   bumpTokenVersion(req.user.id);

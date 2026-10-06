@@ -2,7 +2,6 @@ import { Router } from "express";
 import multer from "multer";
 import path from "node:path";
 import Anthropic from "@anthropic-ai/sdk";
-import { PDFParse } from "pdf-parse";
 import { db } from "../db.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 import { translationLimiter, pdfImportLimiter } from "../middleware/rateLimits.js";
@@ -512,6 +511,10 @@ siteRoomsRouter.post("/import-pdf", requireAuth, requireRole("admin", "manager")
 
   let text;
   try {
+    // Loaded here, not at the top of the file: pdf-parse adds ~31 MB of resident memory when it is
+    // imported, and PDF import is an occasional admin action on an instance with 512 MB. The first
+    // import after a restart pays the load; every one after it reuses the cached module.
+    const { PDFParse } = await import("pdf-parse");
     const parser = new PDFParse({ data: req.file.buffer });
     const result = await parser.getText();
     await parser.destroy();

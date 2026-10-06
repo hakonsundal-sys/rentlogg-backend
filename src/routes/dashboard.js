@@ -33,7 +33,7 @@ dashboardRouter.get("/summary", requireAuth, requireRole("admin", "manager"), (r
       `SELECT r.*, s.name AS site_name, u.name AS cleaner_name FROM checklist_runs r
        JOIN sites s ON s.id = r.site_id
        JOIN users u ON u.id = r.cleaner_id
-       WHERE s.company_id = ? AND date(r.started_at) BETWEEN date(?, '-1 day') AND date(?, '+1 day')`
+       WHERE s.company_id = ? AND r.started_at >= date(?, '-1 day') AND r.started_at < date(?, '+2 day')`
     )
     .all(companyId, today, today);
   const runsToday = candidateRuns.filter((r) => toOsloDateStr(r.started_at) === today);

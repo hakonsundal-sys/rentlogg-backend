@@ -5,8 +5,14 @@ import { getRoomCompletionForSiteDate } from "./rooms.js";
 // Render runs in UTC, so "today" and any per-day matching must be computed in Europe/Oslo
 // local time, not server time, or "I DAG"/schedule matching drifts a day near midnight.
 
+// One formatter for the whole process. Building an Intl.DateTimeFormat costs about 100 µs, which is
+// 47 times what formatting with an existing one does, and toOsloDateStr runs once per candidate run
+// and per room-day when a report or the vaskeplan grid is built — thousands of times per request on
+// the single thread every user shares.
+const OSLO_DATE = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Oslo" });
+
 export function todayInOslo() {
-  return new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Oslo" }).format(new Date());
+  return OSLO_DATE.format(new Date());
 }
 
 // Only ever used for "what calendar day just ended" (e.g. a morning digest reporting on
@@ -15,7 +21,7 @@ export function todayInOslo() {
 export function yesterdayInOslo() {
   const d = new Date();
   d.setUTCDate(d.getUTCDate() - 1);
-  return new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Oslo" }).format(d);
+  return OSLO_DATE.format(d);
 }
 
 function weekdayOf(dateStr) {
@@ -24,7 +30,7 @@ function weekdayOf(dateStr) {
 
 export function toOsloDateStr(sqliteDatetime) {
   const iso = `${sqliteDatetime.replace(" ", "T")}Z`;
-  return new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Oslo" }).format(new Date(iso));
+  return OSLO_DATE.format(new Date(iso));
 }
 
 function daysInMonth(year, month) {
@@ -37,9 +43,14 @@ function formatDate(year, month, day) {
 
 // Runs are stored in UTC; pre-filter to a +/-1 day UTC window (cheap, index-friendly), then
 // resolve the exact Oslo calendar day in JS to avoid UTC/Oslo boundary mismatches.
+//
+// The window is written as a plain range on started_at, not `date(started_at) BETWEEN …`: wrapping
+// the column in date() hides it from the index, so this lookup scanned every run of the site, once
+// per day per site in the monthly report. "started_at < date(d, '+2 day')" selects exactly the rows
+// "date(started_at) <= date(d, '+1 day')" did.
 const candidateRunsStmt = db.prepare(
   `SELECT id, started_at, completed_at, gps_verified FROM checklist_runs
-   WHERE site_id = ? AND date(started_at) BETWEEN date(?, '-1 day') AND date(?, '+1 day')
+   WHERE site_id = ? AND started_at >= date(?, '-1 day') AND started_at < date(?, '+2 day')
    ORDER BY started_at DESC`
 );
 

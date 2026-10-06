@@ -116,7 +116,7 @@ invitationsRouter.get("/:token", (req, res) => {
 });
 
 // Public: no auth, creates the account and logs the new user in immediately.
-invitationsRouter.post("/:token/accept", invitationAcceptLimiter, (req, res) => {
+invitationsRouter.post("/:token/accept", invitationAcceptLimiter, async (req, res) => {
   const { invitation, error } = findValidInvitation(req.params.token);
   if (error) return res.status(error === "not_found" ? 404 : 410).json({ code: "invitation_invalid", error: "Invitasjonen er ikke gyldig" });
 
@@ -127,7 +127,16 @@ invitationsRouter.post("/:token/accept", invitationAcceptLimiter, (req, res) => 
   const existingUser = db.prepare("SELECT id FROM users WHERE email = ? COLLATE NOCASE").get(email);
   if (existingUser) return res.status(409).json({ code: "email_taken", error: "En konto med denne e-posten finnes allerede" });
 
-  const password_hash = bcrypt.hashSync(password, 10);
+  // Async for the same reason as the login compare: hashSync holds the shared thread for ~70 ms.
+  const password_hash = await bcrypt.hash(String(password), 10);
+  // Re-checked after the await: the request that arrived while this one was hashing may have taken
+  // the address (or used the same invitation link).
+  if (db.prepare("SELECT id FROM users WHERE email = ? COLLATE NOCASE").get(email)) {
+    return res.status(409).json({ code: "email_taken", error: "En konto med denne e-posten finnes allerede" });
+  }
+  if (db.prepare("SELECT status FROM invitations WHERE id = ?").get(invitation.id)?.status !== "pending") {
+    return res.status(410).json({ code: "invitation_invalid", error: "Invitasjonen er ikke gyldig" });
+  }
   const info = db
     .prepare("INSERT INTO users (name, email, password_hash, role, client_id, company_id) VALUES (?, ?, ?, ?, ?, ?)")
     .run(name, email, password_hash, invitation.role, invitation.client_id, invitation.company_id);

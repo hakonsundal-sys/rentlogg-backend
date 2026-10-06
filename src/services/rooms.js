@@ -43,7 +43,7 @@ const candidateRoomRunsStmt = db.prepare(
           ready_for_approval_at, approved_at, approved_by_initials, approved_by, approved_by_role,
           approval_override_reason
    FROM room_runs
-   WHERE room_id = ? AND date(started_at) BETWEEN date(?, '-1 day') AND date(?, '+1 day')
+   WHERE room_id = ? AND started_at >= date(?, '-1 day') AND started_at < date(?, '+2 day')
    ORDER BY started_at DESC`
 );
 
@@ -404,7 +404,7 @@ const monthlyChecklistItemsForSiteStmt = db.prepare(
 );
 const lastMonthlyItemCompletionStmt = db.prepare(
   `SELECT rr.started_at FROM room_run_items rri JOIN room_runs rr ON rr.id = rri.room_run_id
-   WHERE rri.room_checklist_item_id = ? AND rri.done = 1 AND date(rr.started_at) BETWEEN ? AND ?
+   WHERE rri.room_checklist_item_id = ? AND rri.done = 1 AND rr.started_at >= ? AND rr.started_at < date(?, '+1 day')
    ORDER BY rr.started_at DESC LIMIT 1`
 );
 

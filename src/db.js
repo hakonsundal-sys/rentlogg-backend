@@ -2,6 +2,7 @@ import Database from "better-sqlite3";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { ensureIndexes } from "./dbIndexes.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const dbFile = process.env.DB_FILE || "./data/rentlogg.db";
@@ -11,6 +12,13 @@ if (!fs.existsSync(dbDir)) fs.mkdirSync(dbDir, { recursive: true });
 
 export const db = new Database(dbFile);
 db.pragma("journal_mode = WAL");
+// NORMAL is the recommended pairing with WAL: a commit no longer waits for an fsync of its own, only
+// the WAL checkpoint does. Measured 0.69 ms -> 0.03 ms per commit locally, and every commit blocks
+// the one thread all users share. Cost: on a power cut or OS crash (not an app crash) the last few
+// transactions can be lost, never corrupted — and the nightly backup exists for exactly that case.
+db.pragma("synchronous = NORMAL");
+// A long-running reader can stop the WAL file from being reset; cap how big it is allowed to stay.
+db.pragma("journal_size_limit = 67108864");
 db.pragma("foreign_keys = ON");
 
 const schema = fs.readFileSync(path.join(__dirname, "schema.sql"), "utf-8");
@@ -488,3 +496,7 @@ ensureColumn("room_runs", "approval_override_reason", "approval_override_reason 
 // kunder, lokasjoner, vaskeplan eller renholdsavvik. Rent visningsvalg i frontend; dataene og
 // rutene er de samme, og et firma uten rom har uansett ingenting å vise der. Se src/modules.js.
 ensureColumn("companies", "checklist_only", "checklist_only INTEGER NOT NULL DEFAULT 0");
+
+// Lookup indexes for the hot read paths. Last, because several cover columns added by ensureColumn
+// above — see the note at the top of dbIndexes.js.
+ensureIndexes(db);

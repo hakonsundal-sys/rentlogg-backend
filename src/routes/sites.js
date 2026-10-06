@@ -284,7 +284,7 @@ sitesRouter.delete("/:id", requireAuth, requireRole("admin", "manager"), (req, r
 const previousRunsStmt = db.prepare(
   `SELECT r.id, r.started_at, r.note, r.signed_initials, u.name AS cleaner_name
    FROM checklist_runs r LEFT JOIN users u ON u.id = r.cleaner_id
-   WHERE r.site_id = ? AND date(r.started_at) <= date(?, '+1 day')
+   WHERE r.site_id = ? AND r.started_at < date(?, '+2 day')
    ORDER BY r.started_at DESC
    LIMIT 20`
 );
@@ -292,7 +292,7 @@ const roomNotesForDateStmt = db.prepare(
   `SELECT rr.note, rr.signed_initials, rr.started_at, ro.name AS room_name
    FROM room_runs rr JOIN rooms ro ON ro.id = rr.room_id
    WHERE ro.site_id = ? AND rr.note IS NOT NULL AND TRIM(rr.note) != ''
-     AND date(rr.started_at) BETWEEN date(?, '-1 day') AND date(?, '+1 day')
+     AND rr.started_at >= date(?, '-1 day') AND rr.started_at < date(?, '+2 day')
    ORDER BY ro.sort_order, ro.id`
 );
 

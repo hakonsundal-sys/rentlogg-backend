@@ -695,6 +695,16 @@ export function isValidDate(value) {
 // Oslo local time in the UI and converted here, since that's the clock the person actually read
 // off the wall — storing what they typed as if it were UTC would shift every shift by an hour or
 // two depending on the season.
+// Built once: constructing an Intl.DateTimeFormat costs ~100 µs, and these run per row of every
+// timesheet table and export, and up to four times per saved line.
+const OSLO_DATETIME_PARTS = new Intl.DateTimeFormat("en-GB", {
+  timeZone: "Europe/Oslo", year: "numeric", month: "2-digit", day: "2-digit",
+  hour: "2-digit", minute: "2-digit", hour12: false,
+});
+const OSLO_CLOCK = new Intl.DateTimeFormat("en-GB", {
+  timeZone: "Europe/Oslo", hour: "2-digit", minute: "2-digit", hour12: false,
+});
+
 export function osloTimeToUtcStamp(dateStr, timeStr) {
   if (!isValidDate(dateStr) || !/^\d{2}:\d{2}$/.test(timeStr)) return null;
   // Find the UTC instant whose Oslo wall clock reads dateStr/timeStr, by trying both plausible
@@ -703,10 +713,7 @@ export function osloTimeToUtcStamp(dateStr, timeStr) {
     const candidate = new Date(`${dateStr}T${timeStr}:00Z`);
     candidate.setUTCHours(candidate.getUTCHours() - offset);
     const stamp = candidate.toISOString().slice(0, 19).replace("T", " ");
-    const parts = new Intl.DateTimeFormat("en-GB", {
-      timeZone: "Europe/Oslo", year: "numeric", month: "2-digit", day: "2-digit",
-      hour: "2-digit", minute: "2-digit", hour12: false,
-    }).formatToParts(candidate);
+    const parts = OSLO_DATETIME_PARTS.formatToParts(candidate);
     const get = (type) => parts.find((p) => p.type === type).value;
     if (`${get("year")}-${get("month")}-${get("day")}` === dateStr && `${get("hour")}:${get("minute")}` === timeStr) {
       return stamp;
@@ -719,9 +726,7 @@ export function osloTimeToUtcStamp(dateStr, timeStr) {
 // to fill the edit form and the CSV.
 export function osloTimeOf(stamp) {
   if (!stamp) return "";
-  return new Intl.DateTimeFormat("en-GB", {
-    timeZone: "Europe/Oslo", hour: "2-digit", minute: "2-digit", hour12: false,
-  }).format(parseStamp(stamp));
+  return OSLO_CLOCK.format(parseStamp(stamp));
 }
 
 export function osloDateOf(stamp) {
