@@ -1509,6 +1509,105 @@ roomsRouter.patch("/runs/:runId/items/:itemId/approve", requireAuth, requireRole
   res.json({ ok: true });
 });
 
+// ── Etterkontroll ───────────────────────────────────────────────────────────────────────────
+//
+// OKVs egen kontroll av eget arbeid, utført av en teamleder etter at renholderen er ferdig og
+// uavhengig av om kunden skal godkjenne. Se db.js ved room_run_items.control_status for hvorfor
+// dette er et eget spor og ikke en gjenbruk av kundegodkjenningen.
+//
+// Hverken renholder eller kunde slipper til: en kontroll der utføreren kontrollerer seg selv er
+// ikke en kontroll, og kundens vurdering er det andre sporet. requireRole gjør dette til en ekte
+// port, ikke en skjult knapp.
+const CONTROL_STATUSES = { ok: "Godkjent", mangler: "Mangler", kritisk: "Kritisk avvik" };
+
+// Renholderen er ferdig når ett av de to feltene er satt: completed_at for et vanlig rom,
+// ready_for_approval_at for et rom som venter på kundegodkjenning. Å kontrollere et rom som
+// ikke er utført ennå gir ingen mening — da er det ingenting å kontrollere.
+function cleanerIsDone(roomRun) {
+  return !!(roomRun.completed_at || roomRun.ready_for_approval_at);
+}
+
+roomsRouter.patch("/runs/:runId/items/:itemId/control", requireAuth, requireRole("admin", "manager"), (req, res) => {
+  const { roomRun, status, code, error } = getRoomRunScoped(req.params.runId, req.user);
+  if (error) return res.status(status).json({ code, error });
+  if (!cleanerIsDone(roomRun)) {
+    return res.status(409).json({ code: "room_not_completed", error: "Rommet er ikke fullført ennå." });
+  }
+
+  const raw = typeof req.body?.status === "string" ? req.body.status.trim() : "";
+  if (raw && !(raw in CONTROL_STATUSES)) {
+    return res.status(400).json({ code: "control_status_invalid", error: "Ukjent kontrollstatus." });
+  }
+  const comment = (req.body?.comment || "").trim() || null;
+  // En mangel uten en setning om hva som manglet er ikke dokumentasjon. Samme regel som avvik i
+  // «Sjekk det»-modulen, og den gjelder begge de to ikke-godkjente statusene.
+  if (raw && raw !== "ok" && !comment) {
+    return res.status(400).json({ code: "control_comment_required", error: "Skriv hva som ikke var i orden." });
+  }
+  const name = (req.body?.name || "").trim();
+  if (raw && !name) {
+    return res.status(400).json({ code: "control_name_required", error: "Navn er påkrevd for å kontrollere." });
+  }
+
+  const result = db
+    .prepare(
+      `UPDATE room_run_items
+         SET control_status = ?, control_comment = ?,
+             control_at = CASE WHEN ? IS NULL THEN NULL ELSE datetime('now') END,
+             control_by = ?, control_by_name = ?
+       WHERE id = ? AND room_run_id = ?`
+    )
+    .run(raw || null, raw ? comment : null, raw || null, raw ? req.user.id : null, raw ? name : null, req.params.itemId, req.params.runId);
+  if (result.changes === 0) return res.status(404).json({ code: "not_found", error: "Not found" });
+  res.json({ ok: true });
+});
+
+// Signaturen på at hele rommet er etterkontrollert. Punktene bærer vurderingene; denne bærer at
+// noen står for at kontrollen faktisk er gjennomført — og den loggføres, fordi det er dette
+// steget produktet er oppkalt etter og det en revisor vil be om å få se.
+roomsRouter.post("/runs/:runId/control", requireAuth, requireRole("admin", "manager"), (req, res) => {
+  const { roomRun, status, code, error } = getRoomRunScoped(req.params.runId, req.user);
+  if (error) return res.status(status).json({ code, error });
+  if (!cleanerIsDone(roomRun)) {
+    return res.status(409).json({ code: "room_not_completed", error: "Rommet er ikke fullført ennå." });
+  }
+  if (roomRun.controlled_at) {
+    return res.status(409).json({ code: "room_already_controlled", error: "Rommet er allerede etterkontrollert." });
+  }
+  const name = (req.body?.name || "").trim();
+  if (!name) return res.status(400).json({ code: "control_name_required", error: "Navn er påkrevd for å signere kontrollen." });
+
+  const items = db.prepare("SELECT control_status FROM room_run_items WHERE room_run_id = ?").all(req.params.runId);
+  // Signaturen skal bety at hvert punkt faktisk er sett på. Et rom signert med halvparten
+  // uvurdert ville sagt «kontrollert» i dokumentasjonen uten at det var sant.
+  const uncontrolled = items.filter((i) => !i.control_status).length;
+  if (uncontrolled > 0) {
+    return res.status(409).json({
+      code: "control_incomplete",
+      error: `${uncontrolled} punkt mangler vurdering. Sett status på alle før du signerer.`,
+    });
+  }
+  const tally = (s) => items.filter((i) => i.control_status === s).length;
+
+  db.transaction(() => {
+    db.prepare(
+      "UPDATE room_runs SET controlled_at = datetime('now'), controlled_by = ?, controlled_by_name = ? WHERE id = ?"
+    ).run(req.user.id, name, req.params.runId);
+    logQualityEvent({
+      user: req.user,
+      action: "room_controlled",
+      subjectType: "room_run",
+      subjectId: Number(req.params.runId),
+      siteId: roomRun.room_site_id,
+      roomId: roomRun.room_id,
+      afterValue: name,
+      comment: `${roomRun.room_name}: ${tally("ok")} godkjent, ${tally("mangler")} mangler, ${tally("kritisk")} kritisk`,
+    });
+  })();
+
+  res.json({ ok: true, godkjent: tally("ok"), mangler: tally("mangler"), kritisk: tally("kritisk") });
+});
+
 // A free-text note for the whole room's visit — same granularity as its photos (one shared
 // list for the room, not per checklist item).
 roomsRouter.patch("/runs/:runId/note", requireAuth, requireRole("cleaner", "admin", "manager", "customer"), (req, res) => {

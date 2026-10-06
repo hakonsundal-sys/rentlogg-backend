@@ -254,6 +254,38 @@ ensureColumn("room_runs", "approved_by_initials", "approved_by_initials TEXT");
 // reviewing the exact same list the cleaner just went through.
 ensureColumn("room_run_items", "approved", "approved INTEGER DEFAULT 0");
 
+// ── Etterkontroll: OKVs EGEN kontroll av eget arbeid ────────────────────────────────────────
+//
+// Dette er et SEPARAT spor fra kundegodkjenningen over, og det er hele poenget. `approved` er
+// kundens signatur på at leveransen er akseptert. Dette er teamlederens kontroll av at den
+// holder — gjort før kunden ser den, og av en annen grunn.
+//
+// Å slå dem sammen ville ødelagt begge: en revisor som spør «hvem kontrollerte dette?» skal
+// ikke få «kunden godkjente det» til svar, og en kunde som godkjenner skal ikke dermed ha
+// utført OKVs internkontroll. Produktet heter «Dokumentert etterkontroll» etter nettopp dette
+// steget, og fram til nå fantes det bare som en nødutgang for en kunde man ikke fikk tak i.
+//
+// Tre tilstander, ikke to (styresakens krav): godkjent, mangler, kritisk avvik. Forskjellen
+// mellom de to siste er alvorlighet, ikke relevans — derfor ikke samme sett som «Sjekk det»
+// sitt ok/deviation/na, selv om formen er den samme. NULL betyr «ikke kontrollert ennå», som er
+// en ekte og vanlig tilstand og ikke en feil.
+ensureColumn("room_run_items", "control_status", "control_status TEXT");
+// Påkrevd når statusen ikke er 'ok'. En mangel uten en setning om hva som manglet er ikke
+// dokumentasjon, den er en påstand — samme regel som avvik i «Sjekk det».
+ensureColumn("room_run_items", "control_comment", "control_comment TEXT");
+ensureColumn("room_run_items", "control_at", "control_at TEXT");
+ensureColumn("room_run_items", "control_by", "control_by INTEGER REFERENCES users(id)");
+// Navnet skrives av, ikke slås opp. Samme konvensjon som signed_initials og de fire
+// avvikstrinnene: dokumentasjonen skal vise hvem som sto for kontrollen den dagen, også etter
+// at vedkommende har sluttet og brukeren er deaktivert.
+ensureColumn("room_run_items", "control_by_name", "control_by_name TEXT");
+
+// Selve signaturen på at hele rommet er etterkontrollert. Punktene over er vurderingene; dette
+// er at noen setter navnet sitt under at kontrollen er gjennomført.
+ensureColumn("room_runs", "controlled_at", "controlled_at TEXT");
+ensureColumn("room_runs", "controlled_by", "controlled_by INTEGER REFERENCES users(id)");
+ensureColumn("room_runs", "controlled_by_name", "controlled_by_name TEXT");
+
 // Selve måleverdien, pluss en kopi av grensene som gjaldt da den ble tatt.
 //
 // Kopien er poenget, ikke duplisering av latskap: endrer noen grenseverdien på oppgaven i

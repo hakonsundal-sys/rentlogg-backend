@@ -200,6 +200,7 @@ const QUALITY_ACTION_LABELS = {
   deviation_closed: "Avvik lukket med signatur",
   deviation_categorised: "Avvikskategori satt",
   deviation_due_date: "Frist satt",
+  room_controlled: "Rom etterkontrollert",
   deviation_deleted: "Avvik slettet",
   released_out_of_limits: "Frigitt tross måling utenfor grensen",
   approval_override: "Godkjent på kundens vegne",
