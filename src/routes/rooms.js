@@ -1509,6 +1509,65 @@ roomsRouter.patch("/runs/:runId/items/:itemId/approve", requireAuth, requireRole
   res.json({ ok: true });
 });
 
+// Arbeidslista til teamlederen: hvilke rom er utført og venter på etterkontroll.
+//
+// Dette er den viktigste ruta i hele etterkontrollen, og grunnen er praktisk: en kontroll som
+// må letes fram rom for rom blir ikke gjort. Den skal være det første man ser.
+//
+// Vinduet er dager tilbake i tid, ikke «i dag», fordi en teamleder tar igjen etterslep etter en
+// helg eller et sykefravær. Standard 14 dager; eldre enn det er ikke lenger daglig etterkontroll
+// og hører hjemme i historikken i stedet.
+roomsRouter.get("/awaiting-control", requireAuth, requireRole("admin", "manager"), (req, res) => {
+  const days = Math.min(Math.max(Number(req.query.days) || 14, 1), 90);
+
+  const rows = db
+    .prepare(
+      `SELECT rr.id, rr.room_id, rr.started_at, rr.completed_at, rr.ready_for_approval_at,
+              rr.signed_initials, rr.controlled_at, rr.controlled_by_name,
+              r.name AS room_name, r.area AS room_area,
+              s.id AS site_id, s.name AS site_name,
+              (SELECT COUNT(*) FROM room_run_items i WHERE i.room_run_id = rr.id) AS item_count,
+              (SELECT COUNT(*) FROM room_run_items i WHERE i.room_run_id = rr.id AND i.control_status IS NOT NULL) AS controlled_count,
+              (SELECT COUNT(*) FROM room_run_items i WHERE i.room_run_id = rr.id AND i.control_status = 'mangler') AS mangler_count,
+              (SELECT COUNT(*) FROM room_run_items i WHERE i.room_run_id = rr.id AND i.control_status = 'kritisk') AS kritisk_count
+         FROM room_runs rr
+         JOIN rooms r ON r.id = rr.room_id
+         JOIN sites s ON s.id = r.site_id
+        WHERE s.company_id = ?
+          AND (rr.completed_at IS NOT NULL OR rr.ready_for_approval_at IS NOT NULL)
+          AND COALESCE(rr.completed_at, rr.ready_for_approval_at) >= datetime('now', ?)
+        ORDER BY COALESCE(rr.completed_at, rr.ready_for_approval_at) DESC`
+    )
+    .all(req.user.company_id, `-${days} days`);
+
+  // Delt i to lister og ikke ett flagg: det teamlederen skal gjøre noe med, og det som er
+  // kvittert ut. Den første er arbeidslista, den andre er kvitteringen på at dagen er i havn.
+  res.json({
+    venter: rows.filter((r) => !r.controlled_at),
+    kontrollert: rows.filter((r) => r.controlled_at),
+  });
+});
+
+// Punktene i ett besøk, slik etterkontroll-flaten trenger dem. getRoomRunItems tar med
+// flervalg, målinger og kontrollfeltene, så teamlederen ser nøyaktig det renholderen krysset av.
+roomsRouter.get("/runs/:runId/items", requireAuth, requireRole("admin", "manager"), (req, res) => {
+  const { roomRun, status, code, error } = getRoomRunScoped(req.params.runId, req.user);
+  if (error) return res.status(status).json({ code, error });
+  res.json({
+    run: {
+      id: roomRun.id,
+      room_name: roomRun.room_name,
+      signed_initials: roomRun.signed_initials,
+      completed_at: roomRun.completed_at,
+      ready_for_approval_at: roomRun.ready_for_approval_at,
+      controlled_at: roomRun.controlled_at,
+      controlled_by_name: roomRun.controlled_by_name,
+      note: roomRun.note,
+    },
+    items: getRoomRunItems(req.params.runId),
+  });
+});
+
 // ── Etterkontroll ───────────────────────────────────────────────────────────────────────────
 //
 // OKVs egen kontroll av eget arbeid, utført av en teamleder etter at renholderen er ferdig og
