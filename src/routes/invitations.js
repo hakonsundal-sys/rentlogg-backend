@@ -73,15 +73,23 @@ function withComputedStatus(invitation) {
   return { ...invitation, status: isExpired ? "expired" : invitation.status };
 }
 
+// A super_admin has no company of their own, and `WHERE company_id = NULL` matches nothing in
+// SQL — so this list came back empty for them no matter how many invitations existed, including
+// the one they had just made. Inviting a new company's first admin is a super_admin-only job
+// (SelskaperPage sends you here to do it), so the one role that needs this list was the one role
+// that could never see it. They now see every company's, with the company named per row; everyone
+// else still sees only their own.
 invitationsRouter.get("/", requireAuth, requireRole("admin", "super_admin"), (req, res) => {
+  const seesAllCompanies = req.user.role === "super_admin";
   const rows = db
     .prepare(
-      `SELECT i.*, c.name AS client_name FROM invitations i
+      `SELECT i.*, c.name AS client_name, co.name AS company_name FROM invitations i
        LEFT JOIN clients c ON c.id = i.client_id
-       WHERE i.company_id = ?
+       LEFT JOIN companies co ON co.id = i.company_id
+       WHERE (? OR i.company_id = ?)
        ORDER BY i.created_at DESC`
     )
-    .all(req.user.company_id)
+    .all(seesAllCompanies ? 1 : 0, req.user.company_id)
     .map(withComputedStatus);
 
   res.json({
@@ -90,10 +98,14 @@ invitationsRouter.get("/", requireAuth, requireRole("admin", "super_admin"), (re
   });
 });
 
-invitationsRouter.delete("/:id", requireAuth, requireRole("admin"), (req, res) => {
+invitationsRouter.delete("/:id", requireAuth, requireRole("admin", "super_admin"), (req, res) => {
   const invitation = db.prepare("SELECT * FROM invitations WHERE id = ?").get(req.params.id);
   if (!invitation) return res.status(404).json({ code: "not_found", error: "Not found" });
-  if (invitation.company_id !== req.user.company_id) return res.status(403).json({ code: "not_allowed", error: "Not allowed" });
+  // A super_admin administers every tenant, so the company check is theirs to skip — the same
+  // split POST / already makes. For anyone else it is the tenant boundary and still applies.
+  if (req.user.role !== "super_admin" && invitation.company_id !== req.user.company_id) {
+    return res.status(403).json({ code: "not_allowed", error: "Not allowed" });
+  }
   if (invitation.status !== "pending") return res.status(409).json({ code: "invitation_used", error: "Invitation already used or revoked" });
 
   db.prepare("UPDATE invitations SET status = 'revoked' WHERE id = ?").run(req.params.id);
