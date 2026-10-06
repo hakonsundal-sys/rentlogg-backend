@@ -7,7 +7,7 @@ import { gatherReportPhotos, streamPhotosZip } from "../services/photos.js";
 import { getRunDetail, getVirtualDayDetail, canAccessRun } from "../services/runDetail.js";
 import { getRoomCompletionForSiteDate } from "../services/rooms.js";
 import { toOsloDateStr, todayInOslo, findRunForSiteDate } from "../services/schedule.js";
-import { safeOriginalName, compressUploadedPhoto, imageFileFilter, removeUploadedFile } from "../utils/uploads.js";
+import { safeOriginalName, compressUploadedPhoto, imageFileFilter, removeUploadedFile, photoKindFrom } from "../utils/uploads.js";
 import { logQualityEvent } from "../services/qualityLog.js";
 
 export const checklistsRouter = Router();
@@ -289,13 +289,22 @@ checklistsRouter.post("/runs/:id/complete", requireAuth, requireRole("cleaner", 
 });
 
 checklistsRouter.post("/runs/:id/photos", requireAuth, requireRole("cleaner", "admin", "manager"), upload.single("photo"), async (req, res) => {
+  // multer has already written the file by the time this runs, so every refusal below has to remove
+  // it again — otherwise a request that is turned away still fills the disk.
   const { status, code, error } = getRunScoped(req.params.id, req.user);
-  if (error) return res.status(status).json({ code, error });
+  if (error) {
+    if (req.file) removeUploadedFile(req.file.filename);
+    return res.status(status).json({ code, error });
+  }
   if (!req.file) return res.status(400).json({ code: "no_file_uploaded", error: "No file uploaded (field name must be 'photo')" });
+  const kind = photoKindFrom(req.body.kind);
+  if (!kind) {
+    removeUploadedFile(req.file.filename);
+    return res.status(400).json({ code: "invalid_photo_kind", error: "kind must be before, after or general" });
+  }
   // compressUploadedPhoto returns the name actually stored, which differs from the uploaded one
   // whenever the source wasn't already a .jpg — persist that, never req.file.filename.
   const storedName = await compressUploadedPhoto(process.env.UPLOADS_DIR || "uploads", req.file.filename);
-  const kind = req.body.kind || "general";
   const info = db
     .prepare("INSERT INTO photos (run_id, file_path, kind) VALUES (?, ?, ?)")
     .run(req.params.id, path.join("uploads", storedName), kind);

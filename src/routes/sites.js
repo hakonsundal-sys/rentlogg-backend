@@ -8,6 +8,7 @@ import { findRunForSiteDate, getRunStatusForSiteDate, todayInOslo, toOsloDateStr
 import { safeOriginalName, normalizeImageOrientation, documentFileFilter, removeUploadedFile } from "../utils/uploads.js";
 import { logQualityEvent } from "../services/qualityLog.js";
 import { haversineMeters } from "../utils/geo.js";
+import { weekdayFrom, assigneeFrom, INVALID_ASSIGNEE } from "../utils/schedules.js";
 import { startEntryForCheckin } from "../services/timeEntries.js";
 
 export const sitesRouter = Router();
@@ -416,15 +417,17 @@ sitesRouter.post("/:id/schedule", requireAuth, requireRole("admin", "manager"), 
   const { status: scopeStatus, error: scopeError } = getSiteScoped(req.params.id, req.user);
   if (scopeError) return res.status(scopeStatus).json({ error: scopeError });
 
-  const { weekday, assigned_cleaner_id } = req.body;
-  if (weekday === undefined || weekday === null || weekday < 0 || weekday > 6) {
+  const weekday = weekdayFrom(req.body?.weekday);
+  if (weekday === null) {
     return res.status(400).json({ code: "weekday_required", error: "weekday (0-6) is required" });
   }
+  const assignee = assigneeFrom(req.body?.assigned_cleaner_id, req.user.company_id);
+  if (assignee.error) return res.status(400).json(INVALID_ASSIGNEE);
 
   db.prepare(
     `INSERT INTO site_schedules (site_id, weekday, assigned_cleaner_id) VALUES (?, ?, ?)
      ON CONFLICT(site_id, weekday) DO UPDATE SET assigned_cleaner_id = excluded.assigned_cleaner_id`
-  ).run(req.params.id, weekday, assigned_cleaner_id || null);
+  ).run(req.params.id, weekday, assignee.value);
 
   const row = db
     .prepare(

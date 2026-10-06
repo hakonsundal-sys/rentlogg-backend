@@ -458,7 +458,20 @@ deviationsRouter.patch("/:id/approve", requireAuth, requireRole("customer"), (re
              ORDER BY started_at DESC LIMIT 1`
           )
           .get(deviation.room_id);
-        if (pendingRun) {
+        // A reading outside its limit holds the gate: releasing a room over a red number takes a
+        // stated reason (POST /rooms/runs/:id/approve asks for one and logs it as its own event).
+        // This side-effect path asks for nothing and logged nothing, so it let a customer
+        // release such a room by approving an unrelated resolved avvik. Left pending instead — the
+        // customer then approves the room itself, where the reason is required.
+        const outOfLimits = pendingRun && db
+          .prepare(
+            `SELECT 1 FROM room_run_items
+             WHERE room_run_id = ? AND measure_unit IS NOT NULL AND measured_value IS NOT NULL
+               AND ((measure_min IS NOT NULL AND measured_value < measure_min)
+                 OR (measure_max IS NOT NULL AND measured_value > measure_max)) LIMIT 1`
+          )
+          .get(pendingRun.id);
+        if (pendingRun && !outOfLimits) {
           // This closes a room's approval gate as a side effect of approving an avvik, so it has
           // to record who did it the same way POST /rooms/runs/:id/approve does — otherwise the
           // one approval path that nobody explicitly clicked "Godkjenn rom" for would be the one

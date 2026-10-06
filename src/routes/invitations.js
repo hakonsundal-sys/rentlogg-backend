@@ -14,7 +14,12 @@ const VALID_ROLES = ["admin", "manager", "cleaner", "customer"];
 // company's admin here). A regular admin/manager can only ever invite into their own company;
 // company_id from the request body is never trusted for them, only for super_admin.
 invitationsRouter.post("/", requireAuth, requireRole("admin", "super_admin"), (req, res) => {
-  const { email, role, client_id } = req.body;
+  const { role, client_id } = req.body;
+  // Lower-cased and trimmed like every other place an address is stored (login matches it that way).
+  // Without this, inviting "Anna@x.no" while "anna@x.no" existed passed the duplicate check — the
+  // column's UNIQUE is case-sensitive — and the accepted account could never log in, because login
+  // finds the older row first.
+  const email = String(req.body?.email ?? "").trim().toLowerCase();
   if (!email || !VALID_ROLES.includes(role)) {
     return res.status(400).json({ code: "email_and_role_required", error: "email and a valid role are required" });
   }
@@ -43,11 +48,13 @@ invitationsRouter.post("/", requireAuth, requireRole("admin", "super_admin"), (r
     }
   }
 
-  const existingUser = db.prepare("SELECT id FROM users WHERE email = ?").get(email);
+  const existingUser = db.prepare("SELECT id FROM users WHERE email = ? COLLATE NOCASE").get(email);
   if (existingUser) return res.status(409).json({ code: "email_taken", error: "En konto med denne e-posten finnes allerede" });
 
-  // One valid link per email at a time, so there's never ambiguity about which link works.
-  db.prepare("UPDATE invitations SET status = 'revoked' WHERE email = ? AND status = 'pending'").run(email);
+  // One valid link per email at a time, so there's never ambiguity about which link works. Only
+  // this company's own earlier invitation: the query used to revoke every company's pending invite
+  // for the address, so inviting someone another firm had already invited silently cancelled theirs.
+  db.prepare("UPDATE invitations SET status = 'revoked' WHERE email = ? COLLATE NOCASE AND company_id = ? AND status = 'pending'").run(email, companyId);
 
   const token = newQrToken();
   const info = db
@@ -116,13 +123,14 @@ invitationsRouter.post("/:token/accept", invitationAcceptLimiter, (req, res) => 
   const { name, password } = req.body;
   if (!name || !password) return res.status(400).json({ code: "name_and_password_required", error: "name and password are required" });
 
-  const existingUser = db.prepare("SELECT id FROM users WHERE email = ?").get(invitation.email);
+  const email = String(invitation.email).trim().toLowerCase();
+  const existingUser = db.prepare("SELECT id FROM users WHERE email = ? COLLATE NOCASE").get(email);
   if (existingUser) return res.status(409).json({ code: "email_taken", error: "En konto med denne e-posten finnes allerede" });
 
   const password_hash = bcrypt.hashSync(password, 10);
   const info = db
     .prepare("INSERT INTO users (name, email, password_hash, role, client_id, company_id) VALUES (?, ?, ?, ?, ?, ?)")
-    .run(name, invitation.email, password_hash, invitation.role, invitation.client_id, invitation.company_id);
+    .run(name, email, password_hash, invitation.role, invitation.client_id, invitation.company_id);
 
   db.prepare("UPDATE invitations SET status = 'used' WHERE id = ?").run(invitation.id);
 

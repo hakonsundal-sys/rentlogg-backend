@@ -23,9 +23,14 @@ const avatarUpload = multer({
 // Bounds brute-force/credential-stuffing attempts against /login — bcrypt's own cost (~50-100ms)
 // slows a single guess but doesn't stop a sustained attempt without something like this. Keyed
 // by IP, not email, so it can't be used to lock a real user out of their own account.
+//
+// Only FAILED attempts count. It used to count every login, so the eleventh person starting a shift
+// from the same Wi-Fi in a quarter of an hour was refused with a correct password — a crew arriving
+// together shares one address. A guesser still gets ten tries per address per window.
 const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   limit: 10,
+  skipSuccessfulRequests: true,
   standardHeaders: true,
   legacyHeaders: false,
   message: { code: "too_many_login_attempts", error: "For mange innloggingsforsøk. Prøv igjen om litt." },

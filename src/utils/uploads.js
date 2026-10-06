@@ -24,6 +24,15 @@ export function removeUploadedFile(filePath) {
   fsSync.rmSync(path.join(uploadsDir, path.basename(filePath)), { force: true });
 }
 
+// photos.kind is a CHECK-constrained column. The value comes straight from a multipart form field,
+// so anything else must be refused before the INSERT: it used to fail inside an async handler and
+// end the whole process. Returns the kind to store, or null when the caller sent something invalid.
+const PHOTO_KINDS = new Set(["before", "after", "general"]);
+export function photoKindFrom(raw) {
+  if (raw === undefined || raw === null || raw === "") return "general";
+  return typeof raw === "string" && PHOTO_KINDS.has(raw) ? raw : null;
+}
+
 // multer forwards a fileFilter's cb(error) straight into Express's error chain as that exact
 // error object (not wrapped as a MulterError) — this lets server.js's error handler tell "wrong
 // file type" apart from a genuinely unexpected error and answer with a clean 400 instead of 500.

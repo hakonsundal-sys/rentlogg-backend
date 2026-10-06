@@ -9,8 +9,9 @@ import { translationLimiter, pdfImportLimiter } from "../middleware/rateLimits.j
 import { todayInOslo } from "../services/schedule.js";
 import { getRoomsForSite, findOrCreateTodayRoomRun, findOrCreateRoomRunForDate, findRoomRunForDate, getMonthlyItemsForSite, getRoomGridForSiteMonth, getRoomRunItems, ensureRunItemOptions, measurementVerdict, parseMeasurement, contactSatisfied, contactRemainingSeconds, measurementRangeLabel } from "../services/rooms.js";
 import { isModuleEnabled } from "../modules.js";
-import { safeOriginalName, compressUploadedPhoto, imageFileFilter, removeUploadedFile, UploadRejectedError } from "../utils/uploads.js";
+import { safeOriginalName, compressUploadedPhoto, imageFileFilter, removeUploadedFile, photoKindFrom, UploadRejectedError } from "../utils/uploads.js";
 import { logQualityEvent } from "../services/qualityLog.js";
+import { weekdayFrom, assigneeFrom, INVALID_ASSIGNEE } from "../utils/schedules.js";
 import { translatePlanTexts, isTranslatableLanguage, isTranslationConfigured } from "../services/planTranslation.js";
 
 export const siteRoomsRouter = Router({ mergeParams: true });
@@ -1025,7 +1026,10 @@ roomsRouter.patch("/:id/items/:itemId", requireAuth, requireRole("admin", "manag
 });
 
 roomsRouter.delete("/:id/items/:itemId", requireAuth, requireRole("admin", "manager"), (req, res) => {
-  const { status, code, error } = getRoomScoped(req.params.id, req.user);
+  // getItemScoped, not just getRoomScoped: the transaction below clears schedules, options and run
+  // links by item id alone, so an item id belonging to another room (or another company) must be
+  // refused here — it used to strip a foreign task's weekdays and options while answering 200.
+  const { status, code, error } = getItemScoped(req.params.id, req.params.itemId, req.user);
   if (error) return res.status(status).json({ code, error });
 
   // room_run_items.room_checklist_item_id (added for the monthly-tasks overview, see services/
@@ -1135,7 +1139,12 @@ roomsRouter.delete("/:id/items/:itemId/options/:optionId", requireAuth, requireR
 
   // Past runs keep their own snapshot of this option (label and all) — only the link back to the
   // template row is cleared, same as a deleted task does for room_run_items.
+  // The option must belong to THIS item before anything is cleared: the link-clearing UPDATE below
+  // is keyed on the option id alone, so without the check a foreign option id was nulled in the run
+  // history even though the final delete (bound to the item) then answered 404.
   const deleteOption = db.transaction((optionId, itemId) => {
+    const owned = db.prepare("SELECT id FROM room_checklist_item_options WHERE id = ? AND item_id = ?").get(optionId, itemId);
+    if (!owned) return { changes: 0 };
     db.prepare("UPDATE room_run_item_options SET option_id = NULL WHERE option_id = ?").run(optionId);
     return db.prepare("DELETE FROM room_checklist_item_options WHERE id = ? AND item_id = ?").run(optionId, itemId);
   });
@@ -1167,17 +1176,19 @@ roomsRouter.post("/:id/schedule", requireAuth, requireRole("admin", "manager"), 
   const { status: scopeStatus, error: scopeError } = getRoomScoped(req.params.id, req.user);
   if (scopeError) return res.status(scopeStatus).json({ error: scopeError });
 
-  const { weekday, assigned_cleaner_id } = req.body;
-  if (weekday === undefined || weekday === null || weekday < 0 || weekday > 6) {
+  const weekday = weekdayFrom(req.body?.weekday);
+  if (weekday === null) {
     return res.status(400).json({ code: "weekday_required", error: "weekday (0-6) is required" });
   }
+  const assignee = assigneeFrom(req.body?.assigned_cleaner_id, req.user.company_id);
+  if (assignee.error) return res.status(400).json(INVALID_ASSIGNEE);
 
   const upsert = db.transaction(() => {
     db.prepare("UPDATE rooms SET interval_days = NULL, monthly_weekday = NULL, monthly_occurrence = NULL WHERE id = ?").run(req.params.id);
     db.prepare(
       `INSERT INTO room_schedules (room_id, weekday, assigned_cleaner_id) VALUES (?, ?, ?)
        ON CONFLICT(room_id, weekday) DO UPDATE SET assigned_cleaner_id = excluded.assigned_cleaner_id`
-    ).run(req.params.id, weekday, assigned_cleaner_id || null);
+    ).run(req.params.id, weekday, assignee.value);
   });
   upsert();
 
@@ -1663,13 +1674,25 @@ roomsRouter.post("/runs/:runId/approve", requireAuth, requireRole("customer", "a
 });
 
 roomsRouter.post("/runs/:runId/photos", requireAuth, requireRole("cleaner", "admin", "manager", "customer"), upload.single("photo"), async (req, res) => {
+  // multer has already written the file by the time this runs, so every refusal below has to remove
+  // it again — otherwise a request that is turned away still fills the disk.
   const { roomRun, status, code, error } = getRoomRunScoped(req.params.runId, req.user);
-  if (error) return res.status(status).json({ code, error });
+  if (error) {
+    if (req.file) removeUploadedFile(req.file.filename);
+    return res.status(status).json({ code, error });
+  }
   const ownError = requireCustomerOwnsRoom(req.user, roomRun.room_responsible);
-  if (ownError) return res.status(ownError.status).json({ error: ownError.error });
+  if (ownError) {
+    if (req.file) removeUploadedFile(req.file.filename);
+    return res.status(ownError.status).json({ error: ownError.error });
+  }
   if (!req.file) return res.status(400).json({ code: "no_file_uploaded", error: "No file uploaded (field name must be 'photo')" });
+  const kind = photoKindFrom(req.body.kind);
+  if (!kind) {
+    removeUploadedFile(req.file.filename);
+    return res.status(400).json({ code: "invalid_photo_kind", error: "kind must be before, after or general" });
+  }
   const storedName = await compressUploadedPhoto(process.env.UPLOADS_DIR || "uploads", req.file.filename);
-  const kind = req.body.kind || "general";
   const info = db
     .prepare("INSERT INTO photos (room_run_id, file_path, kind) VALUES (?, ?, ?)")
     .run(req.params.runId, path.join("uploads", storedName), kind);

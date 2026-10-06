@@ -1,4 +1,5 @@
 import "dotenv/config";
+import "./utils/asyncErrors.js";
 import express from "express";
 import cors from "cors";
 import helmet from "helmet";
@@ -24,7 +25,7 @@ import { chemicalsRouter } from "./routes/chemicals.js";
 import { trainingRouter } from "./routes/training.js";
 import { timeRouter } from "./routes/time.js";
 import { simpleChecklistsRouter } from "./routes/simpleChecklists.js";
-import { requireAuth, requireModule } from "./middleware/auth.js";
+import { requireAuth, requireRole, requireModule } from "./middleware/auth.js";
 import { apiLimiter } from "./middleware/rateLimits.js";
 import { startDailyReportScheduler, startBackupScheduler } from "./services/scheduler.js";
 import { hoursSinceLastGoodBackup } from "./services/backup.js";
@@ -193,7 +194,11 @@ app.use("/training", requireAuth, requireModule("training"), trainingRouter);
 // Same gating as training above. Note that stamping IN is NOT here — it happens inside the QR
 // check-in (POST /sites/checkin/:qrToken), which stays ungated for everyone and checks the module
 // itself via startEntryForCheckin.
-app.use("/time", requireAuth, requireModule("timeclock"), timeRouter);
+//
+// Customers are kept out here too: they carry the cleaning company's company_id, so without a role
+// gate the module check lets them through, and nine routes in time.js have no role check of their
+// own. A customer could create a payroll row that then showed up in the company's timesheet.
+app.use("/time", requireAuth, requireRole("admin", "manager", "cleaner"), requireModule("timeclock"), timeRouter);
 // Sjekklister: same gating at the mount. Not to be confused with /checklists above, which is the
 // old site-level checklist of the cleaning product.
 app.use("/simple-checklists", requireAuth, requireModule("checklist"), simpleChecklistsRouter);
@@ -202,6 +207,18 @@ app.use("/simple-checklists", requireAuth, requireModule("checklist"), simpleChe
 // camera HDR/high-res shots routinely exceed what a "reasonable" limit looks like on paper)
 // fell through to the generic 500 below with zero indication of what actually went wrong.
 app.use((err, req, res, next) => {
+  // Part of the response is already on its way (a PDF being streamed, say): nothing sensible can
+  // still be said, and Express's own handler closes the connection instead of leaving it hanging.
+  if (res.headersSent) return next(err);
+  // body-parser's own failures carry a 4xx status: malformed JSON, or a body over the size limit.
+  // They are the caller's mistake, not a server fault, so they must not look like a 500 (and must
+  // not print a stack trace into the log for every bad request).
+  if (err.type === "entity.too.large") {
+    return res.status(413).json({ code: "payload_too_large", error: "Forespørselen er for stor." });
+  }
+  if (err.type === "entity.parse.failed" || (Number.isInteger(err.status) && err.status >= 400 && err.status < 500)) {
+    return res.status(err.status || 400).json({ code: "bad_request", error: "Ugyldig forespørsel." });
+  }
   if (err instanceof multer.MulterError) {
     if (err.code === "LIMIT_FILE_SIZE") {
       return res.status(413).json({ code: "photo_too_large", error: "Bildet er for stort. Prøv et bilde under 20 MB." });
@@ -215,6 +232,15 @@ app.use((err, req, res, next) => {
   }
   console.error(err);
   res.status(500).json({ code: "internal_error", error: "Internal server error" });
+});
+
+// Backstop for a rejection that still escapes every handler (a scheduler job, a fire-and-forget
+// promise): log it and keep serving. The default on Node 22 is to end the process, which for a
+// single-instance API means every logged-in user is dropped over one failed side job. A genuine
+// uncaughtException is left alone on purpose — the process may be in a bad state, and a restart is
+// the right answer there.
+process.on("unhandledRejection", (reason) => {
+  console.error("Unhandled promise rejection:", reason);
 });
 
 const port = process.env.PORT || 4000;

@@ -77,7 +77,14 @@ reportsRouter.get("/sites/:id/pdf", requireAuth, requireRole("admin", "manager",
     embeddedAny = true;
     if (doc.y > doc.page.height - 250) doc.addPage();
     doc.fontSize(9).fillColor("gray").text(`${photo.created_at} — ${PHOTO_KIND_LABELS[photo.kind] || photo.kind}`);
-    doc.image(absolutePath, { fit: [220, 220] });
+    // pdfkit reads only JPEG and PNG. A photo in any other format (a HEIC the server could not
+    // convert, a corrupt file) makes image() throw — and by now the response is already streaming,
+    // so that throw left the PDF half-written and, unhandled, ended the whole process.
+    try {
+      doc.image(absolutePath, { fit: [220, 220] });
+    } catch {
+      doc.fontSize(9).fillColor("gray").text("(bildet kan ikke vises i PDF-en)");
+    }
     doc.moveDown();
   });
   if (!embeddedAny) doc.fontSize(10).fillColor("gray").text("Ingen bilder tilgjengelig.");
@@ -276,7 +283,11 @@ function isOutsideLimit(m) {
   return under || over;
 }
 
-function sendAuditZip(res, { site, from, to, companyName }) {
+// hideStaffNames: the caller is a customer. The audit trail is locked to admin/manager everywhere
+// else because each row says WHICH employee did a thing (see the comment above QUALITY_ACTION_LABELS),
+// and this ZIP used to hand customers the same file with the "Utført av" column intact. The events
+// themselves stay — they are the point of an audit export — only the person behind each one goes.
+function sendAuditZip(res, { site, from, to, companyName, hideStaffNames = false }) {
   const runs = db
     .prepare(
       `SELECT * FROM checklist_runs
@@ -405,12 +416,14 @@ function sendAuditZip(res, { site, from, to, companyName }) {
   });
   archive.append(`﻿${measLines.join("\r\n")}`, { name: "malinger.csv" });
 
-  const auditHeader = ["Tidspunkt", "Hendelse", "Rom", "Utført av", "Før", "Etter", "Kommentar"];
+  const auditHeader = hideStaffNames
+    ? ["Tidspunkt", "Hendelse", "Rom", "Før", "Etter", "Kommentar"]
+    : ["Tidspunkt", "Hendelse", "Rom", "Utført av", "Før", "Etter", "Kommentar"];
   const auditLines = [auditHeader.map(csvEscape).join(",")];
   auditRows.forEach((r) => {
     auditLines.push(
       [
-        r.occurred_at, r.action_label, r.room_name || "", r.user_name || "",
+        r.occurred_at, r.action_label, r.room_name || "", ...(hideStaffNames ? [] : [r.user_name || ""]),
         r.before_value || "", r.after_value || "", r.comment || "",
       ].map(csvEscape).join(",")
     );
@@ -450,5 +463,5 @@ reportsRouter.get("/sites/:id/revisjon.zip", requireAuth, requireRole("admin", "
   if (from > to) return res.status(400).json({ code: "period_reversed", error: "Fra-dato må være før til-dato." });
 
   const company = db.prepare("SELECT name FROM companies WHERE id = ?").get(site.company_id);
-  sendAuditZip(res, { site, from, to, companyName: company?.name });
+  sendAuditZip(res, { site, from, to, companyName: company?.name, hideStaffNames: req.user.role === "customer" });
 });
