@@ -206,6 +206,7 @@ const QUALITY_ACTION_LABELS = {
   photo_deleted: "Bilde slettet",
   room_deleted: "Rom slettet",
   site_deleted: "Lokasjon slettet",
+  time_entry_deleted: "Timeføring slettet",
 };
 
 function parseAuditQuery(req) {

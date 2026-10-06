@@ -19,6 +19,22 @@ import { logEntryEvent, orderIdForSite } from "./timeOrders.js";
 export const BILLING_MODES = ["actual", "fixed"];
 const MINUTES_PER_DAY = 24 * 60;
 
+// How long an open stamping can have been running and still be "the same shift" when the same
+// person scans again. A night shift 22:00–06:00 crosses midnight, so comparing calendar days alone
+// declared it over at 00:00 and wrote it off as a forgotten stamp-out. Twelve hours is longer than
+// any shift this business has, and short enough that yesterday's forgotten stamp-out (17:00 the day
+// before, scanned again at 06:00 = 13 h) is still recognised as forgotten rather than as a 13-hour
+// shift that would be paid.
+const SHIFT_CONTINUATION_MINUTES = 12 * 60;
+// A re-scan this soon after stamping OUT at the same place is the phone restoring a discarded tab,
+// or her re-opening the checklist — not a new shift. Starting one anyway left a phantom entry that,
+// at a fixed-frame site, was paid the whole frame for the minute it lasted.
+const REPLAY_WINDOW_MINUTES = 3;
+// A shift that has to cross midnight to make sense (end clock time earlier than start clock time)
+// is accepted only up to this length. Beyond it the likelier story is a typo, and the old
+// "end before start" refusal is the better answer.
+const MAX_WRAPPED_SHIFT_MINUTES = 16 * 60;
+
 // --- Time helpers ------------------------------------------------------------------------------
 
 // SQLite's datetime('now') is UTC with a space instead of a T; Date needs both fixed.
@@ -60,6 +76,10 @@ export function decimalHours(minutes) {
 // rather than to zero — the admin UI requires the number, but a hand-edited database shouldn't be
 // able to erase somebody's hours.
 export function billingForSite(site) {
+  // A shift booked on an order with no building (intern tid, kjøring, fravær) has no site, and so no
+  // rule: it is paid by the clock. The callers used to hand this a missing row, which threw — and
+  // took the cleaner's next check-in and her stamp-out down with it.
+  if (!site) return { billing_mode: "actual", fixed_minutes: null };
   const fixed = site.time_billing_mode === "fixed" && site.time_fixed_minutes > 0;
   return {
     billing_mode: fixed ? "fixed" : "actual",
@@ -167,7 +187,11 @@ function closeDanglingEntries(userId, workDate, at) {
   const markStale = db.prepare("UPDATE time_entries SET auto_closed_reason = 'stale' WHERE id = ?");
 
   for (const entry of open) {
-    if (entry.work_date !== workDate) {
+    // An earlier calendar day is not by itself "she forgot": a night shift started at 22:00 is still
+    // the same shift at 00:30. Only an entry that has been running longer than any real shift is
+    // written off.
+    const runningFor = minutesBetween(entry.started_at, at);
+    if (entry.work_date !== workDate && runningFor >= SHIFT_CONTINUATION_MINUTES) {
       markStale.run(entry.id);
       logEntryEvent({
         entryId: entry.id, companyId: entry.company_id, user: null, action: "auto_closed",
@@ -186,6 +210,14 @@ function closeDanglingEntries(userId, workDate, at) {
     });
   }
 }
+
+// A shift she herself stamped out of (no auto_closed_reason) at this site within the last few minutes.
+const recentlyClosedStmt = db.prepare(
+  `SELECT id FROM time_entries
+   WHERE user_id = ? AND site_id = ? AND source = 'qr' AND ended_at IS NOT NULL AND auto_closed_reason IS NULL
+     AND ended_at >= datetime('now', ?)
+   ORDER BY ended_at DESC LIMIT 1`
+);
 
 const insertEntryStmt = db.prepare(
   `INSERT INTO time_entries (company_id, site_id, order_id, user_id, work_date, started_at, source, run_id,
@@ -206,8 +238,16 @@ export function startEntryForCheckin({ site, user, latitude, longitude, runId })
   const at = nowStamp();
   const workDate = todayInOslo();
 
-  const alreadyHere = openEntriesForUserStmt.all(user.id).find((e) => e.site_id === site.id && e.work_date === workDate);
+  const alreadyHere = openEntriesForUserStmt
+    .all(user.id)
+    .find((e) => e.site_id === site.id && (e.work_date === workDate || minutesBetween(e.started_at, at) < SHIFT_CONTINUATION_MINUTES));
   if (alreadyHere) return getEntry(alreadyHere.id);
+
+  // She stamped out here a moment ago and the same scan arrives again: the offline queue replaying
+  // it, or a restored tab re-running its check-in. Hand back the finished entry instead of opening
+  // a second shift (see REPLAY_WINDOW_MINUTES).
+  const justClosed = recentlyClosedStmt.get(user.id, site.id, `-${REPLAY_WINDOW_MINUTES} minutes`);
+  if (justClosed) return getEntry(justClosed.id);
 
   closeDanglingEntries(user.id, workDate, at);
 
@@ -255,7 +295,7 @@ export function stopEntry(entry, { latitude, longitude, pauseMinutes = 0 }) {
   stopEntryStmt.run(
     at, actual, pause, payableMinutes({ ...billing, actual_minutes: actual, pause_minutes: pause }),
     billing.billing_mode, billing.fixed_minutes,
-    isWithinSiteRadius(site, latitude, longitude), latitude ?? null, longitude ?? null, entry.id
+    site ? isWithinSiteRadius(site, latitude, longitude) : 0, latitude ?? null, longitude ?? null, entry.id
   );
   // The shift now has a duration, so it can finally be written as a line on the company's default
   // lønnsart — which is the form payroll reads it in.
@@ -678,17 +718,65 @@ export function replaceLines(entry, lines, companyId) {
 // which is a real night shift here, not an error — unlike the whole-entry check in validateInterval,
 // a single line carries no date of its own to tell the two apart.
 export function lineMinutes(startTime, endTime) {
-  if (!/^\d{2}:\d{2}$/.test(startTime || "") || !/^\d{2}:\d{2}$/.test(endTime || "")) return null;
+  if (!isValidClock(startTime) || !isValidClock(endTime)) return null;
   const [sh, sm] = startTime.split(":").map(Number);
   const [eh, em] = endTime.split(":").map(Number);
   const diff = eh * 60 + em - (sh * 60 + sm);
   return diff < 0 ? diff + 24 * 60 : diff;
 }
 
+// The same duration, but measured on the real clock of that working day. The plain version above is
+// wall-clock arithmetic, which is wrong on the two nights a year the clocks change: 01:00–04:00 is
+// three hours on paper, two on the night of 29 March and four on 25 October.
+export function lineMinutesOn(dateStr, startTime, endTime) {
+  const plain = lineMinutes(startTime, endTime);
+  if (!plain || !isValidDate(dateStr)) return plain;
+  const start = osloTimeToUtcStamp(dateStr, startTime);
+  const sameDay = osloTimeToUtcStamp(dateStr, endTime);
+  // A clock time that does not exist that night (02:30 when the clocks jump from 02:00 to 03:00) has
+  // no real instant; the wall-clock reading is the only answer there is.
+  if (!start || !sameDay) return plain;
+  const end = sameDay > start ? sameDay : osloTimeToUtcStamp(nextDate(dateStr), endTime);
+  if (!end) return plain;
+  const real = minutesBetween(start, end);
+  return real > 0 && real <= MINUTES_PER_DAY ? real : plain;
+}
+
 // --- Validation ----------------------------------------------------------------------------------
 
+// A real calendar day. The regex alone accepted "2026-13-45", which then reached new Date() and
+// threw inside the handler: a 500 on the endpoint a cleaner books her own hours through.
 export function isValidDate(value) {
-  return typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value);
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const parsed = new Date(`${value}T00:00:00Z`);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+}
+
+function isValidClock(value) {
+  if (typeof value !== "string" || !/^\d{2}:\d{2}$/.test(value)) return false;
+  const [h, m] = value.split(":").map(Number);
+  return h <= 23 && m <= 59;
+}
+
+export function nextDate(dateStr) {
+  const d = new Date(`${dateStr}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + 1);
+  return d.toISOString().slice(0, 10);
+}
+
+// The end of a shift typed as a clock time, on the working day it started. An end that comes out
+// BEFORE the start means the shift ran past midnight (22:00–06:00), so it lands on the next day —
+// up to MAX_WRAPPED_SHIFT_MINUTES, beyond which it is left on the same day and refused as the typo
+// it most likely is. Compared at minute precision: a QR stamp carries seconds, a typed time does not,
+// and 10:00 typed against a 10:00:30 start must not turn into a 24-hour shift.
+export function endStampFor(workDate, startedAt, endTime) {
+  const sameDay = osloTimeToUtcStamp(workDate, endTime);
+  if (!sameDay) return null;
+  const startMinute = `${String(startedAt).slice(0, 16)}:00`;
+  if (sameDay >= startMinute) return sameDay;
+  const nextDay = osloTimeToUtcStamp(nextDate(workDate), endTime);
+  if (nextDay && minutesBetween(startedAt, nextDay) <= MAX_WRAPPED_SHIFT_MINUTES) return nextDay;
+  return sameDay;
 }
 
 // "HH:MM" as typed in the admin's edit form, combined with the entry's own working day. Kept in
@@ -706,7 +794,7 @@ const OSLO_CLOCK = new Intl.DateTimeFormat("en-GB", {
 });
 
 export function osloTimeToUtcStamp(dateStr, timeStr) {
-  if (!isValidDate(dateStr) || !/^\d{2}:\d{2}$/.test(timeStr)) return null;
+  if (!isValidDate(dateStr) || !isValidClock(timeStr)) return null;
   // Find the UTC instant whose Oslo wall clock reads dateStr/timeStr, by trying both plausible
   // offsets — simpler and more robust across DST than hardcoding +01/+02.
   for (const offset of [0, 1, 2, 3]) {

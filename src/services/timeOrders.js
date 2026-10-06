@@ -193,12 +193,16 @@ export function approvalStateFor(entry, levels) {
     approved_at: doneByLevel.get(level.id)?.approved_at || null,
   }));
   const pending = steps.filter((s) => s.required && !s.approved);
+  const approvedCount = steps.filter((s) => s.approved).length;
   return {
     steps,
     next_level_id: pending[0]?.level_id ?? null,
     next_level_name: pending[0]?.name ?? null,
-    fully_approved: pending.length === 0 && steps.length > 0,
-    approved_count: steps.filter((s) => s.approved).length,
+    // "Every required level has signed" is vacuously true when no level is required, which marked a
+    // shift nobody had looked at as approved — and turned an un-approve of such a shift into an
+    // approval. Somebody has to have signed.
+    fully_approved: pending.length === 0 && steps.length > 0 && approvedCount > 0,
+    approved_count: approvedCount,
     required_count: steps.filter((s) => s.required).length,
   };
 }

@@ -5,13 +5,15 @@ import { todayInOslo } from "../services/schedule.js";
 import { csvEscape } from "../utils/csv.js";
 import { sendTimesheetPdf, sendXlsx } from "../services/timeExport.js";
 import {
-  computePlannedVsActual, decimalHours, findOpenEntry, formatMinutes, getEntry,
-  findOverlap, getLines, isValidDate, lineMinutes, listEntries, listTimeTypes, minutesBetween, nowStamp,
+  computePlannedVsActual, decimalHours, endStampFor, findOpenEntry, formatMinutes, getEntry,
+  findOverlap, getLines, isValidDate, lineMinutesOn, listEntries, listTimeTypes, minutesBetween, nowStamp,
   osloTimeOf, overlapMessage,
   osloTimeToUtcStamp, payableMinutes, replaceLines, seedDefaultTimeTypes, stopEntry, validatePause, writeStampLine,
   backfillMissingLines,
   summarizeByUser, validateInterval,
 } from "../services/timeEntries.js";
+import { isPeriodLocked, PERIOD_LOCKED, recordPeriodLock } from "../services/timeLocks.js";
+import { logQualityEvent } from "../services/qualityLog.js";
 import {
   approvalLevelForUser, approvalStateFor, approvalsForEntry, clearApproval, getOrder,
   listApprovalLevels, listOrders, listProjects, listUserLevels, logEntryEvent, logForEntry,
@@ -52,6 +54,50 @@ function getEntryScoped(entryId, user) {
 function lockGuard(entry) {
   if (!entry.locked) return null;
   return { status: 409, code: "entry_locked", error: "Perioden er låst. Lås den opp for å endre." };
+}
+
+// A database id out of a query string or a JSON body, or null. Anything that is not a plain positive
+// whole number — an array from ?user_id[]=1&user_id[]=2, an object, "abc" — used to reach the SQL
+// binding as-is, where better-sqlite3 refuses it with a TypeError and the caller got a 500.
+function asId(value) {
+  if (typeof value !== "string" && typeof value !== "number") return null;
+  const n = Number(value);
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
+// The filters the timesheet UI sends along with a bulk action (in the body, same names as the list
+// query). Used by both "godkjenn alle" and "lås perioden" so that what they act on is exactly what
+// the screen is showing: the lock honoured two of the five and the approve three, so filtering to one
+// team and pressing "Lås perioden" locked every employee in the company.
+//
+// A filter that was sent but cannot be read (an object, "abc") is refused rather than dropped: the
+// act it narrows is a lock or an approval, and ignoring the narrowing silently widens it to every
+// employee in the company. Returns { error } for the route to answer with, or the filters.
+function bulkFilters(source, companyId) {
+  const out = { companyId };
+  for (const key of ["user_id", "site_id", "order_id", "team_id", "employee_group_id"]) {
+    const raw = source?.[key];
+    if (raw === undefined || raw === null || raw === "") {
+      out[key] = null;
+      continue;
+    }
+    const id = asId(raw);
+    if (id == null) return { error: { code: "invalid_filter", error: `Ugyldig filter: ${key}.` } };
+    out[key] = id;
+  }
+  return out;
+}
+
+// SQL conditions (against time_entries, unaliased) for the same filters.
+function bulkConditions(f) {
+  const where = [];
+  const params = [];
+  if (f.user_id) { where.push("user_id = ?"); params.push(f.user_id); }
+  if (f.site_id) { where.push("site_id = ?"); params.push(f.site_id); }
+  if (f.order_id) { where.push("order_id = ?"); params.push(f.order_id); }
+  if (f.team_id) { where.push("user_id IN (SELECT id FROM users WHERE company_id = ? AND team_id = ?)"); params.push(f.companyId, f.team_id); }
+  if (f.employee_group_id) { where.push("user_id IN (SELECT id FROM users WHERE company_id = ? AND employee_group_id = ?)"); params.push(f.companyId, f.employee_group_id); }
+  return { where, params };
 }
 
 // Default window: the current month, which is what both the admin's Timer page and a cleaner's own
@@ -100,7 +146,9 @@ function matchesStaffFilters(req) {
 function normalizeMinutes(value) {
   if (value == null || value === "") return null;
   const minutes = Number(value);
-  if (!Number.isInteger(minutes) || minutes < 0) return false;
+  // Capped at a day: "75" typed for 7,5 timer became 4500 minutes, ending three days later, and went
+  // straight into payroll.
+  if (!Number.isInteger(minutes) || minutes < 0 || minutes > 24 * 60) return false;
   return minutes;
 }
 
@@ -108,7 +156,7 @@ function normalizeMinutes(value) {
 // asks for; an admin/driftsleder may filter to one person or see everyone.
 function resolveUserFilter(req) {
   if (!managesTime(req.user)) return req.user.id;
-  return req.query.user_id || null;
+  return asId(req.query.user_id);
 }
 
 // --- The cleaner's own view ----------------------------------------------------------------------
@@ -172,8 +220,8 @@ timeRouter.get("/entries", requireAuth, (req, res) => {
   const { from, to } = parseRange(req);
   const entries = listEntries({
     companyId: req.user.company_id, from, to,
-    userId: resolveUserFilter(req), siteId: req.query.site_id || null,
-    orderId: req.query.order_id || null,
+    userId: resolveUserFilter(req), siteId: asId(req.query.site_id),
+    orderId: asId(req.query.order_id),
     approval: ["approved", "pending"].includes(req.query.approval) ? req.query.approval : null,
   }).filter(matchesStaffFilters(req)).map(withApproval(req.user.company_id));
   // totals carries the per-lønnsart breakdown the Ansattvisning renders, so the timesheet and the
@@ -189,7 +237,7 @@ timeRouter.get("/planned", requireAuth, requireRole("admin", "manager"), (req, r
     from, to,
     rows: computePlannedVsActual({
       companyId: req.user.company_id, from, to,
-      siteId: req.query.site_id || null, userId: req.query.user_id || null,
+      siteId: asId(req.query.site_id), userId: asId(req.query.user_id),
     }),
   });
 });
@@ -231,6 +279,23 @@ function syncApprovalSummary(entryId, companyId) {
     entryId
   );
   return state;
+}
+
+// The summary on each shift (approved_at) is derived from the ladder, so changing the ladder — a new
+// required level, an existing one made optional or removed — leaves it stale: shifts signed under
+// the old ladder stayed in the "godkjent" filter and the export while the ladder said they still
+// waited for a signature. Re-derived here for every shift that carries ladder signatures. Shifts
+// without any (approved before levels existed, where approved_at is all there is) and locked shifts
+// are left exactly as they are: the first have no ladder to derive from, the second are final.
+function resyncApprovalSummaries(companyId) {
+  const ids = db
+    .prepare(
+      `SELECT t.id FROM time_entries t
+       WHERE t.company_id = ? AND t.locked_at IS NULL
+         AND EXISTS (SELECT 1 FROM time_entry_approvals a WHERE a.entry_id = t.id)`
+    )
+    .all(companyId);
+  db.transaction(() => ids.forEach((r) => syncApprovalSummary(r.id, companyId)))();
 }
 
 timeRouter.post("/entries/:id/approve", requireAuth, requireRole("admin", "manager"), (req, res) => {
@@ -290,7 +355,7 @@ timeRouter.post("/entries/:id/reject", requireAuth, requireRole("admin", "manage
 // signed. Skips what it cannot legitimately touch and says how many, rather than silently doing
 // less than the button promised.
 timeRouter.post("/approve", requireAuth, requireRole("admin", "manager"), (req, res) => {
-  const { from, to, approved, user_id, site_id, order_id } = req.body;
+  const { from, to, approved } = req.body;
   if (!isValidDate(from) || !isValidDate(to)) {
     return res.status(400).json({ code: "invalid_date", error: "from og to må være datoer (YYYY-MM-DD)." });
   }
@@ -300,42 +365,72 @@ timeRouter.post("/approve", requireAuth, requireRole("admin", "manager"), (req, 
   const level = approverLevel(req, res);
   if (!level) return;
 
+  // All five filters the screen can carry, not three of them: filtering to one team and signing "the
+  // selection" signed every team.
+  const f = bulkFilters(req.body, req.user.company_id);
+  if (f.error) return res.status(400).json(f.error);
+  const staffMatch = matchesStaffFilters({ user: req.user, query: { team_id: f.team_id, employee_group_id: f.employee_group_id } });
   const entries = listEntries({
-    companyId: req.user.company_id, from, to,
-    userId: user_id || null, siteId: site_id || null, orderId: order_id || null,
-  });
+    companyId: req.user.company_id, from, to, userId: f.user_id, siteId: f.site_id, orderId: f.order_id,
+  }).filter(staffMatch);
 
   let changed = 0;
   let skippedOpen = 0;
   let skippedLocked = 0;
+  let skippedRejected = 0;
+  let skippedSigned = 0;
+  let firstChanged = null;
   db.transaction(() => {
     for (const entry of entries) {
       if (entry.locked) {
         skippedLocked++;
         continue;
       }
-      if (approved && !entry.ended_at) {
-        skippedOpen++;
-        continue;
+      const mine = approvalsForEntry(entry.id).some((a) => a.level_id === level.id);
+      if (approved) {
+        if (!entry.ended_at) {
+          skippedOpen++;
+          continue;
+        }
+        // A shift that was sent back is not waved through by a bulk sign-off — somebody rejected it
+        // for a reason, and the single-shift button (which asks) is the way to reverse that.
+        if (entry.rejected) {
+          skippedRejected++;
+          continue;
+        }
+        // Already signed at this level: signing again only overwrote WHO signed and WHEN with the
+        // second person's name, rewriting the first signature.
+        if (mine) {
+          skippedSigned++;
+          continue;
+        }
+        recordApproval(entry.id, level, req.user, null);
+      } else {
+        if (!mine) continue; // nothing of this level's to take off
+        clearApproval(entry.id, level.id);
       }
-      if (approved) recordApproval(entry.id, level, req.user, null);
-      else clearApproval(entry.id, level.id);
       syncApprovalSummary(entry.id, req.user.company_id);
       changed++;
+      if (firstChanged == null) firstChanged = entry.id;
     }
   })();
 
   // One log line for the batch rather than one per shift — a bulk approval is one decision, and
-  // 200 identical rows would bury the individual corrections that matter.
-  if (changed > 0 && entries.length > 0) {
+  // 200 identical rows would bury the individual corrections that matter. Written against a shift
+  // that actually changed (the first of the list may have been skipped, and then the line pointed at
+  // a shift this approval never touched).
+  if (firstChanged != null) {
     logEntryEvent({
-      entryId: entries[0].id, companyId: req.user.company_id, user: req.user,
+      entryId: firstChanged, companyId: req.user.company_id, user: req.user,
       action: approved ? "approved" : "approval_cleared",
       status: approved ? `Godkjent av ${level.name}` : "Venter",
       comment: `Masseoppdatering: ${changed} stemplinger ${from}–${to}`,
     });
   }
-  res.json({ changed, skipped_open: skippedOpen, skipped_locked: skippedLocked, level: level.name });
+  res.json({
+    changed, skipped_open: skippedOpen, skipped_locked: skippedLocked,
+    skipped_rejected: skippedRejected, skipped_signed: skippedSigned, level: level.name,
+  });
 });
 
 // --- Lønnsarter ----------------------------------------------------------------------------------
@@ -388,8 +483,23 @@ timeRouter.patch("/types/:id", requireAuth, requireRole("admin"), (req, res) => 
   if (fields.length === 0 && !("is_default" in req.body)) {
     return res.status(400).json({ code: "no_valid_fields", error: "No valid fields to update" });
   }
+  // The code is the string Unimicro reads on import, so a blank one is a payroll line payroll cannot
+  // place — and null for either field is a NOT NULL violation, a 500 where a 400 was meant. The form
+  // saves on blur, so an emptied field arrives here as "" and used to be written as it was.
+  for (const f of ["code", "name"]) {
+    if (f in req.body && (typeof req.body[f] !== "string" || !req.body[f].trim())) {
+      return res.status(400).json({ code: "code_and_name_required", error: "Kode og navn kan ikke være tomme." });
+    }
+  }
+  if ("sort_order" in req.body && !Number.isInteger(Number(req.body.sort_order))) {
+    return res.status(400).json({ code: "invalid_sort_order", error: "Ugyldig rekkefølge." });
+  }
   if (fields.length > 0) {
-    const values = fields.map((f) => (typeof req.body[f] === "boolean" ? (req.body[f] ? 1 : 0) : req.body[f]));
+    const values = fields.map((f) => {
+      const v = req.body[f];
+      if (typeof v === "boolean") return v ? 1 : 0;
+      return typeof v === "string" ? v.trim() : v;
+    });
     db.prepare(`UPDATE time_types SET ${fields.map((f) => `${f} = ?`).join(", ")} WHERE id = ?`).run(...values, type.id);
   }
   if (req.body.is_default === true) makeDefaultType(req.user.company_id, type.id);
@@ -423,32 +533,65 @@ const insertManualStmt = db.prepare(
 // The "Legg til timer" / "Legg til tillegg/annet" rows of one registration. An hours line may give
 // fra/til and have its duration computed, or give the number of hours directly — both are how a
 // shift actually gets written down, and Mobile Worker accepts both too.
-function parseLines(body, companyId) {
+function parseLines(body, companyId, workDate) {
   if (!Array.isArray(body.lines)) return { lines: null };
   const typesById = new Map(listTimeTypes(companyId, { includeInactive: true }).map((t) => [t.id, t]));
   const parsed = [];
 
   for (const raw of body.lines) {
+    if (!raw || typeof raw !== "object") return { error: { code: "invalid_line", error: "Ugyldig timelinje." } };
     const type = typesById.get(Number(raw.time_type_id));
     if (!type) return { error: { code: "unknown_time_type", error: "Ukjent lønnsart." } };
+    const description = typeof raw.description === "string" ? raw.description : undefined;
 
     if (type.kind === "supplement") {
       const quantity = Number(raw.quantity);
       if (!(quantity > 0)) return { error: { code: "invalid_quantity", error: "Antall på et tillegg må være større enn null." } };
-      parsed.push({ time_type_id: type.id, quantity, description: raw.description });
+      parsed.push({ time_type_id: type.id, quantity, description });
       continue;
     }
 
     // fra/til wins when both are given, because two people reading the same row should not be able
     // to disagree about it; a bare number of hours is the fallback for "she worked 2 hours, I don't
-    // know exactly when".
-    let minutes = lineMinutes(raw.start_time, raw.end_time);
+    // know exactly when". Measured on the real clock of the working day, so a line across the night
+    // the clocks change is an hour shorter or longer than the same line on any other night.
+    let minutes = lineMinutesOn(workDate, raw.start_time, raw.end_time);
     if (minutes == null) minutes = Math.round(Number(String(raw.minutes ?? "").toString().replace(",", ".")) || 0);
     if (!(minutes > 0)) return { error: { code: "invalid_line_minutes", error: "Hver timelinje må ha enten fra/til eller et antall timer." } };
     if (minutes > 24 * 60) return { error: { code: "interval_too_long", error: "En stempling kan ikke vare mer enn ett døgn." } };
-    parsed.push({ time_type_id: type.id, start_time: raw.start_time || null, end_time: raw.end_time || null, minutes, description: raw.description });
+    parsed.push({
+      time_type_id: type.id,
+      start_time: typeof raw.start_time === "string" ? raw.start_time || null : null,
+      end_time: typeof raw.end_time === "string" ? raw.end_time || null : null,
+      minutes, description,
+    });
   }
   return { lines: parsed };
+}
+
+// Is this set of lines what the shift already has? The edit form always sends the lines it was
+// opened with, so saving a changed note — or just a changed end time — arrived looking like a
+// complete rewrite of the lines. Rewriting them recomputes each from its own from/to and replaces
+// the shift's pay with that: a stamped 08:00–11:00 shift with a 20-minute break (160 paid) came out
+// as 200, a fixed-frame shift lost its frame, and a hand-built set was overwritten by the clock.
+//
+// Compared on what a person can see and edit — art, from/to, description, quantity — and NOT on the
+// stored minutes of a line that has from/to, because for a stamped line those legitimately differ
+// from the clock span (the break is its own line, and a fixed frame is not the clock at all). A line
+// with a bare number of hours is compared on that number, to the minute.
+function sameLines(stored, incoming) {
+  if (!Array.isArray(stored) || stored.length !== incoming.length) return false;
+  const text = (v) => (typeof v === "string" ? v.trim() : "") || null;
+  return stored.every((a, i) => {
+    const b = incoming[i];
+    if (Number(a.time_type_id) !== Number(b.time_type_id)) return false;
+    if (text(a.description) !== text(b.description)) return false;
+    if (a.kind === "supplement" || b.quantity != null) return a.kind === "supplement" && Number(a.quantity) === Number(b.quantity);
+    if ((text(a.start_time) || null) !== (text(b.start_time) || null)) return false;
+    if ((text(a.end_time) || null) !== (text(b.end_time) || null)) return false;
+    if (text(a.start_time) && text(a.end_time)) return true;
+    return Math.abs(Number(a.minutes) - Number(b.minutes)) <= 1;
+  });
 }
 
 // Registering a shift afterwards — somebody worked without scanning, or a phone was flat. Always
@@ -459,15 +602,18 @@ function parseLines(body, companyId) {
 // lines on named lønnsarter — 16:00–16:30 ordinary plus 16:30–18:00 overtime plus a night
 // supplement. With lines, they decide the payable total and the from/to is only the outer frame.
 timeRouter.post("/entries", requireAuth, requireRole("admin", "manager"), (req, res) => {
-  const { site_id, user_id, work_date, start_time, end_time, note } = req.body;
+  const { work_date, start_time, end_time, note } = req.body;
+  const site_id = asId(req.body.site_id);
+  const user_id = asId(req.body.user_id);
+  const order_id = asId(req.body.order_id);
   const minutesOverride = normalizeMinutes(req.body.minutes);
   if (minutesOverride === false) {
     return res.status(400).json({ code: "invalid_minutes", error: "Timer må være et positivt antall minutter." });
   }
-  if ((!site_id && !req.body.order_id) || !user_id || !isValidDate(work_date) || !start_time) {
+  if ((!site_id && !order_id) || !user_id || !isValidDate(work_date) || typeof start_time !== "string" || !start_time) {
     return res.status(400).json({ code: "missing_fields", error: "Ansatt, dato, starttid og enten lokasjon eller ordre er påkrevd." });
   }
-  const { lines, error: lineError } = parseLines(req.body, req.user.company_id);
+  const { lines, error: lineError } = parseLines(req.body, req.user.company_id, work_date);
   if (lineError) return res.status(400).json(lineError);
 
   // Either a building, or an order with no building at all — internal time, driving, absence.
@@ -476,12 +622,12 @@ timeRouter.post("/entries", requireAuth, requireRole("admin", "manager"), (req, 
   if (site_id && (!site || site.company_id !== req.user.company_id)) {
     return res.status(400).json({ code: "unknown_site", error: "Ukjent lokasjon" });
   }
-  const order = req.body.order_id
-    ? getOrder(req.body.order_id, req.user.company_id)
+  const order = order_id
+    ? getOrder(order_id, req.user.company_id)
     : site
       ? getOrder(orderIdForSite(site.id), req.user.company_id)
       : null;
-  if (req.body.order_id && !order) return res.status(400).json({ code: "unknown_order", error: "Ukjent ordre" });
+  if (order_id && !order) return res.status(400).json({ code: "unknown_order", error: "Ukjent ordre" });
   if (!site && !order?.allows_manual) {
     return res.status(400).json({ code: "order_needs_site", error: "Denne ordren må føres på en lokasjon." });
   }
@@ -494,11 +640,18 @@ timeRouter.post("/entries", requireAuth, requireRole("admin", "manager"), (req, 
 
   const startedAt = osloTimeToUtcStamp(work_date, start_time);
   if (!startedAt) return res.status(400).json({ code: "invalid_time", error: "Ugyldig klokkeslett." });
-  const endedAt = end_time ? osloTimeToUtcStamp(work_date, end_time) : null;
+  // An end clock time earlier than the start means the shift ran past midnight (22:00–06:00), and is
+  // placed on the next day — see endStampFor.
+  const endedAt = typeof end_time === "string" && end_time ? endStampFor(work_date, startedAt, end_time) : null;
   if (end_time && !endedAt) return res.status(400).json({ code: "invalid_time", error: "Ugyldig klokkeslett." });
 
   const intervalError = validateInterval(startedAt, endedAt);
   if (intervalError) return res.status(400).json({ code: intervalError.code, error: intervalError.error });
+
+  // Hours cannot be added to a period somebody has already closed and exported.
+  if (isPeriodLocked({ companyId: req.user.company_id, userId: target.id, siteId: site?.id ?? null, orderId: order?.id ?? null, workDate: work_date })) {
+    return res.status(PERIOD_LOCKED.status).json({ code: PERIOD_LOCKED.code, error: PERIOD_LOCKED.error });
+  }
 
   const clash = findOverlap({ userId: target.id, startedAt, endedAt });
   if (clash) return res.status(409).json({ code: "overlapping_hours", error: overlapMessage(clash) });
@@ -507,21 +660,26 @@ timeRouter.post("/entries", requireAuth, requireRole("admin", "manager"), (req, 
   // An order with no site has no rammetimetall to fall back on, so it is always paid by what was
   // written down.
   const billing = site ? billingFor(site, minutesOverride) : { billing_mode: minutesOverride != null ? "manual" : "actual", fixed_minutes: null };
-  const info = insertManualStmt.run(
-    req.user.company_id, site?.id ?? null, order?.id ?? null, target.id, work_date, startedAt, endedAt, actual,
-    resolveMinutes({ billing, actual, minutesOverride }), billing.billing_mode, billing.fixed_minutes,
-    (note || "").trim() || null, nowStamp(), req.user.name || null
-  );
 
-  const entry = getEntry(info.lastInsertRowid);
-  if (lines) applyLines(entry, lines, req.user.company_id);
-  else writeStampLine(db.prepare("SELECT * FROM time_entries WHERE id = ?").get(entry.id));
-  logEntryEvent({
-    entryId: entry.id, companyId: req.user.company_id, user: req.user,
-    action: "created", status: "Registrert manuelt",
-    comment: [order?.name, site?.name, note].filter(Boolean).join(" · ") || null,
-  });
-  res.status(201).json(entryWithApproval(entry.id, req.user.company_id));
+  // One transaction: the row, its lines and its log entry stand or fall together. A failure between
+  // the insert and the lines used to leave a shift with no lines in the payroll export.
+  const created = db.transaction(() => {
+    const info = insertManualStmt.run(
+      req.user.company_id, site?.id ?? null, order?.id ?? null, target.id, work_date, startedAt, endedAt, actual,
+      resolveMinutes({ billing, actual, minutesOverride }), billing.billing_mode, billing.fixed_minutes,
+      (note || "").trim() || null, nowStamp(), req.user.name || null
+    );
+    const row = getEntry(info.lastInsertRowid);
+    if (lines) applyLines(row, lines, req.user.company_id);
+    else writeStampLine(db.prepare("SELECT * FROM time_entries WHERE id = ?").get(row.id));
+    logEntryEvent({
+      entryId: row.id, companyId: req.user.company_id, user: req.user,
+      action: "created", status: "Registrert manuelt",
+      comment: [order?.name, site?.name, note].filter(Boolean).join(" · ") || null,
+    });
+    return row;
+  })();
+  res.status(201).json(entryWithApproval(created.id, req.user.company_id));
 });
 
 // Lines decide the payable total once they exist: "6t ordinær + 1t 30m overtid" is 7t 30m, and
@@ -551,8 +709,9 @@ function applyLines(entry, lines, companyId) {
 // hand-entered in every export. She can create and she can see; correcting and deleting stay with
 // the driftsleder, same as a stamping.
 timeRouter.post("/me/entries", requireAuth, (req, res) => {
-  const { order_id, work_date, start_time, end_time, time_type_id, hours, note } = req.body;
-  if (!order_id || !isValidDate(work_date) || !start_time) {
+  const { work_date, start_time, end_time, time_type_id, hours, note } = req.body;
+  const order_id = asId(req.body.order_id);
+  if (!order_id || !isValidDate(work_date) || typeof start_time !== "string" || !start_time) {
     return res.status(400).json({ code: "missing_fields", error: "Ordre, dato og starttid er påkrevd." });
   }
 
@@ -564,7 +723,7 @@ timeRouter.post("/me/entries", requireAuth, (req, res) => {
 
   const startedAt = osloTimeToUtcStamp(work_date, start_time);
   if (!startedAt) return res.status(400).json({ code: "invalid_time", error: "Ugyldig klokkeslett." });
-  const endedAt = end_time ? osloTimeToUtcStamp(work_date, end_time) : null;
+  const endedAt = typeof end_time === "string" && end_time ? endStampFor(work_date, startedAt, end_time) : null;
   if (end_time && !endedAt) return res.status(400).json({ code: "invalid_time", error: "Ugyldig klokkeslett." });
   const intervalError = validateInterval(startedAt, endedAt);
   if (intervalError) return res.status(400).json({ code: intervalError.code, error: intervalError.error });
@@ -573,7 +732,7 @@ timeRouter.post("/me/entries", requireAuth, (req, res) => {
   const locked = db
     .prepare("SELECT COUNT(*) AS n FROM time_entries WHERE company_id = ? AND user_id = ? AND work_date = ? AND locked_at IS NOT NULL")
     .get(req.user.company_id, req.user.id, work_date).n;
-  if (locked > 0) {
+  if (locked > 0 || isPeriodLocked({ companyId: req.user.company_id, userId: req.user.id, siteId: null, orderId: order.id, workDate: work_date })) {
     return res.status(409).json({ code: "entry_locked", error: "Timene for denne dagen er låst. Snakk med driftsleder." });
   }
 
@@ -600,20 +759,23 @@ timeRouter.post("/me/entries", requireAuth, (req, res) => {
   const clash = findOverlap({ userId: req.user.id, startedAt, endedAt: closedAt });
   if (clash) return res.status(409).json({ code: "overlapping_hours", error: overlapMessage(clash) });
 
-  const info = insertManualStmt.run(
-    req.user.company_id, null, order.id, req.user.id, work_date, startedAt, closedAt, actual ?? minutes,
-    minutes, "lines", null, (note || "").trim() || null, nowStamp(), req.user.name || null
-  );
-  const entry = getEntry(info.lastInsertRowid);
-  applyLines(entry, [{ time_type_id: type?.id ?? null, minutes, start_time: end_time ? start_time : null, end_time: end_time || null }], req.user.company_id);
-  // applyLines writes back the PAYABLE total, which is zero for ferie and sykefravær. The hours
-  // were still registered, so the response says how many — otherwise her confirmation reads "0t 00m
-  // ført på Fravær", which is true of the payroll sum and useless to her.
-  logEntryEvent({
-    entryId: entry.id, companyId: req.user.company_id, user: req.user,
-    action: "created", status: "Ført av ansatt",
-    comment: [order.name, type?.name, note].filter(Boolean).join(" · ") || null,
-  });
+  const entry = db.transaction(() => {
+    const info = insertManualStmt.run(
+      req.user.company_id, null, order.id, req.user.id, work_date, startedAt, closedAt, actual ?? minutes,
+      minutes, "lines", null, (note || "").trim() || null, nowStamp(), req.user.name || null
+    );
+    const row = getEntry(info.lastInsertRowid);
+    applyLines(row, [{ time_type_id: type?.id ?? null, minutes, start_time: end_time ? start_time : null, end_time: end_time || null }], req.user.company_id);
+    // applyLines writes back the PAYABLE total, which is zero for ferie and sykefravær. The hours
+    // were still registered, so the response says how many — otherwise her confirmation reads "0t 00m
+    // ført på Fravær", which is true of the payroll sum and useless to her.
+    logEntryEvent({
+      entryId: row.id, companyId: req.user.company_id, user: req.user,
+      action: "created", status: "Ført av ansatt",
+      comment: [order.name, type?.name, note].filter(Boolean).join(" · ") || null,
+    });
+    return row;
+  })();
   res.status(201).json(getEntry(entry.id));
 });
 
@@ -650,17 +812,33 @@ timeRouter.patch("/entries/:id", requireAuth, requireRole("admin", "manager"), (
 
   const workDate = "work_date" in req.body ? req.body.work_date : entry.work_date;
   if (!isValidDate(workDate)) return res.status(400).json({ code: "invalid_date", error: "Ugyldig dato." });
+  const dateChanged = workDate !== entry.work_date;
 
   const startTime = "start_time" in req.body ? req.body.start_time : osloTimeOf(entry.started_at);
-  const startedAt = osloTimeToUtcStamp(workDate, startTime);
+  if (typeof startTime !== "string") return res.status(400).json({ code: "invalid_time", error: "Ugyldig klokkeslett." });
+  // A time that is saved back exactly as it was shown keeps the instant it already is. The form only
+  // ever shows hh:mm, so re-deriving the stamp from it dropped the seconds a QR stamping carries (and
+  // then collided with its own neighbours), and moved a shift that started in the repeated hour on
+  // the night the clocks go back by a whole hour.
+  const startedAt = !dateChanged && startTime === osloTimeOf(entry.started_at)
+    ? entry.started_at
+    : osloTimeToUtcStamp(workDate, startTime);
   if (!startedAt) return res.status(400).json({ code: "invalid_time", error: "Ugyldig klokkeslett." });
 
-  // An explicit empty end_time reopens the shift; omitting the field keeps whatever it had.
+  // An explicit empty end_time reopens the shift; omitting the field keeps whatever it had. An end
+  // clock time earlier than the start is a shift that ran past midnight — see endStampFor.
   let endedAt = entry.ended_at;
-  if ("end_time" in req.body || "work_date" in req.body) {
+  if ("end_time" in req.body || dateChanged) {
     const endTime = "end_time" in req.body ? req.body.end_time : osloTimeOf(entry.ended_at);
-    endedAt = endTime ? osloTimeToUtcStamp(workDate, endTime) : null;
-    if (endTime && !endedAt) return res.status(400).json({ code: "invalid_time", error: "Ugyldig klokkeslett." });
+    if (endTime != null && typeof endTime !== "string") return res.status(400).json({ code: "invalid_time", error: "Ugyldig klokkeslett." });
+    if (!endTime) {
+      endedAt = null;
+    } else if (!dateChanged && entry.ended_at && endTime === osloTimeOf(entry.ended_at)) {
+      endedAt = entry.ended_at;
+    } else {
+      endedAt = endStampFor(workDate, startedAt, endTime);
+      if (!endedAt) return res.status(400).json({ code: "invalid_time", error: "Ugyldig klokkeslett." });
+    }
   }
 
   const intervalError = validateInterval(startedAt, endedAt);
@@ -670,61 +848,97 @@ timeRouter.patch("/entries/:id", requireAuth, requireRole("admin", "manager"), (
   if (minutesOverride === false) {
     return res.status(400).json({ code: "invalid_minutes", error: "Timer må være et positivt antall minutter." });
   }
-  const { lines, error: lineError } = parseLines(req.body, req.user.company_id);
+  const { lines: sentLines, error: lineError } = parseLines(req.body, req.user.company_id, workDate);
   if (lineError) return res.status(400).json(lineError);
+  // The form resends the lines it was opened with on every save. Lines identical to what the shift
+  // already has are not an edit of the lines — see sameLines for what went wrong when they were
+  // treated as one.
+  const lines = sentLines && !sameLines(entry.lines, sentLines) ? sentLines : null;
+
+  // A closed period refuses a shift moving into it, and an edit of one already inside it (a shift
+  // stamped after the lock does not carry the row flag).
+  const periodOf = (date) => ({
+    companyId: entry.company_id, userId: entry.user_id, siteId: entry.site_id, orderId: entry.order_id, workDate: date,
+  });
+  if (isPeriodLocked(periodOf(entry.work_date)) || (dateChanged && isPeriodLocked(periodOf(workDate)))) {
+    return res.status(PERIOD_LOCKED.status).json({ code: PERIOD_LOCKED.code, error: PERIOD_LOCKED.error });
+  }
 
   // Excluding this shift from its own overlap check, or every edit would collide with itself.
   const clash = findOverlap({ userId: entry.user_id, startedAt, endedAt, excludeEntryId: entry.id });
   if (clash) return res.status(409).json({ code: "overlapping_hours", error: overlapMessage(clash) });
 
-  const site = db.prepare("SELECT * FROM sites WHERE id = ?").get(entry.site_id);
+  const site = entry.site_id ? db.prepare("SELECT * FROM sites WHERE id = ?").get(entry.site_id) : null;
   const actual = minutesBetween(startedAt, endedAt);
   // A correction that gives the shift a real end time also clears the auto-close flag: once a human
   // has decided when she left, "nobody stamped out" is no longer the story of this row.
   const autoClosedReason = endedAt && "end_time" in req.body ? null : entry.auto_closed_reason;
-  // The entry keeps the billing rule it was closed under, rather than being re-priced against
-  // whatever the site says today — changing a site's rammetimetall must not reach backwards into a
-  // shift just because somebody later fixed a typo in its end time. A shift that never had one
-  // (it's being closed for the first time here) takes the site's current rule.
-  const billing = minutesOverride != null
-    ? { billing_mode: "manual", fixed_minutes: null }
-    : entry.billing_mode && entry.billing_mode !== "manual"
+
+  // How the shift is priced after the edit. The entry keeps the rule it was closed under rather than
+  // being re-priced against whatever the site says today — changing a site's rammetimetall must not
+  // reach backwards into a shift because somebody fixed a typo in its end time.
+  //  - a number typed here wins, and says so ('manual');
+  //  - 'lines' (a hand-built set) and 'manual' keep the minutes payroll already reads: the clock is
+  //    not what those were priced from, and re-pricing them from it silently rewrote a 450-minute
+  //    shift to 120;
+  //  - otherwise the clock, the site's frame and the break are applied as when it was stamped;
+  //  - a shift that never had a rule (it is being closed for the first time here) takes the site's
+  //    current one. A shift with no site at all is paid by the clock.
+  let billing;
+  let minutes;
+  if (minutesOverride != null) {
+    billing = { billing_mode: "manual", fixed_minutes: null };
+    minutes = minutesOverride;
+  } else if (entry.billing_mode === "lines" || entry.billing_mode === "manual") {
+    billing = { billing_mode: entry.billing_mode, fixed_minutes: entry.fixed_minutes ?? null };
+    minutes = entry.minutes;
+  } else {
+    billing = entry.billing_mode
       ? { billing_mode: entry.billing_mode, fixed_minutes: entry.fixed_minutes }
-      : billingFor(site, null);
-
-  db.prepare(
-    `UPDATE time_entries SET work_date = ?, started_at = ?, ended_at = ?, actual_minutes = ?, minutes = ?,
-            billing_mode = ?, fixed_minutes = ?, auto_closed_reason = ?, note = ?,
-            edited_at = ?, edited_by_initials = ? WHERE id = ?`
-  ).run(
-    workDate, startedAt, endedAt, actual,
-    resolveMinutes({ billing, actual, minutesOverride, pauseMinutes: entry.pause_minutes }),
-    billing.billing_mode, billing.fixed_minutes,
-    autoClosedReason, "note" in req.body ? (req.body.note || "").trim() || null : entry.note,
-    nowStamp(), req.user.name || null, entry.id
-  );
-
-  if (lines) applyLines(entry, lines, req.user.company_id);
-  else if (entry.lines?.length <= (entry.pause_minutes > 0 ? 2 : 1)) {
-    // A stamped shift carries one auto-written line for its whole duration, or two when she
-    // reported a break. Rewrite them so the hours the correction just changed are the hours payroll
-    // reads — but never touch a hand-built set of lines the admin is not editing right now.
-    writeStampLine(db.prepare("SELECT * FROM time_entries WHERE id = ?").get(entry.id));
+      : billingFor(site || {}, null);
+    minutes = resolveMinutes({ billing, actual, minutesOverride: null, pauseMinutes: entry.pause_minutes });
   }
 
-  // An approval says "I looked at these hours". Once the hours change it no longer says anything
-  // true, so every signature on the ladder comes off and the shift goes back in front of whoever
-  // signed it. Deliberately not silent: the row visibly returns to "Venter".
-  const hadApprovals = approvalsForEntry(entry.id).length > 0;
-  if (hadApprovals) {
-    clearApproval(entry.id);
-    db.prepare("UPDATE time_entries SET approved_at = NULL, approved_by = NULL, approved_by_name = NULL WHERE id = ?").run(entry.id);
-  }
-  logEntryEvent({
-    entryId: entry.id, companyId: entry.company_id, user: req.user, action: "edited",
-    status: hadApprovals ? "Venter (godkjenning fjernet)" : "Endret",
-    comment: req.body.note || describeEdit(entry, { workDate, startedAt, endedAt }),
-  });
+  // The row, its lines, the approvals and the log entry are one change. A failure part-way used to
+  // leave an approved shift with new hours, no lines and its signatures still on it.
+  db.transaction(() => {
+    db.prepare(
+      `UPDATE time_entries SET work_date = ?, started_at = ?, ended_at = ?, actual_minutes = ?, minutes = ?,
+              billing_mode = ?, fixed_minutes = ?, auto_closed_reason = ?, note = ?,
+              edited_at = ?, edited_by_initials = ? WHERE id = ?`
+    ).run(
+      workDate, startedAt, endedAt, actual, minutes, billing.billing_mode, billing.fixed_minutes,
+      autoClosedReason, "note" in req.body ? (req.body.note || "").trim() || null : entry.note,
+      nowStamp(), req.user.name || null, entry.id
+    );
+
+    if (lines) applyLines(entry, lines, req.user.company_id);
+    else if (billing.billing_mode !== "lines" && entry.lines?.length <= (entry.pause_minutes > 0 ? 2 : 1)) {
+      // A stamped shift carries one auto-written line for its whole duration, or two when she
+      // reported a break. Rewrite them so the hours the correction just changed are the hours payroll
+      // reads — but never touch a hand-built set of lines the admin is not editing right now.
+      writeStampLine(db.prepare("SELECT * FROM time_entries WHERE id = ?").get(entry.id));
+    }
+
+    // An approval says "I looked at these hours". Once the HOURS change it no longer says anything
+    // true, so every signature on the ladder comes off and the shift goes back in front of whoever
+    // signed it — deliberately not silent: the row visibly returns to "Venter". A changed note does
+    // not change the hours, and used to strip the signatures all the same.
+    const after = db.prepare("SELECT minutes, started_at, ended_at, work_date FROM time_entries WHERE id = ?").get(entry.id);
+    const hoursChanged =
+      !!lines || after.minutes !== entry.minutes || after.started_at !== entry.started_at ||
+      after.ended_at !== entry.ended_at || after.work_date !== entry.work_date;
+    const hadApprovals = hoursChanged && approvalsForEntry(entry.id).length > 0;
+    if (hadApprovals) {
+      clearApproval(entry.id);
+      db.prepare("UPDATE time_entries SET approved_at = NULL, approved_by = NULL, approved_by_name = NULL WHERE id = ?").run(entry.id);
+    }
+    logEntryEvent({
+      entryId: entry.id, companyId: entry.company_id, user: req.user, action: "edited",
+      status: hadApprovals ? "Venter (godkjenning fjernet)" : "Endret",
+      comment: req.body.note || describeEdit(entry, { workDate, startedAt, endedAt }),
+    });
+  })();
   res.json(entryWithApproval(entry.id, req.user.company_id));
 });
 
@@ -742,14 +956,38 @@ timeRouter.delete("/entries/:id", requireAuth, requireRole("admin", "manager"), 
   if (error) return res.status(status).json({ code, error });
   const locked = lockGuard(entry);
   if (locked) return res.status(locked.status).json({ code: locked.code, error: locked.error });
+  if (isPeriodLocked({ companyId: entry.company_id, userId: entry.user_id, siteId: entry.site_id, orderId: entry.order_id, workDate: entry.work_date })) {
+    return res.status(PERIOD_LOCKED.status).json({ code: PERIOD_LOCKED.code, error: PERIOD_LOCKED.error });
+  }
+  // A shift somebody has signed off is not removed in passing. Deleting it takes its signatures with
+  // it, and its log, which is the only record that anyone ever approved those hours — so the
+  // approval has to be taken off first, as a visible step of its own.
+  if (entry.approved || approvalsForEntry(entry.id).length > 0) {
+    return res.status(409).json({
+      code: "entry_approved",
+      error: "Stemplingen er godkjent. Fjern godkjenningen før du sletter den.",
+    });
+  }
 
   // The log rows reference this entry, so they go with it — a log line pointing at a shift that no
-  // longer exists explains nothing. The deletion itself is what the edit trail on every OTHER shift
-  // is for; a deleted shift leaves the period's totals, which is where it would be noticed.
-  db.prepare("DELETE FROM time_entry_approvals WHERE entry_id = ?").run(entry.id);
-  db.prepare("DELETE FROM time_entry_log WHERE entry_id = ?").run(entry.id);
-  db.prepare("DELETE FROM time_entry_lines WHERE entry_id = ?").run(entry.id);
-  db.prepare("DELETE FROM time_entries WHERE id = ?").run(entry.id);
+  // longer exists explains nothing. What survives is the company's own audit trail (quality_log),
+  // which has no such reference: who deleted whose hours, and what they were. Without it a deleted
+  // payroll row left nothing behind at all. Not tied to the site on purpose: a site's audit export
+  // goes to the customer, and this is the cleaning company's payroll data.
+  db.transaction(() => {
+    logQualityEvent({
+      user: req.user,
+      action: "time_entry_deleted",
+      subjectType: "time_entry",
+      subjectId: entry.id,
+      beforeValue: `${entry.user_name} ${entry.work_date} ${osloTimeOf(entry.started_at)}–${osloTimeOf(entry.ended_at) || "pågår"}`,
+      comment: `${formatMinutes(entry.minutes) || "0t 00m"} slettet av ${req.user.name || "ukjent"}`,
+    });
+    db.prepare("DELETE FROM time_entry_approvals WHERE entry_id = ?").run(entry.id);
+    db.prepare("DELETE FROM time_entry_log WHERE entry_id = ?").run(entry.id);
+    db.prepare("DELETE FROM time_entry_lines WHERE entry_id = ?").run(entry.id);
+    db.prepare("DELETE FROM time_entries WHERE id = ?").run(entry.id);
+  })();
   res.json({ ok: true });
 });
 
@@ -759,46 +997,45 @@ timeRouter.delete("/entries/:id", requireAuth, requireRole("admin", "manager"), 
 // closed, not one shift at a time. admin only — a driftsleder corrects hours, an admin is the one
 // who declares them final.
 //
+// Besides flagging the shifts that exist, the lock is recorded as a period (services/timeLocks.js),
+// so a shift registered into it afterwards is refused too, and who locked what is on record.
+//
 // A still-running shift can't be locked: freezing an entry that has no end time yet would leave
 // somebody's hours permanently at zero, which is the one thing a lock must never quietly do.
 timeRouter.post("/lock", requireAuth, requireRole("admin"), (req, res) => {
-  const { from, to, locked, user_id, site_id } = req.body;
+  const { from, to, locked } = req.body;
   if (!isValidDate(from) || !isValidDate(to)) {
     return res.status(400).json({ code: "invalid_date", error: "from og to må være datoer (YYYY-MM-DD)." });
   }
+  if (from > to) return res.status(400).json({ code: "period_reversed", error: "Fra-dato må være før til-dato." });
   if (typeof locked !== "boolean") {
     return res.status(400).json({ code: "locked_required", error: "locked må være true eller false" });
   }
 
-  const conditions = ["company_id = ?", "work_date >= ?", "work_date <= ?"];
-  const params = [req.user.company_id, from, to];
-  if (user_id) {
-    conditions.push("user_id = ?");
-    params.push(user_id);
-  }
-  if (site_id) {
-    conditions.push("site_id = ?");
-    params.push(site_id);
-  }
-  if (locked) conditions.push("ended_at IS NOT NULL");
+  // The same five filters the timesheet screen sends, so the lock covers exactly what is on it.
+  const filters = bulkFilters(req.body, req.user.company_id);
+  if (filters.error) return res.status(400).json(filters.error);
+  const extra = bulkConditions(filters);
+  const base = ["company_id = ?", "work_date >= ?", "work_date <= ?", ...extra.where];
+  const baseParams = [req.user.company_id, from, to, ...extra.params];
 
-  const info = db
-    .prepare(
-      locked
-        ? `UPDATE time_entries SET locked_at = ?, locked_by = ? WHERE ${conditions.join(" AND ")}`
-        : `UPDATE time_entries SET locked_at = NULL, locked_by = NULL WHERE ${conditions.join(" AND ")}`
-    )
-    .run(...(locked ? [nowStamp(), req.user.id, ...params] : params));
+  const result = db.transaction(() => {
+    const info = db
+      .prepare(
+        locked
+          ? `UPDATE time_entries SET locked_at = ?, locked_by = ? WHERE ${base.join(" AND ")} AND ended_at IS NOT NULL`
+          : `UPDATE time_entries SET locked_at = NULL, locked_by = NULL WHERE ${base.join(" AND ")}`
+      )
+      .run(...(locked ? [nowStamp(), req.user.id, ...baseParams] : baseParams));
 
-  const stillOpen = locked
-    ? db
-        .prepare(
-          `SELECT COUNT(*) AS n FROM time_entries
-           WHERE company_id = ? AND work_date >= ? AND work_date <= ? AND ended_at IS NULL`
-        )
-        .get(req.user.company_id, from, to).n
-    : 0;
-  res.json({ changed: info.changes, skipped_open: stillOpen });
+    const stillOpen = locked
+      ? db.prepare(`SELECT COUNT(*) AS n FROM time_entries WHERE ${base.join(" AND ")} AND ended_at IS NULL`).get(...baseParams).n
+      : 0;
+
+    recordPeriodLock({ companyId: req.user.company_id, locked, from, to, filters, actor: req.user });
+    return { changed: info.changes, skipped_open: stillOpen };
+  })();
+  res.json(result);
 });
 
 // --- Prosjekt og ordre ---------------------------------------------------------------------------
@@ -858,6 +1095,9 @@ timeRouter.patch("/orders/:id", requireAuth, requireRole("admin", "manager"), (r
 
   const fields = ORDER_FIELDS.filter((f) => f in req.body);
   if (fields.length === 0) return res.status(400).json({ code: "no_valid_fields", error: "No valid fields to update" });
+  if ("name" in req.body && (typeof req.body.name !== "string" || !req.body.name.trim())) {
+    return res.status(400).json({ code: "name_required", error: "Navn er påkrevd." });
+  }
   const values = fields.map((f) => (typeof req.body[f] === "boolean" ? (req.body[f] ? 1 : 0) : req.body[f]));
   db.prepare(`UPDATE orders SET ${fields.map((f) => `${f} = ?`).join(", ")} WHERE id = ?`).run(...values, order.id);
   res.json(listOrders(req.user.company_id, { includeInactive: true }));
@@ -938,6 +1178,7 @@ timeRouter.post("/approval-levels", requireAuth, requireRole("admin"), (req, res
   const step = Number(req.body.step) || db.prepare("SELECT COALESCE(MAX(step), 0) + 1 AS n FROM approval_levels WHERE company_id = ?").get(req.user.company_id).n;
   db.prepare("INSERT INTO approval_levels (company_id, name, step, required) VALUES (?, ?, ?, ?)")
     .run(req.user.company_id, req.body.name.trim(), step, req.body.required === false ? 0 : 1);
+  resyncApprovalSummaries(req.user.company_id);
   res.status(201).json(listApprovalLevels(req.user.company_id));
 });
 
@@ -947,17 +1188,35 @@ timeRouter.patch("/approval-levels/:id", requireAuth, requireRole("admin"), (req
   const fields = ["name", "step", "required"].filter((f) => f in req.body);
   if (fields.length === 0) return res.status(400).json({ code: "no_valid_fields", error: "No valid fields to update" });
   const values = fields.map((f) => (typeof req.body[f] === "boolean" ? (req.body[f] ? 1 : 0) : req.body[f]));
+  if (("name" in req.body && (typeof req.body.name !== "string" || !req.body.name.trim())) ||
+      ("step" in req.body && !Number.isInteger(Number(req.body.step)))) {
+    return res.status(400).json({ code: "invalid_level", error: "Ugyldig navn eller trinn." });
+  }
   db.prepare(`UPDATE approval_levels SET ${fields.map((f) => `${f} = ?`).join(", ")} WHERE id = ?`).run(...values, level.id);
+  resyncApprovalSummaries(req.user.company_id);
   res.json(listApprovalLevels(req.user.company_id));
 });
 
-// Removing a level keeps the sign-offs already made at it — they carry their own snapshot of the
-// name, and deleting the evidence that somebody approved something is not a thing this app does.
+// A level that has signed something cannot be deleted: the sign-offs reference it, and deleting the
+// evidence that somebody approved something is not a thing this app does. It used to try anyway —
+// the people assigned to the level were removed first, then the delete hit the foreign key and failed
+// with a 500, and the assignments were gone for good. Make it optional instead, which keeps every
+// signature and lets the ladder skip it.
 timeRouter.delete("/approval-levels/:id", requireAuth, requireRole("admin"), (req, res) => {
   const level = db.prepare("SELECT * FROM approval_levels WHERE id = ?").get(req.params.id);
   if (!level || level.company_id !== req.user.company_id) return res.status(404).json({ code: "not_found", error: "Not found" });
-  db.prepare("DELETE FROM user_approval_levels WHERE level_id = ?").run(level.id);
-  db.prepare("DELETE FROM approval_levels WHERE id = ?").run(level.id);
+  const signed = db.prepare("SELECT COUNT(*) AS n FROM time_entry_approvals WHERE level_id = ?").get(level.id).n;
+  if (signed > 0) {
+    return res.status(409).json({
+      code: "level_has_signatures",
+      error: `«${level.name}» har ${signed} signaturer og kan ikke slettes. Gjør det ikke-påkrevd i stedet.`,
+    });
+  }
+  db.transaction(() => {
+    db.prepare("DELETE FROM user_approval_levels WHERE level_id = ?").run(level.id);
+    db.prepare("DELETE FROM approval_levels WHERE id = ?").run(level.id);
+  })();
+  resyncApprovalSummaries(req.user.company_id);
   res.json(listApprovalLevels(req.user.company_id));
 });
 
@@ -980,7 +1239,7 @@ timeRouter.get("/log", requireAuth, requireRole("admin", "manager"), (req, res) 
   const { from, to } = parseRange(req);
   res.json(logForPeriod({
     companyId: req.user.company_id, from, to,
-    userId: req.query.user_id || null, siteId: req.query.site_id || null,
+    userId: asId(req.query.user_id), siteId: asId(req.query.site_id),
   }));
 });
 
@@ -1125,7 +1384,7 @@ timeRouter.get("/attention", requireAuth, requireRole("admin", "manager"), (req,
   const { from, to } = parseRange(req);
   const entries = listEntries({
     companyId: req.user.company_id, from, to,
-    userId: req.query.user_id || null, siteId: req.query.site_id || null, orderId: req.query.order_id || null,
+    userId: asId(req.query.user_id), siteId: asId(req.query.site_id), orderId: asId(req.query.order_id),
   });
 
   const problems = [];
@@ -1202,8 +1461,8 @@ timeRouter.get("/entries.csv", requireAuth, requireRole("admin", "manager"), (re
   const { from, to } = parseRange(req);
   const entries = listEntries({
     companyId: req.user.company_id, from, to,
-    userId: req.query.user_id || null, siteId: req.query.site_id || null,
-    orderId: req.query.order_id || null,
+    userId: asId(req.query.user_id), siteId: asId(req.query.site_id),
+    orderId: asId(req.query.order_id),
     approval: ["approved", "pending"].includes(req.query.approval) ? req.query.approval : null,
   }).filter(matchesStaffFilters(req));
 
@@ -1311,7 +1570,7 @@ function exportRows(req) {
   const { from, to } = parseRange(req);
   const entries = listEntries({
     companyId: req.user.company_id, from, to,
-    userId: req.query.user_id || null, siteId: req.query.site_id || null, orderId: req.query.order_id || null,
+    userId: asId(req.query.user_id), siteId: asId(req.query.site_id), orderId: asId(req.query.order_id),
     approval: ["approved", "pending"].includes(req.query.approval) ? req.query.approval : null,
   }).filter(matchesStaffFilters(req));
 
