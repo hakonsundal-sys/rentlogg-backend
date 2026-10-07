@@ -3,7 +3,11 @@
 // rather than generated PDFs — pdfkit would mean rebuilding this layout in drawing commands, and
 // the browser's own print dialog already produces a PDF from HTML. The routes serve them with a
 // content type the browser renders, so "download" is Ctrl+P.
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import QRCode from "qrcode";
+import { SUPPORTED_LANGUAGES } from "./languages.js";
 
 export function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
@@ -55,19 +59,16 @@ const hintBoks = (tekst) => `<div class="skjerm">${tekst} Denne gule boksen blir
 
 // ---------------------------------------------------------------- QR-plakat
 
-// The five languages the app itself speaks. The step texts are the app's own strings, copied
-// from the frontend's src/locales/<code>.json under cleaner.onboarding.{title,step1..3} — the two
-// repos deploy separately, so the backend cannot read those files. If a string changes there,
-// change it here too; nothing enforces it.
-export const POSTER_TEXT = {
-  no: { name: "Norsk", title: "Kom i gang", steps: ["Skann QR-koden ved lokasjonen", "Huk av rom og oppgaver etter hvert som du gjør dem", "Skriv navnet ditt og trykk «Fullfør»"] },
-  en: { name: "English", title: "Getting started", steps: ["Scan the QR code at the location", "Tick off rooms and tasks as you do them", "Enter your name and tap “Complete”"] },
-  lt: { name: "Lietuvių", title: "Kaip pradėti", steps: ["Nuskaitykite QR kodą objekte", "Žymėkite patalpas ir užduotis, kai jas atliekate", "Įveskite savo vardą ir spustelėkite „Užbaigti“"] },
-  lv: { name: "Latviešu", title: "Kā sākt", steps: ["Noskenējiet QR kodu objektā", "Atzīmējiet telpas un uzdevumus, kad tos paveicat", "Ievadiet savu vārdu un nospiediet “Pabeigt”"] },
-  ru: { name: "Русский", title: "Как начать", steps: ["Отсканируйте QR-код на объекте", "Отмечайте помещения и задачи по мере выполнения", "Введите своё имя и нажмите «Завершить»"] },
-};
+// The poster's instructions are the same sentences as the app's own "Kom i gang" card, so they
+// are not written here: posterText.json is generated from the frontend's locale files by
+// tools/sjekk-plakattekst.mjs, which also fails when the two have drifted apart. Read at import
+// rather than through a JSON import attribute, which varies by Node version.
+const POSTER_TEXT_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), "posterText.json");
+export const POSTER_TEXT = JSON.parse(fs.readFileSync(POSTER_TEXT_PATH, "utf8"));
 
-export const POSTER_LANGUAGES = Object.keys(POSTER_TEXT);
+// Driven by the app's own language list, not by whatever happens to be in the JSON — a stray
+// key there should not quietly become an offered language.
+export const POSTER_LANGUAGES = SUPPORTED_LANGUAGES.filter((c) => POSTER_TEXT[c]);
 // Norwegian and English by default: Norwegian because that is the office language, English
 // because it is the one a cleaner who reads none of the others is most likely to get through.
 export const DEFAULT_POSTER_LANGUAGES = ["no", "en"];

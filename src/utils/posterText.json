@@ -1,0 +1,43 @@
+{
+  "_": "Instruksjonsteksten på den trykte QR-plakaten. GENERERT fra frontendens src/locales/<kode>.json (cleaner.onboarding.title og step1-3, uten nummereringen foran — plakaten nummererer selv). Rediger locale-filene, og kjør så `node tools/sjekk-plakattekst.mjs --fiks`. Porten uten --fiks feiler hvis de har kommet i utakt.",
+  "no": {
+    "title": "Kom i gang",
+    "steps": [
+      "Skann QR-koden ved lokasjonen",
+      "Huk av rom og oppgaver etter hvert som du gjør dem",
+      "Skriv navnet ditt og trykk «Fullfør»"
+    ]
+  },
+  "en": {
+    "title": "Getting started",
+    "steps": [
+      "Scan the QR code at the location",
+      "Tick off rooms and tasks as you do them",
+      "Enter your name and tap “Complete”"
+    ]
+  },
+  "lt": {
+    "title": "Kaip pradėti",
+    "steps": [
+      "Nuskaitykite QR kodą objekte",
+      "Žymėkite patalpas ir užduotis, kai jas atliekate",
+      "Įveskite savo vardą ir spustelėkite „Užbaigti“"
+    ]
+  },
+  "lv": {
+    "title": "Kā sākt",
+    "steps": [
+      "Noskenējiet QR kodu objektā",
+      "Atzīmējiet telpas un uzdevumus, kad tos paveicat",
+      "Ievadiet savu vārdu un nospiediet “Pabeigt”"
+    ]
+  },
+  "ru": {
+    "title": "Как начать",
+    "steps": [
+      "Отсканируйте QR-код на объекте",
+      "Отмечайте помещения и задачи по мере выполнения",
+      "Введите своё имя и нажмите «Завершить»"
+    ]
+  }
+}
