@@ -1636,7 +1636,9 @@ roomsRouter.post("/runs/:runId/control", requireAuth, requireRole("admin", "mana
   const name = (req.body?.name || "").trim();
   if (!name) return res.status(400).json({ code: "control_name_required", error: "Navn er påkrevd for å signere kontrollen." });
 
-  const items = db.prepare("SELECT control_status FROM room_run_items WHERE room_run_id = ?").all(req.params.runId);
+  const items = db
+    .prepare("SELECT id, label, control_status, control_comment FROM room_run_items WHERE room_run_id = ?")
+    .all(req.params.runId);
   // Signaturen skal bety at hvert punkt faktisk er sett på. Et rom signert med halvparten
   // uvurdert ville sagt «kontrollert» i dokumentasjonen uten at det var sant.
   const uncontrolled = items.filter((i) => !i.control_status).length;
@@ -1647,11 +1649,53 @@ roomsRouter.post("/runs/:runId/control", requireAuth, requireRole("admin", "mana
     });
   }
   const tally = (s) => items.filter((i) => i.control_status === s).length;
+  const kritiske = items.filter((i) => i.control_status === "kritisk");
+
+  const insertDeviation = db.prepare(
+    `INSERT INTO deviations (site_id, room_id, room_task_label, reported_by, reported_by_initials,
+                             title, description, priority, category)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'high', 'kvalitet')`
+  );
 
   db.transaction(() => {
     db.prepare(
       "UPDATE room_runs SET controlled_at = datetime('now'), controlled_by = ?, controlled_by_name = ? WHERE id = ?"
     ).run(req.user.id, name, req.params.runId);
+
+    // Hvert kritisk funn blir en sak med firetrinnsbehandling. Dette er styresakens poeng:
+    // kontrollen SKAPER avviket, den registrerer det ikke bare. Et kritisk funn som blir
+    // liggende som en kommentar på et besøk er «underrapportering og mangelfull lukking» —
+    // som står på lista over problemene systemet skal løse.
+    //
+    // Kategorien settes til kvalitet uten å gjette: dette er funnet i OKVs egen kvalitetskontroll
+    // av eget renhold, så opphavet bestemmer kategorien. Prioritet høy av samme grunn — det er
+    // hva «kritisk» betyr. Begge kan endres etterpå, og endringen blir loggført.
+    for (const item of kritiske) {
+      const inserted = insertDeviation.run(
+        roomRun.room_site_id,
+        roomRun.room_id,
+        item.label,
+        req.user.id,
+        name,
+        `Kritisk ved etterkontroll: ${item.label}`,
+        item.control_comment || `Kritisk avvik funnet ved etterkontroll av ${roomRun.room_name}.`
+      );
+      db.prepare("UPDATE room_run_items SET deviation_id = ? WHERE id = ?").run(inserted.lastInsertRowid, item.id);
+      logQualityEvent({
+        user: req.user,
+        action: "deviation_reported",
+        subjectType: "deviation",
+        subjectId: Number(inserted.lastInsertRowid),
+        siteId: roomRun.room_site_id,
+        roomId: roomRun.room_id,
+        afterValue: name,
+        comment: `Opprettet av etterkontroll: ${roomRun.room_name} · ${item.label}`,
+      });
+    }
+    if (kritiske.length > 0) {
+      db.prepare("UPDATE sites SET status = 'deviation' WHERE id = ?").run(roomRun.room_site_id);
+    }
+
     logQualityEvent({
       user: req.user,
       action: "room_controlled",
@@ -1664,7 +1708,13 @@ roomsRouter.post("/runs/:runId/control", requireAuth, requireRole("admin", "mana
     });
   })();
 
-  res.json({ ok: true, godkjent: tally("ok"), mangler: tally("mangler"), kritisk: tally("kritisk") });
+  res.json({
+    ok: true,
+    godkjent: tally("ok"),
+    mangler: tally("mangler"),
+    kritisk: tally("kritisk"),
+    avvik_opprettet: kritiske.length,
+  });
 });
 
 // A free-text note for the whole room's visit — same granularity as its photos (one shared

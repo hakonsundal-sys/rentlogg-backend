@@ -279,6 +279,12 @@ ensureColumn("room_run_items", "control_by", "control_by INTEGER REFERENCES user
 // avvikstrinnene: dokumentasjonen skal vise hvem som sto for kontrollen den dagen, også etter
 // at vedkommende har sluttet og brukeren er deaktivert.
 ensureColumn("room_run_items", "control_by_name", "control_by_name TEXT");
+// Avviket et kritisk kontrollpunkt skapte. Settes når kontrollen signeres, og gjør koblingen
+// sporbar begge veier: punktet peker på saken, og saken bærer rommet og oppgavenavnet.
+// Styresaken forutsetter at kontrollen SKAPER avviket — «underrapportering og mangelfull
+// lukking av avvik» står på lista over kjente problemer, og et kritisk funn som ikke blir en
+// sak med frist og ansvarlig er nøyaktig den underrapporteringen.
+ensureColumn("room_run_items", "deviation_id", "deviation_id INTEGER REFERENCES deviations(id)");
 
 // Selve signaturen på at hele rommet er etterkontrollert. Punktene over er vurderingene; dette
 // er at noen setter navnet sitt under at kontrollen er gjennomført.
