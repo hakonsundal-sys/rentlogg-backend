@@ -534,6 +534,10 @@ ensureColumn("room_runs", "approval_override_reason", "approval_override_reason 
 // kunder, lokasjoner, vaskeplan eller renholdsavvik. Rent visningsvalg i frontend; dataene og
 // rutene er de samme, og et firma uten rom har uansett ingenting å vise der. Se src/modules.js.
 ensureColumn("companies", "checklist_only", "checklist_only INTEGER NOT NULL DEFAULT 0");
+// Which languages the printed QR poster's instructions are written in, comma-separated (see
+// POSTER_LANGUAGES in utils/printSheets.js). NULL means the default — stored as NULL rather than
+// a literal 'no,en' so a company that never chose follows the default if it ever changes.
+ensureColumn("companies", "poster_languages", "poster_languages TEXT");
 
 // Sjekk det: målepunkter. Samme form som room_checklist_items (se måleoppgavene): measure_unit satt
 // = punktet er en måling, grensene er valgfrie hver for seg. Grensene og enheten kopieres ned på

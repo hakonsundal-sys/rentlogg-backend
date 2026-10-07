@@ -4,7 +4,7 @@ import path from "node:path";
 import { db } from "../db.js";
 import { requireAuth, requireAuthQueryOrHeader, requireRole } from "../middleware/auth.js";
 import { newQrToken, qrLabelSvgDataUrl } from "../utils/qrcode.js";
-import { qrPosterHtml, roomSheetHtml } from "../utils/printSheets.js";
+import { qrPosterHtml, roomSheetHtml, normalizePosterLanguages } from "../utils/printSheets.js";
 import { findRunForSiteDate, getRunStatusForSiteDate, todayInOslo, toOsloDateStr } from "../services/schedule.js";
 import { safeOriginalName, normalizeImageOrientation, documentFileFilter, removeUploadedFile } from "../utils/uploads.js";
 import { logQualityEvent } from "../services/qualityLog.js";
@@ -522,8 +522,8 @@ function printableSite(req, res) {
     res.status(status).json({ code, error });
     return null;
   }
-  const company = db.prepare("SELECT name FROM companies WHERE id = ?").get(site.company_id);
-  return { site, companyName: company?.name || "" };
+  const company = db.prepare("SELECT name, poster_languages FROM companies WHERE id = ?").get(site.company_id);
+  return { site, companyName: company?.name || "", posterLanguages: company?.poster_languages };
 }
 
 sitesRouter.get("/:id/qr-poster", requireAuthQueryOrHeader, requireRole("admin", "manager"), async (req, res) => {
@@ -537,6 +537,7 @@ sitesRouter.get("/:id/qr-poster", requireAuthQueryOrHeader, requireRole("admin",
       companyName: found.companyName,
       manualCode: found.site.qr_token,
       checkInUrl: `${baseUrl}/checkin/${found.site.qr_token}`,
+      languages: normalizePosterLanguages(found.posterLanguages),
     });
     res.type("html").send(html);
   } catch (err) {

@@ -2,6 +2,7 @@ import { Router } from "express";
 import { db } from "../db.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 import { isKnownModule, modulesWithStatus, setModuleEnabled, setChecklistOnly } from "../modules.js";
+import { normalizePosterLanguages, POSTER_LANGUAGES } from "../utils/printSheets.js";
 
 export const companiesRouter = Router();
 
@@ -65,6 +66,24 @@ companiesRouter.patch("/:id", requireAuth, requireRole("super_admin"), (req, res
 
   db.prepare("UPDATE companies SET name = ? WHERE id = ?").run(name, company.id);
   res.json({ id: company.id, name, modules: modulesWithStatus(company.id) });
+});
+
+// The one thing on this router a company's own admin may change, and the reason it is "/mine"
+// rather than "/:id": which languages the printed QR poster speaks is an operating detail of the
+// building, not a commercial setting like modules, and the people who know whether their cleaners
+// read Latvian are the company's own admins. Taking the company from the token rather than the
+// URL means there is no id to validate and no way to reach another tenant's row.
+companiesRouter.patch("/mine/poster-languages", requireAuth, requireRole("admin"), (req, res) => {
+  const valgt = Array.isArray(req.body?.languages) ? req.body.languages : null;
+  if (!valgt) return res.status(400).json({ code: "languages_required", error: "languages må være en liste" });
+  const ukjent = valgt.filter((c) => !POSTER_LANGUAGES.includes(String(c).trim().toLowerCase()));
+  if (ukjent.length) return res.status(400).json({ code: "unknown_language", error: `Ukjent språk: ${ukjent.join(", ")}` });
+  // An empty choice is not an error from the UI's point of view — it means "use the default" —
+  // but it must never print a poster with no instructions on it, so it is stored as NULL and
+  // normalizePosterLanguages turns that back into the default on the way out.
+  const lagret = valgt.length === 0 ? null : normalizePosterLanguages(valgt).join(",");
+  db.prepare("UPDATE companies SET poster_languages = ? WHERE id = ?").run(lagret, req.user.company_id);
+  res.json({ poster_languages: normalizePosterLanguages(lagret) });
 });
 
 companiesRouter.post("/", requireAuth, requireRole("super_admin"), (req, res) => {

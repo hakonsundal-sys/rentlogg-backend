@@ -55,7 +55,32 @@ const hintBoks = (tekst) => `<div class="skjerm">${tekst} Denne gule boksen blir
 
 // ---------------------------------------------------------------- QR-plakat
 
-export async function qrPosterHtml({ siteName, address, companyName, manualCode, checkInUrl }) {
+// The five languages the app itself speaks. The step texts are the app's own strings, copied
+// from the frontend's src/locales/<code>.json under cleaner.onboarding.{title,step1..3} — the two
+// repos deploy separately, so the backend cannot read those files. If a string changes there,
+// change it here too; nothing enforces it.
+export const POSTER_TEXT = {
+  no: { name: "Norsk", title: "Kom i gang", steps: ["Skann QR-koden ved lokasjonen", "Huk av rom og oppgaver etter hvert som du gjør dem", "Skriv navnet ditt og trykk «Fullfør»"] },
+  en: { name: "English", title: "Getting started", steps: ["Scan the QR code at the location", "Tick off rooms and tasks as you do them", "Enter your name and tap “Complete”"] },
+  lt: { name: "Lietuvių", title: "Kaip pradėti", steps: ["Nuskaitykite QR kodą objekte", "Žymėkite patalpas ir užduotis, kai jas atliekate", "Įveskite savo vardą ir spustelėkite „Užbaigti“"] },
+  lv: { name: "Latviešu", title: "Kā sākt", steps: ["Noskenējiet QR kodu objektā", "Atzīmējiet telpas un uzdevumus, kad tos paveicat", "Ievadiet savu vārdu un nospiediet “Pabeigt”"] },
+  ru: { name: "Русский", title: "Как начать", steps: ["Отсканируйте QR-код на объекте", "Отмечайте помещения и задачи по мере выполнения", "Введите своё имя и нажмите «Завершить»"] },
+};
+
+export const POSTER_LANGUAGES = Object.keys(POSTER_TEXT);
+// Norwegian and English by default: Norwegian because that is the office language, English
+// because it is the one a cleaner who reads none of the others is most likely to get through.
+export const DEFAULT_POSTER_LANGUAGES = ["no", "en"];
+
+// Accepts the stored comma-separated string, an array, or nothing at all. Anything unusable falls
+// back to the default rather than printing a poster with no instructions on it.
+export function normalizePosterLanguages(value) {
+  const list = Array.isArray(value) ? value : String(value ?? "").split(",");
+  const rene = [...new Set(list.map((c) => String(c).trim().toLowerCase()).filter((c) => POSTER_LANGUAGES.includes(c)))];
+  return rene.length ? rene.slice(0, 3) : DEFAULT_POSTER_LANGUAGES;
+}
+
+export async function qrPosterHtml({ siteName, address, companyName, manualCode, checkInUrl, languages }) {
   // Q (25%) rather than the default M: these sheets get taped to a wall in a production hall and
   // will be scanned wet, smudged and at an angle long before anyone reprints them.
   let qr = await QRCode.toString(checkInUrl, { type: "svg", errorCorrectionLevel: "Q", margin: 0 });
@@ -64,19 +89,20 @@ export async function qrPosterHtml({ siteName, address, companyName, manualCode,
   // A long name would otherwise push the QR down the page; shrink the type instead of wrapping.
   const tittelPt = siteName.length > 30 ? 20 : siteName.length > 22 ? 24 : 28;
 
-  // The steps are the app's own strings from the no/lt locale files, not translated here. Most of
-  // the people who read this poster do not read Norwegian.
-  const steg = {
-    no: ["Skann QR-koden ved lokasjonen", "Huk av rom og oppgaver etter hvert som du gjør dem", "Skriv navnet ditt og trykk «Fullfør»"],
-    lt: ["Nuskaitykite QR kodą objekte", "Žymėkite patalpas ir užduotis, kai jas atliekate", "Įveskite savo vardą ir spustelėkite „Užbaigti“"],
-  };
-  const kolonne = (tittel, liste) => `
-      <div style="flex:1">
-        <div style="font-size:9.5pt; font-weight:700; letter-spacing:.09em; text-transform:uppercase; color:#6d28d9; margin-bottom:7px">${escapeHtml(tittel)}</div>
-        <ol style="margin:0; padding-left:17px; font-size:11pt; line-height:1.55; color:#3f3f46">
-          ${liste.map((s) => `<li style="margin-bottom:3px">${escapeHtml(s)}</li>`).join("\n          ")}
+  // Three columns is where 11pt stops fitting across the box; past that the instructions get
+  // smaller rather than the poster getting taller, since the QR must keep its size.
+  const valgte = normalizePosterLanguages(languages);
+  const tekstPt = valgte.length >= 3 ? 9.5 : 11;
+  const kolonne = (kode) => {
+    const t = POSTER_TEXT[kode];
+    return `
+      <div style="flex:1; min-width:0">
+        <div style="font-size:9.5pt; font-weight:700; letter-spacing:.09em; text-transform:uppercase; color:#6d28d9; margin-bottom:7px">${escapeHtml(t.title)}</div>
+        <ol style="margin:0; padding-left:17px; font-size:${tekstPt}pt; line-height:1.55; color:#3f3f46">
+          ${t.steps.map((s) => `<li style="margin-bottom:3px">${escapeHtml(s)}</li>`).join("\n          ")}
         </ol>
       </div>`;
+  };
 
   return `<!DOCTYPE html>
 <html lang="nb">
@@ -118,8 +144,7 @@ export async function qrPosterHtml({ siteName, address, companyName, manualCode,
 
   <div style="margin-top:auto; padding-top:8mm">
     <div style="display:flex; gap:13mm; padding:6mm 7mm; background:#f5f3ff; border-radius:3mm">
-      ${kolonne("Slik gjør du", steg.no)}
-      ${kolonne("Kaip pradėti", steg.lt)}
+      ${valgte.map(kolonne).join("\n      ")}
     </div>
     <div style="text-align:center; font-size:9.5pt; color:#a1a1aa; margin-top:5mm">rentlogg.no</div>
   </div>

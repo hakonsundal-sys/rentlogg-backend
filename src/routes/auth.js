@@ -9,6 +9,14 @@ import { safeOriginalName, normalizeImageOrientation, imageFileFilter } from "..
 import { normalizeLanguage } from "../utils/languages.js";
 import { passwordChangeLimiter } from "../middleware/rateLimits.js";
 import { enabledModulesForCompany, isChecklistOnly } from "../modules.js";
+import { normalizePosterLanguages } from "../utils/printSheets.js";
+
+// Rides along with modules and checklist_only for the same reason they do: it decides what the
+// UI offers, never what the caller may do. The poster route reads the company's row itself.
+function posterLanguagesForCompany(companyId) {
+  const row = db.prepare("SELECT poster_languages FROM companies WHERE id = ?").get(companyId);
+  return normalizePosterLanguages(row?.poster_languages);
+}
 
 export const authRouter = Router();
 
@@ -95,6 +103,7 @@ authRouter.post("/login", loginLimiter, async (req, res) => {
       // request), so a stale copy in an old token's session can't grant anything.
       modules: enabledModulesForCompany(user.company_id),
       checklist_only: isChecklistOnly(user.company_id),
+      poster_languages: posterLanguagesForCompany(user.company_id),
     },
   });
 });
@@ -488,7 +497,12 @@ authRouter.get("/me", requireAuth, (req, res) => {
   const user = db
     .prepare("SELECT id, name, email, role, client_id, company_id, avatar_url, phone, created_at, language FROM users WHERE id = ?")
     .get(req.user.id);
-  res.json({ ...user, modules: enabledModulesForCompany(user.company_id), checklist_only: isChecklistOnly(user.company_id) });
+  res.json({
+    ...user,
+    modules: enabledModulesForCompany(user.company_id),
+    checklist_only: isChecklistOnly(user.company_id),
+    poster_languages: posterLanguagesForCompany(user.company_id),
+  });
 });
 
 authRouter.patch("/me", requireAuth, (req, res) => {
