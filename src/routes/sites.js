@@ -2,8 +2,9 @@ import { Router } from "express";
 import multer from "multer";
 import path from "node:path";
 import { db } from "../db.js";
-import { requireAuth, requireRole } from "../middleware/auth.js";
+import { requireAuth, requireAuthQueryOrHeader, requireRole } from "../middleware/auth.js";
 import { newQrToken, qrLabelSvgDataUrl } from "../utils/qrcode.js";
+import { qrPosterHtml, roomSheetHtml } from "../utils/printSheets.js";
 import { findRunForSiteDate, getRunStatusForSiteDate, todayInOslo, toOsloDateStr } from "../services/schedule.js";
 import { safeOriginalName, normalizeImageOrientation, documentFileFilter, removeUploadedFile } from "../utils/uploads.js";
 import { logQualityEvent } from "../services/qualityLog.js";
@@ -507,6 +508,76 @@ sitesRouter.get("/:id/qr", requireAuth, requireRole("admin", "manager"), async (
     console.error("QR generation error:", err);
     res.status(500).json({ code: "qr_generation_failed", error: "Kunne ikke generere QR-kode." });
   }
+});
+
+// The two printable sheets. They are whole HTML documents rather than JSON, because the point
+// is to open them in a tab and hit Ctrl+P — the browser's own print dialog is the PDF writer.
+//
+// requireAuthQueryOrHeader, not requireAuth: window.open cannot attach an Authorization header,
+// which is the same reason /uploads accepts ?token= (see middleware/auth.js). The token still has
+// to be a valid one for an admin or manager of this very site's company.
+function printableSite(req, res) {
+  const { site, status, code, error } = getSiteScoped(req.params.id, req.user);
+  if (error) {
+    res.status(status).json({ code, error });
+    return null;
+  }
+  const company = db.prepare("SELECT name FROM companies WHERE id = ?").get(site.company_id);
+  return { site, companyName: company?.name || "" };
+}
+
+sitesRouter.get("/:id/qr-poster", requireAuthQueryOrHeader, requireRole("admin", "manager"), async (req, res) => {
+  const found = printableSite(req, res);
+  if (!found) return;
+  const baseUrl = process.env.PUBLIC_BASE_URL || process.env.RENDER_EXTERNAL_URL || "http://localhost:4000";
+  try {
+    const html = await qrPosterHtml({
+      siteName: found.site.name,
+      address: found.site.address,
+      companyName: found.companyName,
+      manualCode: found.site.qr_token,
+      checkInUrl: `${baseUrl}/checkin/${found.site.qr_token}`,
+    });
+    res.type("html").send(html);
+  } catch (err) {
+    console.error("QR poster error:", err);
+    res.status(500).json({ code: "qr_generation_failed", error: "Kunne ikke generere plakaten." });
+  }
+});
+
+sitesRouter.get("/:id/romliste", requireAuthQueryOrHeader, requireRole("admin", "manager"), (req, res) => {
+  const found = printableSite(req, res);
+  if (!found) return;
+
+  // Read in three flat queries and stitch in memory rather than one row per task per day: the
+  // sheet needs every room even when it has no tasks, and every task even when it has no day of
+  // its own, which a join would have to express as a pile of LEFT JOINs and duplicate rows.
+  const rooms = db.prepare("SELECT * FROM rooms WHERE site_id = ? ORDER BY sort_order, id").all(found.site.id);
+  const byRoom = new Map(rooms.map((r) => [r.id, { ...r, weekdays: [], items: [] }]));
+  if (rooms.length > 0) {
+    const ids = rooms.map((r) => r.id);
+    const hull = ids.map(() => "?").join(",");
+    for (const row of db.prepare(`SELECT room_id, weekday FROM room_schedules WHERE room_id IN (${hull})`).all(...ids)) {
+      byRoom.get(row.room_id).weekdays.push(row.weekday);
+    }
+    const items = db.prepare(`SELECT * FROM room_checklist_items WHERE room_id IN (${hull}) ORDER BY sort_order, id`).all(...ids);
+    const byItem = new Map(items.map((i) => [i.id, { ...i, weekly_days: [], months: [] }]));
+    if (items.length > 0) {
+      const itemHull = items.map(() => "?").join(",");
+      const itemIds = items.map((i) => i.id);
+      for (const row of db.prepare(`SELECT item_id, weekday FROM room_checklist_item_weekdays WHERE item_id IN (${itemHull})`).all(...itemIds)) {
+        byItem.get(row.item_id).weekly_days.push(row.weekday);
+      }
+      for (const row of db.prepare(`SELECT item_id, month FROM room_checklist_item_months WHERE item_id IN (${itemHull})`).all(...itemIds)) {
+        byItem.get(row.item_id).months.push(row.month);
+      }
+    }
+    for (const item of items) byRoom.get(item.room_id).items.push(byItem.get(item.id));
+  }
+
+  res.type("html").send(
+    roomSheetHtml({ siteName: found.site.name, companyName: found.companyName, rooms: [...byRoom.values()] })
+  );
 });
 
 // Called when a cleaner scans the QR code. Reuses today's run for this site if one already
