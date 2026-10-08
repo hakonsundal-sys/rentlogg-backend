@@ -41,7 +41,12 @@ function nthWeekdayOfMonth(year, month, weekday, occurrence) {
 const candidateRoomRunsStmt = db.prepare(
   `SELECT id, started_at, completed_at, cleaner_id, signed_initials, signed_by, edited_at, edited_by_initials, note,
           ready_for_approval_at, approved_at, approved_by_initials, approved_by, approved_by_role,
-          approval_override_reason
+          approval_override_reason,
+          -- Etterkontrollen. Listen er eksplisitt og ikke SELECT *, så en ny kolonne på
+          -- room_runs når ikke fram hit av seg selv — den må skrives inn her. Det var nettopp
+          -- det som skjedde: kontrollen ble lagret riktig og var likevel usynlig i
+          -- besøksvisningen, fordi raden som nådde fram manglet feltene.
+          controlled_at, controlled_by, controlled_by_name
    FROM room_runs
    WHERE room_id = ? AND started_at >= date(?, '-1 day') AND started_at < date(?, '+2 day')
    ORDER BY started_at DESC`

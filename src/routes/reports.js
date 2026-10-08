@@ -321,6 +321,39 @@ function sendAuditZip(res, { site, from, to, companyName, hideStaffNames = false
     )
     .all(site.id, from, to);
 
+  // Etterkontrollen i perioden. Egen spørring fordi den er OKVs egen kontroll og ikke kundens
+  // godkjenning — en revisor som ber om dokumentasjon skal se at vi fant det selv, og hva vi
+  // fant, ikke bare at kunden sa ja.
+  const kontroller = db
+    .prepare(
+      `SELECT rr.controlled_at, rr.controlled_by_name, r.name AS room_name,
+              SUM(CASE WHEN i.control_status = 'ok' THEN 1 ELSE 0 END) AS godkjent,
+              SUM(CASE WHEN i.control_status = 'mangler' THEN 1 ELSE 0 END) AS mangler,
+              SUM(CASE WHEN i.control_status = 'kritisk' THEN 1 ELSE 0 END) AS kritisk
+         FROM room_runs rr
+         JOIN rooms r ON r.id = rr.room_id
+         LEFT JOIN room_run_items i ON i.room_run_id = rr.id
+        WHERE r.site_id = ? AND rr.controlled_at IS NOT NULL
+          AND date(rr.started_at) BETWEEN ? AND ?
+        GROUP BY rr.id ORDER BY rr.controlled_at`
+    )
+    .all(site.id, from, to);
+
+  // Punktene som ikke ble godkjent, med teamlederens egen setning om hva som manglet. Det er
+  // dette en revisor faktisk leter etter: ikke at det ble kontrollert, men hva kontrollen fant.
+  const kontrollfunn = db
+    .prepare(
+      `SELECT rr.controlled_at, r.name AS room_name, i.label, i.control_status, i.control_comment,
+              i.control_by_name
+         FROM room_run_items i
+         JOIN room_runs rr ON rr.id = i.room_run_id
+         JOIN rooms r ON r.id = rr.room_id
+        WHERE r.site_id = ? AND i.control_status IS NOT NULL AND i.control_status != 'ok'
+          AND date(rr.started_at) BETWEEN ? AND ?
+        ORDER BY rr.controlled_at, r.name`
+    )
+    .all(site.id, from, to);
+
   const auditRows = queryQualityLog({
     companyId: site.company_id, from, to, siteId: site.id, action: null, limit: 10000,
   });
@@ -353,7 +386,29 @@ function sendAuditZip(res, { site, from, to, companyName, hideStaffNames = false
   doc.text(`Avvik meldt: ${deviations.length} (lukket med signatur: ${deviations.filter((d) => d.closed_at).length})`);
   doc.text(`Måleresultater: ${measurements.length} (innenfor: ${within}, utenfor: ${outside.length})`);
   doc.text(`Hendelser i revisjonssporet: ${auditRows.length}`);
+  doc.text(`Rom etterkontrollert: ${kontroller.length}` + (kontrollfunn.length ? ` (funn: ${kontrollfunn.length})` : ""));
   doc.moveDown(1);
+
+  // Kontrollfunnene står FØR målingene, fordi de er det en revisor spør om først: fant dere det
+  // selv, og hva gjorde dere. Et funn uten teamlederens egen setning om hva som manglet ville
+  // vært en status uten innhold, så kommentaren er med.
+  if (kontrollfunn.length > 0) {
+    doc.fontSize(13).fillColor("#6d28d9").text("Funn ved egen etterkontroll");
+    doc.moveDown(0.3);
+    kontrollfunn.forEach((f) => {
+      if (doc.y > doc.page.height - 90) doc.addPage();
+      const merke = f.control_status === "kritisk" ? "KRITISK" : "MANGLER";
+      doc.fontSize(10).fillColor(f.control_status === "kritisk" ? "#dc2626" : "#d97706").text(
+        `${String(f.controlled_at).slice(0, 10)} · ${f.room_name} · ${f.label} — ${merke}`
+      );
+      if (f.control_comment) {
+        doc.fontSize(9.5).fillColor("#18181b").text(f.control_comment, { indent: 12 });
+      }
+      doc.fontSize(9).fillColor("#71717a").text(`Kontrollert av: ${f.control_by_name || "—"}`, { indent: 12 });
+      doc.moveDown(0.2);
+    });
+    doc.moveDown(0.8);
+  }
 
   if (outside.length > 0) {
     doc.fontSize(13).fillColor("#dc2626").text("Målinger utenfor grensen");

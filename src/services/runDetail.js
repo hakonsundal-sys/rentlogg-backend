@@ -42,6 +42,11 @@ function buildRoomsForDate(siteId, dateStr) {
       // showing a name that reads as the customer's own sign-off.
       approved_by_role: roomRun?.approved_by_role || null,
       approval_override_reason: roomRun?.approval_override_reason || null,
+      // Etterkontrollen — OKVs egen, adskilt fra kundegodkjenningen over. Tas med her fordi
+      // dette er visningen alle besøksflater bygger på: uten den var kontrollen bare synlig
+      // på selve kontrollsiden, og et «mangler»-funn forsvant ut av syne så snart man forlot den.
+      controlled_at: roomRun?.controlled_at || null,
+      controlled_by_name: roomRun?.controlled_by_name || null,
       // Everyone who actually worked this room today, not just whoever opened it first — see
       // room_run_participants in schema.sql. Empty for every run recorded before this existed,
       // which is honest: we genuinely do not know who else was in the room those days.

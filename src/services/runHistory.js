@@ -41,6 +41,7 @@ export function buildRunHistory(detail) {
       add(room.completed_at, "room_completed", { room: room.name, actor: room.signed_initials });
     }
     add(room.approved_at, "room_approved", { room: room.name, actor: room.approved_by_initials });
+    add(room.controlled_at, "room_controlled", { room: room.name, actor: room.controlled_by_name });
     add(room.edited_at, "room_edited", { room: room.name, actor: room.edited_by_initials });
     (room.photos || []).forEach((photo) => add(photo.created_at, "photo_added", { room: room.name }));
   });
