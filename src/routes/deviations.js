@@ -54,10 +54,12 @@ deviationsRouter.get("/", requireAuth, (req, res) => {
   if (req.user.role === "customer") {
     const rows = db
       .prepare(
-        `SELECT d.*, r.started_at AS run_started_at, rm.name AS room_name, rm.responsible AS room_responsible FROM deviations d
+        `SELECT d.*, r.started_at AS run_started_at, rm.name AS room_name, rm.responsible AS room_responsible,
+                ansv.name AS responsible_name FROM deviations d
          JOIN sites s ON s.id = d.site_id
          LEFT JOIN checklist_runs r ON r.id = d.run_id
          LEFT JOIN rooms rm ON rm.id = d.room_id
+       LEFT JOIN users ansv ON ansv.id = d.responsible_user_id
          WHERE s.client_id = ?
          ORDER BY d.created_at DESC`
       )
@@ -71,10 +73,12 @@ deviationsRouter.get("/", requireAuth, (req, res) => {
     // today needs to see it, not just whoever happened to create that day's run.
     const rows = db
       .prepare(
-        `SELECT d.*, r.started_at AS run_started_at, rm.name AS room_name, rm.responsible AS room_responsible FROM deviations d
+        `SELECT d.*, r.started_at AS run_started_at, rm.name AS room_name, rm.responsible AS room_responsible,
+                ansv.name AS responsible_name FROM deviations d
          JOIN sites s ON s.id = d.site_id
          LEFT JOIN checklist_runs r ON r.id = d.run_id
          LEFT JOIN rooms rm ON rm.id = d.room_id
+       LEFT JOIN users ansv ON ansv.id = d.responsible_user_id
          WHERE s.company_id = ?
          ORDER BY d.created_at DESC`
       )
@@ -83,10 +87,12 @@ deviationsRouter.get("/", requireAuth, (req, res) => {
   }
   const rows = db
     .prepare(
-      `SELECT d.*, r.started_at AS run_started_at, rm.name AS room_name, rm.responsible AS room_responsible FROM deviations d
+      `SELECT d.*, r.started_at AS run_started_at, rm.name AS room_name, rm.responsible AS room_responsible,
+                ansv.name AS responsible_name FROM deviations d
        JOIN sites s ON s.id = d.site_id
        LEFT JOIN checklist_runs r ON r.id = d.run_id
        LEFT JOIN rooms rm ON rm.id = d.room_id
+       LEFT JOIN users ansv ON ansv.id = d.responsible_user_id
        WHERE s.company_id = ?
        ORDER BY d.created_at DESC`
     )
@@ -197,6 +203,21 @@ export const DEVIATION_CATEGORIES = {
   forbedring: "Forbedringsforslag",
 };
 
+// Oversetter en innsendt bruker-id til en vi stoler på. Samme form og samme grunn som
+// resolveChemicalId i rooms.js: uten eierskapssjekken kunne en id fra et annet firma gjort en
+// fremmed ansatt til «ansvarlig» på et avvik de ikke kan se.
+//
+// Tom verdi betyr «ingen ansvarlig», ikke ugyldig — en sak skal kunne settes tilbake til
+// uten eier av den som oppdager at feil person sto der.
+function readResponsible(raw, user) {
+  if (raw === null || raw === undefined || raw === "") return { value: null };
+  const row = db.prepare("SELECT id, name, company_id FROM users WHERE id = ?").get(raw);
+  if (!row || row.company_id !== user.company_id) {
+    return { error: { code: "responsible_not_found", error: "Fant ikke brukeren." } };
+  }
+  return { value: Number(raw), name: row.name };
+}
+
 const DEVIATION_PATCH_FIELDS = ["title", "description", "priority"];
 
 // Tom streng betyr «fjern», ikke «ugyldig» — et avvik skal kunne settes tilbake til ukategorisert
@@ -273,6 +294,28 @@ deviationsRouter.patch("/:id", requireAuth, requireRole("admin", "manager"), (re
           siteId: deviation.site_id,
           beforeValue: deviation.due_date || "Ingen frist",
           afterValue: value || "Ingen frist",
+        });
+      })();
+    }
+  }
+
+  if ("responsible_user_id" in req.body) {
+    const { value, name, error: respError } = readResponsible(req.body.responsible_user_id, req.user);
+    if (respError) return res.status(400).json(respError);
+    if (value !== deviation.responsible_user_id) {
+      const foer = deviation.responsible_user_id
+        ? db.prepare("SELECT name FROM users WHERE id = ?").get(deviation.responsible_user_id)?.name
+        : null;
+      db.transaction(() => {
+        db.prepare("UPDATE deviations SET responsible_user_id = ? WHERE id = ?").run(value, req.params.id);
+        logQualityEvent({
+          user: req.user,
+          action: "deviation_responsible",
+          subjectType: "deviation",
+          subjectId: Number(req.params.id),
+          siteId: deviation.site_id,
+          beforeValue: foer || "Ingen ansvarlig",
+          afterValue: name || "Ingen ansvarlig",
         });
       })();
     }

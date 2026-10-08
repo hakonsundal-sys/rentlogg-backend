@@ -187,6 +187,37 @@ dashboardRouter.get("/kpi", requireAuth, requireRole("admin", "manager"), (req, 
     )
     .get(co).antall;
 
+  // Lukketid per ansvarlig. Dette er grunnen til at ansvarlig måtte være en brukerreferanse og
+  // ikke et navn skrevet for hånd — man kan ikke gruppere på fritekst.
+  //
+  // Bare avvik som FAKTISK har en ansvarlig teller med. Å slå de eierløse sammen i en «ukjent»-
+  // rad ville sett ut som en persons tall og vært summen av alt ingen tok tak i; de står i
+  // stedet som sitt eget tall under, hvor de hører hjemme som et varsel.
+  const perAnsvarlig = db
+    .prepare(
+      `SELECT u.name AS navn,
+              COUNT(*) AS totalt,
+              SUM(CASE WHEN COALESCE(d.closed_at, d.resolved_at) IS NOT NULL THEN 1 ELSE 0 END) AS lukket,
+              ROUND(AVG(CASE WHEN COALESCE(d.closed_at, d.resolved_at) IS NOT NULL
+                        THEN julianday(COALESCE(d.closed_at, d.resolved_at)) - julianday(d.created_at) END), 1) AS snitt_dager,
+              SUM(CASE WHEN d.status != 'resolved' AND d.due_date IS NOT NULL AND d.due_date < date('now')
+                       THEN 1 ELSE 0 END) AS forfalte
+         FROM deviations d
+         JOIN sites s ON s.id = d.site_id
+         JOIN users u ON u.id = d.responsible_user_id
+        WHERE s.company_id = ? AND d.created_at >= datetime('now', ?)
+        GROUP BY d.responsible_user_id
+        ORDER BY forfalte DESC, totalt DESC`
+    )
+    .all(co, since);
+
+  const utenAnsvarlig = db
+    .prepare(
+      `SELECT COUNT(*) AS antall FROM deviations d JOIN sites s ON s.id = d.site_id
+        WHERE s.company_id = ? AND d.status != 'resolved' AND d.responsible_user_id IS NULL`
+    )
+    .get(co).antall;
+
   // ── Kompetanse ──
   // Utløpt og utløper-snart, per person. Et kurs uten utløpsdato (validity_months er NULL)
   // gjelder for alltid og er verken utløpt eller på vei dit — det skal ikke telles som noe.
@@ -210,6 +241,8 @@ dashboardRouter.get("/kpi", requireAuth, requireRole("admin", "manager"), (req, 
       lengste_dager: lukketid.lengste_dager,
       forfalte,
       apne_uten_frist: apneUtenFrist,
+      per_ansvarlig: perAnsvarlig,
+      apne_uten_ansvarlig: utenAnsvarlig,
     },
     kompetanse: {
       utlopt: kompetanse.utlopt || 0,

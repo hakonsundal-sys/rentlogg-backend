@@ -135,6 +135,20 @@ ensureColumn("deviations", "closed_at", "closed_at TEXT");
 ensureColumn("deviations", "category", "category TEXT");
 // ISO-dato (YYYY-MM-DD), ikke tidsstempel: en frist på et avvik er en dag, ikke et klokkeslett.
 ensureColumn("deviations", "due_date", "due_date TEXT");
+
+// Hvem som EIER saken. Eget felt, ikke en omskriving av `assigned_to` over — den er et
+// rutingsflagg med to verdier ('manager'/'customer' = «sendt til driftsleder»/«sendt til
+// kunde»), satt av renholderens svar. «Sendt til kunde» er ikke en person, så å presse en
+// brukerreferanse inn i det feltet ville ødelagt rutingen og fortsatt ikke svart på hvem som
+// er ansvarlig.
+//
+// Styresaken lister «Ansvarlig» blant det et avvik skal registreres med, og IK-mat § 5 nr. 4
+// og 5 krever «opplysninger om hvem som er ansvarlig» skriftlig. Firetrinnssporet bærer navnet
+// på den som utførte hvert steg; dette er den som skal se til at det blir gjort.
+//
+// Brukerreferanse og ikke tekst, fordi det er det som gjør «lukketid per ansvarlig» mulig —
+// et navn skrevet for hånd kan ikke grupperes på.
+ensureColumn("deviations", "responsible_user_id", "responsible_user_id INTEGER REFERENCES users(id)");
 ensureColumn("room_runs", "edited_at", "edited_at TEXT");
 ensureColumn("room_runs", "edited_by_initials", "edited_by_initials TEXT");
 ensureColumn("checklist_runs", "edited_at", "edited_at TEXT");
