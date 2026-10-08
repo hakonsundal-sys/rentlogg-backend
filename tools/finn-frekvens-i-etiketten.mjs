@@ -16,6 +16,9 @@
 //   DB_FILE=... node tools/finn-frekvens-i-etiketten.mjs
 //   DB_FILE=... node tools/finn-frekvens-i-etiketten.mjs --full   (hver enkelt oppgave)
 
+// Leser .env som serveren gjør. Uten dette må hver variabel settes på kommandolinja,
+// og et verktøy man må huske fem miljøvariabler til, blir ikke brukt når det haster.
+import "dotenv/config";
 import Database from "better-sqlite3";
 
 const dbFile = process.env.DB_FILE || "./data/rentlogg.db";
@@ -27,7 +30,10 @@ const db = new Database(dbFile, { readonly: true });
 const MØNSTRE = [
   { navn: "månedlig", re: /\((?:1x\/mnd|1 x\/mnd|månedlig|en gang i måneden)\)/i },
   { navn: "flere i måneden", re: /\((\d+)x\/mnd\)/i },
-  { navn: "ukentlig/bestemt dag", re: /\(kun [^)]*\)/i },
+  // «kun» må følges av en UKEDAG. «(kun utvendig)» og «(kun utvendig vask)» beskriver omfang,
+  // ikke frekvens — de skal gjøres like ofte som resten av rommet, bare mindre grundig. Tre
+  // slike ble feilmeldt første gang dette kjørte mot produksjon.
+  { navn: "ukentlig/bestemt dag", re: /\(kun (?:man|tirs|ons|tors|fre|lør|søn)[a-zæøå]*(?:\s*\+\s*[a-zæøå]+)*\)/i },
   { navn: "ved behov", re: /\(ved behov\)/i },
   { navn: "sjeldnere enn månedlig", re: /\((?:1x\/år|årlig|kvartal|halvår)[^)]*\)/i },
   { navn: "annen frekvens i navnet", re: /\(\s*\d+\s*x\s*\/\s*(uke|mnd|år)[^)]*\)/i },

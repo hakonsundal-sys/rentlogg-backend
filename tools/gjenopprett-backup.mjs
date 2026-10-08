@@ -13,6 +13,9 @@
 // ALDRI den databasen som er i drift: det skriver til fila du oppgir, og nekter å skrive over en
 // som finnes. Å bytte inn den gjenopprettede fila er en manuell handling, med vilje.
 
+// Leser .env som serveren gjør. Uten dette må hver variabel settes på kommandolinja,
+// og et verktøy man må huske fem miljøvariabler til, blir ikke brukt når det haster.
+import "dotenv/config";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
