@@ -872,3 +872,48 @@ CREATE TABLE IF NOT EXISTS simple_checklist_settings (
   report_hour INTEGER,
   updated_at TEXT DEFAULT (datetime('now'))
 );
+
+-- Mikrobiologisk prøvetaking — teamlederens egen kontroll, ved siden av etterkontrollen av
+-- renholderens arbeid. Modellert etter OKVs egne skjemaer BA001/BA002 for Modesta Mat: én runde
+-- er ett uttak på én lokasjon, med fem prøvepunkter.
+--
+-- Hvorfor dette ikke er en måleoppgave på en sjekkliste: en prøve avleses ETTER at den er tatt
+-- (Hygicult inkuberes ett døgn ved 37 °C), ofte av en annen person. Uttak og avlesning er derfor
+-- to signaturer på to datoer, og mellom dem står runden med tomme resultater. Et avkryssingspunkt
+-- i et romkjør kan ikke være halvferdig på den måten.
+CREATE TABLE IF NOT EXISTS sample_rounds (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  company_id INTEGER NOT NULL REFERENCES companies(id),
+  site_id INTEGER NOT NULL REFERENCES sites(id),
+  taken_date TEXT NOT NULL,
+  taken_by INTEGER REFERENCES users(id),
+  taken_by_name TEXT NOT NULL,
+  -- NULL så lenge prøvene står til inkubering. Avlesningen er det som gjør runden ferdig.
+  read_date TEXT,
+  read_by INTEGER REFERENCES users(id),
+  read_by_name TEXT,
+  note TEXT,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
+-- Ett prøvepunkt. `area`/`object` er Lokale og Inv./Objekt fra skjemaet, som fritekst og ikke som
+-- fremmednøkkel til rooms: prøvene tas på «Håndtak kjølerom 1 og 2» og «Under pakkebord, på bein»,
+-- som er punkter på et objekt, ikke rom i vaskeplanen.
+--
+-- Alle fire resultatfeltene er NULL til avlesningen. Totalkim og ATP er tall; E-coli og listeria
+-- er påvist/ikke påvist, fordi det er slik hurtigtesten leses — en «mengde» ville vært oppdiktet.
+CREATE TABLE IF NOT EXISTS sample_points (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  round_id INTEGER NOT NULL REFERENCES sample_rounds(id) ON DELETE CASCADE,
+  sort_order INTEGER DEFAULT 0,
+  area TEXT,
+  object TEXT NOT NULL,
+  totalkim REAL,
+  atp REAL,
+  ecoli TEXT CHECK (ecoli IN ('paavist', 'ikke_paavist')),
+  listeria TEXT CHECK (listeria IN ('paavist', 'ikke_paavist')),
+  comment TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_sample_rounds_site ON sample_rounds(site_id, taken_date);
+CREATE INDEX IF NOT EXISTS idx_sample_points_round ON sample_points(round_id);
