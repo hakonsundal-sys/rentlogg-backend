@@ -151,8 +151,3 @@ export async function translatePlanTexts(texts, language) {
   }
   return out;
 }
-
-// Exposed for diagnostics only — never surfaced through a route.
-export function _cacheSize() {
-  return cache.size;
-}

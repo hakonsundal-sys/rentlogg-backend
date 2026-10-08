@@ -1,7 +1,7 @@
 import { db } from "../db.js";
 import { isModuleEnabled } from "../modules.js";
 import { isWithinSiteRadius } from "../utils/geo.js";
-import { todayInOslo, toOsloDateStr } from "./schedule.js";
+import { todayInOslo } from "./schedule.js";
 // Imported lazily-shaped rather than at the top of the file would be cleaner, but these two are
 // leaves: timeOrders.js imports only nowStamp from here, so the cycle resolves.
 import { logEntryEvent, orderIdForSite } from "./timeOrders.js";
@@ -16,7 +16,6 @@ import { logEntryEvent, orderIdForSite } from "./timeOrders.js";
 // site_schedules and services/schedule.js. (Getting this backwards once already cost 11 sites a
 // corrected import.)
 
-export const BILLING_MODES = ["actual", "fixed"];
 const MINUTES_PER_DAY = 24 * 60;
 
 // How long an open stamping can have been running and still be "the same shift" when the same
@@ -815,10 +814,6 @@ export function osloTimeToUtcStamp(dateStr, timeStr) {
 export function osloTimeOf(stamp) {
   if (!stamp) return "";
   return OSLO_CLOCK.format(parseStamp(stamp));
-}
-
-export function osloDateOf(stamp) {
-  return stamp ? toOsloDateStr(stamp) : "";
 }
 
 // An end before its own start, or a shift longer than a calendar day, is a typo rather than a
