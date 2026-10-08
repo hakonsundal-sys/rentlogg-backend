@@ -101,6 +101,123 @@ dashboardRouter.get("/summary", requireAuth, requireRole("admin", "manager"), (r
 // the bulk-delete cascades that used to drop only the DB row (see utils/uploads.js's
 // removeUploadedFile comment) still occupy the disk, so a DB-only sum would under-report exactly
 // the thing being measured.
+// ── KPI: kvalitet, drift og kompetanse ──────────────────────────────────────────────────────
+//
+// Styresaken ber om fire dashbord: drift, HMS, kvalitet og kompetanse. Tre av dem er mulige nå,
+// og det er ikke tilfeldig — de ble det da avvikskategori og frist kom inn (d158382) og da
+// opplæringen fikk utløpsdato. HMS-dashbordet mangler fortsatt en HMS-modul å hente tall fra.
+//
+// «For svak trendanalyse» står på styresakens liste over de sju problemene systemet skal løse.
+// Dette er svaret på det punktet, og hele grunnen til at kategorien måtte finnes først:
+// «gjentakende avvik» og «avvik per type» kan ikke regnes ut av fritekst.
+//
+// Alle tallene er for ett vindu bakover i tid, og vinduet står i svaret. Et KPI uten periode er
+// ikke et tall man kan handle på — «14 avvik» betyr noe helt annet denne uka enn i år.
+dashboardRouter.get("/kpi", requireAuth, requireRole("admin", "manager"), (req, res) => {
+  const days = Math.min(Math.max(Number(req.query.days) || 90, 7), 365);
+  const since = `-${days} days`;
+  const co = req.user.company_id;
+
+  // ── Kvalitet ──
+  // Avvik per kategori, med de ukategoriserte synlige som sin egen rad. De skal ikke skjules:
+  // blindsonen er ekte (gamle avvik ble aldri etterfylt, med vilje), og et dashbord som later
+  // som den ikke finnes, lyver om sitt eget grunnlag.
+  const perKategori = db
+    .prepare(
+      `SELECT COALESCE(d.category, 'ukategorisert') AS kategori, COUNT(*) AS antall
+         FROM deviations d JOIN sites s ON s.id = d.site_id
+        WHERE s.company_id = ? AND d.created_at >= datetime('now', ?)
+        GROUP BY kategori ORDER BY antall DESC`
+    )
+    .all(co, since);
+
+  // Gjentakende avvik: samme oppgave i samme rom, mer enn én gang i perioden. Det er den
+  // definisjonen som er handlingsbar — «det går galt på akkurat dette punktet igjen» — og den
+  // eneste som lar seg regne ut uten å gjette på fritekst.
+  //
+  // Bare avvik med rom OG oppgavenavn teller med. Et avvik meldt av kunden på lokasjonsnivå har
+  // ingen av delene, og å telle dem sammen ville laget en trend av ting som ikke er det samme.
+  const gjentakende = db
+    .prepare(
+      `SELECT s.name AS lokasjon, r.name AS rom, d.room_task_label AS oppgave, COUNT(*) AS antall,
+              MAX(d.created_at) AS siste
+         FROM deviations d
+         JOIN sites s ON s.id = d.site_id
+         JOIN rooms r ON r.id = d.room_id
+        WHERE s.company_id = ? AND d.created_at >= datetime('now', ?)
+          AND d.room_id IS NOT NULL AND d.room_task_label IS NOT NULL AND d.room_task_label != ''
+        GROUP BY d.room_id, d.room_task_label
+       HAVING COUNT(*) > 1
+        ORDER BY antall DESC, siste DESC
+        LIMIT 20`
+    )
+    .all(co, since);
+
+  // ── Drift ──
+  // Lukketid. COALESCE fordi et avvik kan lukkes to veier: den signerte firetrinnslukkingen
+  // (closed_at) eller status satt til resolved (resolved_at). Den første er den som er
+  // dokumentasjon; den andre teller med fordi den finnes i ekte data og å utelate den ville
+  // gitt et penere tall enn virkeligheten.
+  const lukketid = db
+    .prepare(
+      `SELECT COUNT(*) AS antall,
+              ROUND(AVG(julianday(COALESCE(d.closed_at, d.resolved_at)) - julianday(d.created_at)), 1) AS snitt_dager,
+              ROUND(MAX(julianday(COALESCE(d.closed_at, d.resolved_at)) - julianday(d.created_at)), 1) AS lengste_dager
+         FROM deviations d JOIN sites s ON s.id = d.site_id
+        WHERE s.company_id = ? AND d.created_at >= datetime('now', ?)
+          AND COALESCE(d.closed_at, d.resolved_at) IS NOT NULL`
+    )
+    .get(co, since);
+
+  // Forfalte: åpne avvik der fristen er passert. Dette er det ene tallet på hele siden som
+  // krever handling i dag, så det regnes uten tidsvindu — en frist fra i fjor som aldri ble
+  // møtt er fortsatt forfalt.
+  const forfalte = db
+    .prepare(
+      `SELECT COUNT(*) AS antall FROM deviations d JOIN sites s ON s.id = d.site_id
+        WHERE s.company_id = ? AND d.status != 'resolved'
+          AND d.due_date IS NOT NULL AND d.due_date < date('now')`
+    )
+    .get(co).antall;
+
+  const apneUtenFrist = db
+    .prepare(
+      `SELECT COUNT(*) AS antall FROM deviations d JOIN sites s ON s.id = d.site_id
+        WHERE s.company_id = ? AND d.status != 'resolved' AND d.due_date IS NULL`
+    )
+    .get(co).antall;
+
+  // ── Kompetanse ──
+  // Utløpt og utløper-snart, per person. Et kurs uten utløpsdato (validity_months er NULL)
+  // gjelder for alltid og er verken utløpt eller på vei dit — det skal ikke telles som noe.
+  const kompetanse = db
+    .prepare(
+      `SELECT
+         SUM(CASE WHEN tr.expires_at IS NOT NULL AND tr.expires_at < date('now') THEN 1 ELSE 0 END) AS utlopt,
+         SUM(CASE WHEN tr.expires_at IS NOT NULL AND tr.expires_at >= date('now')
+                   AND tr.expires_at < date('now', '+60 days') THEN 1 ELSE 0 END) AS utloper_snart
+         FROM training_records tr JOIN users u ON u.id = tr.user_id
+        WHERE u.company_id = ? AND tr.completed_at IS NOT NULL`
+    )
+    .get(co);
+
+  res.json({
+    periode_dager: days,
+    kvalitet: { per_kategori: perKategori, gjentakende },
+    drift: {
+      lukkede: lukketid.antall || 0,
+      snitt_dager: lukketid.snitt_dager,
+      lengste_dager: lukketid.lengste_dager,
+      forfalte,
+      apne_uten_frist: apneUtenFrist,
+    },
+    kompetanse: {
+      utlopt: kompetanse.utlopt || 0,
+      utloper_snart: kompetanse.utloper_snart || 0,
+    },
+  });
+});
+
 const RETENTION_MONTHS = 36;
 
 function walkUploads(dir) {
