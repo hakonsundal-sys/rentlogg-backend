@@ -11,6 +11,7 @@ import { logQualityEvent } from "../services/qualityLog.js";
 import { haversineMeters } from "../utils/geo.js";
 import { weekdayFrom, assigneeFrom, INVALID_ASSIGNEE } from "../utils/schedules.js";
 import { startEntryForCheckin } from "../services/timeEntries.js";
+import { deleteRoomRecords } from "../services/rooms.js";
 
 export const sitesRouter = Router();
 
@@ -226,42 +227,7 @@ sitesRouter.delete("/:id", requireAuth, requireRole("admin", "manager"), (req, r
     db.prepare("DELETE FROM site_schedules WHERE site_id = ?").run(siteId);
 
     const roomIds = db.prepare("SELECT id FROM rooms WHERE site_id = ?").all(siteId).map((r) => r.id);
-    if (roomIds.length) {
-      const roomPlaceholders = roomIds.map(() => "?").join(",");
-      const roomRunIds = db
-        .prepare(`SELECT id FROM room_runs WHERE room_id IN (${roomPlaceholders})`)
-        .all(...roomIds)
-        .map((r) => r.id);
-      if (roomRunIds.length) {
-        const runPlaceholders = roomRunIds.map(() => "?").join(",");
-        filesToRemove.push(
-          ...db.prepare(`SELECT file_path FROM photos WHERE room_run_id IN (${runPlaceholders})`).all(...roomRunIds).map((p) => p.file_path)
-        );
-        db.prepare(`DELETE FROM photos WHERE room_run_id IN (${runPlaceholders})`).run(...roomRunIds);
-        db.prepare(
-          `DELETE FROM room_run_item_options WHERE run_item_id IN
-             (SELECT id FROM room_run_items WHERE room_run_id IN (${runPlaceholders}))`
-        ).run(...roomRunIds);
-        db.prepare(`DELETE FROM room_run_items WHERE room_run_id IN (${runPlaceholders})`).run(...roomRunIds);
-        db.prepare(`DELETE FROM room_run_participants WHERE room_run_id IN (${runPlaceholders})`).run(...roomRunIds);
-      }
-      db.prepare(`DELETE FROM room_runs WHERE room_id IN (${roomPlaceholders})`).run(...roomIds);
-      db.prepare(`DELETE FROM room_schedules WHERE room_id IN (${roomPlaceholders})`).run(...roomIds);
-      db.prepare(
-        `DELETE FROM room_checklist_item_options WHERE item_id IN
-           (SELECT id FROM room_checklist_items WHERE room_id IN (${roomPlaceholders}))`
-      ).run(...roomIds);
-      db.prepare(
-        `DELETE FROM room_checklist_item_weekdays WHERE item_id IN
-           (SELECT id FROM room_checklist_items WHERE room_id IN (${roomPlaceholders}))`
-      ).run(...roomIds);
-      db.prepare(
-        `DELETE FROM room_checklist_item_months WHERE item_id IN
-           (SELECT id FROM room_checklist_items WHERE room_id IN (${roomPlaceholders}))`
-      ).run(...roomIds);
-      db.prepare(`DELETE FROM room_checklist_items WHERE room_id IN (${roomPlaceholders})`).run(...roomIds);
-    }
-    db.prepare("DELETE FROM rooms WHERE site_id = ?").run(siteId);
+    filesToRemove.push(...deleteRoomRecords(roomIds));
 
     filesToRemove.push(...db.prepare("SELECT file_path FROM site_documents WHERE site_id = ?").all(siteId).map((d) => d.file_path));
     db.prepare("DELETE FROM site_documents WHERE site_id = ?").run(siteId);

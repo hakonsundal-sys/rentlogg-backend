@@ -602,3 +602,39 @@ export function contactSatisfied(runItem, now = Date.now()) {
   if (!runItem.contact_started_at) return false;
   return contactRemainingSeconds(runItem, now) === 0;
 }
+
+// Removes the rooms and everything that hangs off them: every visit (room_run) with its ticked tasks,
+// their options, participants and photos, then each room's schedule, task template (with its options,
+// weekdays and months) and finally the room rows themselves. The one place that knows that list —
+// it used to be written out by hand in three routes, and a table missing from one copy was exactly
+// how the earlier foreign-key failures happened.
+//
+// Must run inside the caller's transaction. Returns the file paths of the deleted photos; the caller
+// removes them from disk AFTER the transaction commits, so a rollback never leaves rows pointing at
+// files that are already gone. What a caller does about deviations and the quality log stays with the
+// caller: those differ between deleting one room, a site's rooms, and a whole site.
+export function deleteRoomRecords(roomIds) {
+  if (!roomIds.length) return [];
+  const files = [];
+  const rooms = roomIds.map(() => "?").join(",");
+  const runIds = db.prepare(`SELECT id FROM room_runs WHERE room_id IN (${rooms})`).all(...roomIds).map((r) => r.id);
+  if (runIds.length) {
+    const runs = runIds.map(() => "?").join(",");
+    files.push(...db.prepare(`SELECT file_path FROM photos WHERE room_run_id IN (${runs})`).all(...runIds).map((p) => p.file_path));
+    db.prepare(`DELETE FROM photos WHERE room_run_id IN (${runs})`).run(...runIds);
+    db.prepare(
+      `DELETE FROM room_run_item_options WHERE run_item_id IN
+         (SELECT id FROM room_run_items WHERE room_run_id IN (${runs}))`
+    ).run(...runIds);
+    db.prepare(`DELETE FROM room_run_items WHERE room_run_id IN (${runs})`).run(...runIds);
+    db.prepare(`DELETE FROM room_run_participants WHERE room_run_id IN (${runs})`).run(...runIds);
+  }
+  db.prepare(`DELETE FROM room_runs WHERE room_id IN (${rooms})`).run(...roomIds);
+  db.prepare(`DELETE FROM room_schedules WHERE room_id IN (${rooms})`).run(...roomIds);
+  for (const table of ["room_checklist_item_options", "room_checklist_item_weekdays", "room_checklist_item_months"]) {
+    db.prepare(`DELETE FROM ${table} WHERE item_id IN (SELECT id FROM room_checklist_items WHERE room_id IN (${rooms}))`).run(...roomIds);
+  }
+  db.prepare(`DELETE FROM room_checklist_items WHERE room_id IN (${rooms})`).run(...roomIds);
+  db.prepare(`DELETE FROM rooms WHERE id IN (${rooms})`).run(...roomIds);
+  return files;
+}

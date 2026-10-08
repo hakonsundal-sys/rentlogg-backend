@@ -6,7 +6,7 @@ import { db } from "../db.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 import { translationLimiter, pdfImportLimiter } from "../middleware/rateLimits.js";
 import { todayInOslo } from "../services/schedule.js";
-import { getRoomsForSite, findOrCreateTodayRoomRun, findOrCreateRoomRunForDate, findRoomRunForDate, getMonthlyItemsForSite, getRoomGridForSiteMonth, getRoomRunItems, ensureRunItemOptions, measurementVerdict, parseMeasurement, contactSatisfied, contactRemainingSeconds, measurementRangeLabel } from "../services/rooms.js";
+import { getRoomsForSite, findOrCreateTodayRoomRun, findOrCreateRoomRunForDate, findRoomRunForDate, getMonthlyItemsForSite, getRoomGridForSiteMonth, getRoomRunItems, ensureRunItemOptions, measurementVerdict, parseMeasurement, contactSatisfied, contactRemainingSeconds, measurementRangeLabel, deleteRoomRecords } from "../services/rooms.js";
 import { isModuleEnabled } from "../modules.js";
 import { safeOriginalName, compressUploadedPhoto, imageFileFilter, removeUploadedFile, photoKindFrom, UploadRejectedError } from "../utils/uploads.js";
 import { logQualityEvent } from "../services/qualityLog.js";
@@ -301,34 +301,9 @@ siteRoomsRouter.delete("/", requireAuth, requireRole("admin", "manager"), (req, 
         beforeValue: room?.name ?? null,
         comment: `${runCount} besøk og ${photoCount} bilder slettet sammen med rommet (masseslett av ${ids.length} rom)`,
       });
-      const runIds = db.prepare("SELECT id FROM room_runs WHERE room_id = ?").all(roomId).map((r) => r.id);
-      if (runIds.length) {
-        const placeholders = runIds.map(() => "?").join(",");
-        filesToRemove.push(
-          ...db.prepare(`SELECT file_path FROM photos WHERE room_run_id IN (${placeholders})`).all(...runIds).map((p) => p.file_path)
-        );
-        db.prepare(`DELETE FROM photos WHERE room_run_id IN (${placeholders})`).run(...runIds);
-        db.prepare(
-          `DELETE FROM room_run_item_options WHERE run_item_id IN
-             (SELECT id FROM room_run_items WHERE room_run_id IN (${placeholders}))`
-        ).run(...runIds);
-        db.prepare(`DELETE FROM room_run_items WHERE room_run_id IN (${placeholders})`).run(...runIds);
-        db.prepare(`DELETE FROM room_run_participants WHERE room_run_id IN (${placeholders})`).run(...runIds);
-      }
-      db.prepare("DELETE FROM room_runs WHERE room_id = ?").run(roomId);
-      db.prepare("DELETE FROM room_schedules WHERE room_id = ?").run(roomId);
-      db.prepare(
-        "DELETE FROM room_checklist_item_options WHERE item_id IN (SELECT id FROM room_checklist_items WHERE room_id = ?)"
-      ).run(roomId);
-      db.prepare(
-        "DELETE FROM room_checklist_item_weekdays WHERE item_id IN (SELECT id FROM room_checklist_items WHERE room_id = ?)"
-      ).run(roomId);
-      db.prepare(
-        "DELETE FROM room_checklist_item_months WHERE item_id IN (SELECT id FROM room_checklist_items WHERE room_id = ?)"
-      ).run(roomId);
-      db.prepare("DELETE FROM room_checklist_items WHERE room_id = ?").run(roomId);
-      db.prepare("DELETE FROM rooms WHERE id = ?").run(roomId);
     }
+    // Every room's counts above were taken before anything is deleted, then they all go at once.
+    filesToRemove.push(...deleteRoomRecords(ids));
   });
 
   deleteAll(roomIds);
@@ -744,33 +719,7 @@ roomsRouter.delete("/:id", requireAuth, requireRole("admin", "manager"), (req, r
       comment: `${runCount} besøk og ${photoCount} bilder slettet sammen med rommet`,
     });
     db.prepare("UPDATE deviations SET room_id = NULL WHERE room_id = ?").run(roomId);
-    const runIds = db.prepare("SELECT id FROM room_runs WHERE room_id = ?").all(roomId).map((r) => r.id);
-    if (runIds.length) {
-      const placeholders = runIds.map(() => "?").join(",");
-      filesToRemove.push(
-        ...db.prepare(`SELECT file_path FROM photos WHERE room_run_id IN (${placeholders})`).all(...runIds).map((p) => p.file_path)
-      );
-      db.prepare(`DELETE FROM photos WHERE room_run_id IN (${placeholders})`).run(...runIds);
-      db.prepare(
-        `DELETE FROM room_run_item_options WHERE run_item_id IN
-           (SELECT id FROM room_run_items WHERE room_run_id IN (${placeholders}))`
-      ).run(...runIds);
-      db.prepare(`DELETE FROM room_run_items WHERE room_run_id IN (${placeholders})`).run(...runIds);
-      db.prepare(`DELETE FROM room_run_participants WHERE room_run_id IN (${placeholders})`).run(...runIds);
-    }
-    db.prepare("DELETE FROM room_runs WHERE room_id = ?").run(roomId);
-    db.prepare("DELETE FROM room_schedules WHERE room_id = ?").run(roomId);
-    db.prepare(
-      "DELETE FROM room_checklist_item_options WHERE item_id IN (SELECT id FROM room_checklist_items WHERE room_id = ?)"
-    ).run(roomId);
-    db.prepare(
-      "DELETE FROM room_checklist_item_weekdays WHERE item_id IN (SELECT id FROM room_checklist_items WHERE room_id = ?)"
-    ).run(roomId);
-    db.prepare(
-      "DELETE FROM room_checklist_item_months WHERE item_id IN (SELECT id FROM room_checklist_items WHERE room_id = ?)"
-    ).run(roomId);
-    db.prepare("DELETE FROM room_checklist_items WHERE room_id = ?").run(roomId);
-    db.prepare("DELETE FROM rooms WHERE id = ?").run(roomId);
+    filesToRemove.push(...deleteRoomRecords([Number(roomId)]));
   });
 
   deleteCascade(req.params.id);
