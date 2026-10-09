@@ -161,6 +161,13 @@ samplesRouter.patch("/:id/points/:pointId", requireAuth, requireRole("admin", "m
   if (error) return res.status(error.status).json(error.body);
   const point = db.prepare("SELECT * FROM sample_points WHERE id = ? AND round_id = ?").get(req.params.pointId, round.id);
   if (!point) return res.status(404).json({ code: "not_found", error: "Not found" });
+  // Signaturen på avlesningen sier «dette er resultatene jeg leste». Lot vi tallet endres
+  // etterpå, ville den påstanden ikke vært verdt noe — og endringen ville ikke etterlatt seg
+  // spor noe sted. Skjemaet i appen låser feltene allerede; dette er den som faktisk holder.
+  // Samme regel som at en avlest runde ikke kan slettes.
+  if (round.read_date) {
+    return res.status(409).json({ code: "round_read", error: "Runden er avlest og signert. Resultatene kan ikke endres." });
+  }
 
   const tall = (raw) => {
     if (raw === null || raw === "") return { value: null };
