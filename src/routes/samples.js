@@ -9,6 +9,7 @@ import { Router } from "express";
 import { db } from "../db.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 import { todayInOslo } from "../services/schedule.js";
+import { logQualityEvent } from "../services/qualityLog.js";
 
 export const samplesRouter = Router();
 
@@ -262,6 +263,60 @@ samplesRouter.get("/trend/:siteId", requireAuth, requireRole("admin", "manager")
     perPunkt.get(rad.object).samples.push({ ...rad, ...verdictFor(rad) });
   }
   res.json({ site_id: site.id, site_name: site.name, points: [...perPunkt.values()] });
+});
+
+// Gjenåpning av en signert runde. Admin, ikke driftsleder: å avlese er en del av jobben, å
+// oppheve en signatur er det ikke.
+//
+// Hele poenget er sporet. Resultatene slik de sto da det ble signert skrives inn i
+// kvalitetsloggen FØR de kan endres, i samme transaksjon som gjenåpningen — klarer ikke loggen
+// å skrive, skjer heller ikke gjenåpningen (se services/qualityLog.js om hvorfor den ikke
+// svelger feil). Uten dette ville «gjenåpne, rett tallet, signer igjen» sett nøyaktig ut som en
+// runde som ble riktig første gang.
+samplesRouter.post("/:id/reopen", requireAuth, requireRole("admin"), (req, res) => {
+  const { round, error } = scopedRound(req.params.id, req.user);
+  if (error) return res.status(error.status).json(error.body);
+  if (!round.read_date) {
+    return res.status(409).json({ code: "round_not_read", error: "Runden er ikke avlest, så det er ingenting å gjenåpne." });
+  }
+  // En begrunnelse er ikke høflighet — den er grunnen til at sporet er verdt noe. Uten den
+  // forteller loggen at noen opphevet en signatur, men ikke hvorfor, og det er det neste
+  // spørsmålet uansett hvem som leser.
+  const reason = String(req.body?.reason || "").trim();
+  if (reason.length < 3) {
+    return res.status(400).json({ code: "reason_required", error: "Skriv hvorfor runden gjenåpnes." });
+  }
+
+  const signert = pointsFor(round.id)
+    .map((p) => {
+      const deler = [];
+      if (p.totalkim != null) deler.push(`totalkim ${p.totalkim}`);
+      if (p.atp != null) deler.push(`ATP ${p.atp}`);
+      if (p.ecoli) deler.push(`E-coli ${p.ecoli === "paavist" ? "påvist" : "ikke påvist"}`);
+      if (p.listeria) deler.push(`listeria ${p.listeria === "paavist" ? "påvist" : "ikke påvist"}`);
+      return `${p.object}: ${deler.join(", ") || "ingen resultater"}`;
+    })
+    .join(" | ");
+
+  const gjenapne = db.transaction(() => {
+    logQualityEvent({
+      user: req.user,
+      action: "sample_round_reopened",
+      subjectType: "sample_round",
+      subjectId: round.id,
+      siteId: round.site_id,
+      // Det signerte innholdet, ordrett, før noen kan røre det.
+      beforeValue: `Avlest ${round.read_date} av ${round.read_by_name} — ${signert}`,
+      afterValue: "Åpnet for endring",
+      comment: reason,
+    });
+    db.prepare(
+      "UPDATE sample_rounds SET read_date = NULL, read_by = NULL, read_by_name = NULL, reopen_count = reopen_count + 1 WHERE id = ?"
+    ).run(round.id);
+  });
+  gjenapne();
+
+  res.json(roundWithPoints(db.prepare("SELECT * FROM sample_rounds WHERE id = ?").get(round.id)));
 });
 
 samplesRouter.delete("/:id", requireAuth, requireRole("admin"), (req, res) => {

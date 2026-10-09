@@ -552,6 +552,9 @@ ensureColumn("companies", "checklist_only", "checklist_only INTEGER NOT NULL DEF
 // POSTER_LANGUAGES in utils/printSheets.js). NULL means the default — stored as NULL rather than
 // a literal 'no,en' so a company that never chose follows the default if it ever changes.
 ensureColumn("companies", "poster_languages", "poster_languages TEXT");
+// Hvor mange ganger en avlest prøverunde er gjenåpnet. Selve sporet ligger i quality_log — dette
+// er bare så skjermen kan si «gjenåpnet 2 ganger» uten å slå opp i loggen for hver rad.
+ensureColumn("sample_rounds", "reopen_count", "reopen_count INTEGER NOT NULL DEFAULT 0");
 
 // Sjekk det: målepunkter. Samme form som room_checklist_items (se måleoppgavene): measure_unit satt
 // = punktet er en måling, grensene er valgfrie hver for seg. Grensene og enheten kopieres ned på
