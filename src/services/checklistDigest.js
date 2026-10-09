@@ -3,6 +3,7 @@ import { isModuleEnabled } from "../modules.js";
 import { yesterdayInOslo } from "./schedule.js";
 import { sendEmail } from "./mailer.js";
 import { isDueOn, scheduleMode, isLastDayOfMonth, monthStart } from "./checklistSchedule.js";
+import { BRAND as B, MAIL_FONT, mailShell } from "../brand.js";
 
 // Sjekk det: daglig oppsummering på e-post til lederen. Svarer på de to spørsmålene en leder har
 // om morgenen — ble rutinene gjort i går, og er det noe som ikke er fulgt opp — uten at hun må
@@ -93,51 +94,92 @@ export function buildChecklistDigest(companyId, dateStr) {
 export function digestHtml(companyName, d) {
   const missing = d.planned.filter((p) => !p.done);
   const doneCount = d.planned.length - missing.length;
-  const row = (left, right, color) =>
-    `<tr><td style="padding:6px 0;border-bottom:1px solid #eee;">${left}</td>` +
-    `<td style="padding:6px 0;border-bottom:1px solid #eee;text-align:right;color:${color};font-weight:bold;">${right}</td></tr>`;
 
+  // Hver rad er en tabell i tabellen: navnet flyter, statusen står fast til høyre. Statusen
+  // bruker *Text-variantene — #16a34a og #d97706 målte 3,30:1 og 3,19:1 som fet tekst her,
+  // altså under WCAG AA, i en e-post en leder leser på telefon. Se src/brand.js.
   const plannedRows = d.planned.length
-    ? d.planned.map((p) => row(escapeHtml(p.name), p.done ? "Utført" : "Mangler", p.done ? "#16a34a" : "#d97706")).join("")
-    : `<tr><td style="padding:6px 0;color:#71717a;">Ingen lister var planlagt denne dagen.</td></tr>`;
+    ? d.planned
+        .map(
+          (p) => `
+      <tr><td style="padding:10px 16px;border-top:1px solid ${B.lineSoft};">
+        <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse:collapse;"><tr>
+          <td style="font:400 14px/1.4 ${MAIL_FONT};color:${B.ink};">${escapeHtml(p.name)}</td>
+          <td align="right" style="white-space:nowrap;font:700 12px/1.4 ${MAIL_FONT};color:${p.done ? B.okText : B.warnText};">${p.done ? "Utført" : "Mangler"}</td>
+        </tr></table>
+      </td></tr>`
+        )
+        .join("")
+    : `<tr><td style="padding:14px 16px;font:400 14px/1.4 ${MAIL_FONT};color:${B.muted};">Ingen lister var planlagt denne dagen.</td></tr>`;
 
   const deviationItems = d.deviations
     .map((x) => {
-      const value = x.measure_unit && x.measured_value !== null ? ` — målt ${fmtNumber(x.measured_value)} ${escapeHtml(x.measure_unit)}` : "";
-      return (
-        `<li style="margin-bottom:8px;"><strong>${escapeHtml(x.checklist_name)}: ${escapeHtml(x.label)}</strong>${value}` +
-        (x.comment ? `<br><span style="color:#b91c1c;">${escapeHtml(x.comment)}</span>` : "") +
-        `<br><span style="color:#71717a;font-size:13px;">Meldt av ${escapeHtml(x.user_name)}</span>` +
-        (x.followup_at
-          ? ` <span style="color:#16a34a;font-size:13px;">· fulgt opp av ${escapeHtml(x.followup_by_name)}</span>`
-          : ` <span style="color:#d97706;font-size:13px;">· ikke fulgt opp</span>`) +
-        `</li>`
-      );
+      const value = x.measure_unit && x.measured_value !== null ? ` &mdash; målt ${fmtNumber(x.measured_value)} ${escapeHtml(x.measure_unit)}` : "";
+      return `
+      <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse:collapse;border:1px solid ${B.line};border-left:3px solid ${B.danger};margin-top:10px;">
+        <tr><td style="padding:12px 16px;font:400 13px/1.5 ${MAIL_FONT};color:${B.ink};">
+          <div style="font-weight:700;">${escapeHtml(x.checklist_name)}: ${escapeHtml(x.label)}${value}</div>
+          ${x.comment ? `<div style="padding-top:4px;color:${B.ink2};">${escapeHtml(x.comment)}</div>` : ""}
+          <div style="padding-top:6px;font-size:12px;color:${B.muted};">
+            Meldt av ${escapeHtml(x.user_name)} &middot;
+            <span style="color:${x.followup_at ? B.okText : B.warnText};font-weight:700;">${
+              x.followup_at ? `fulgt opp av ${escapeHtml(x.followup_by_name)}` : "ikke fulgt opp"
+            }</span>
+          </div>
+        </td></tr>
+      </table>`;
     })
     .join("");
 
   const app = (process.env.PUBLIC_FRONTEND_URL || "https://www.rentlogg.no").replace(/\/$/, "");
 
-  return `<!doctype html><html lang="no"><head><meta charset="utf-8"></head>
-<body style="margin:0;padding:24px;background:#ffffff;font-family:Arial,Helvetica,sans-serif;color:#18181b;">
-<div style="max-width:560px;">
-  <div style="font-size:12px;color:#71717a;letter-spacing:0.05em;text-transform:uppercase;">${escapeHtml(companyName)}</div>
-  <h1 style="font-size:22px;margin:4px 0 2px;">Sjekk det — ${fmtDate(d.date)}</h1>
-  <div style="color:#71717a;margin-bottom:18px;">
-    ${d.planned.length ? `${doneCount} av ${d.planned.length} planlagte lister utført` : "Ingen planlagte lister"} ·
-    ${d.submissions.length} innsendt · ${d.deviations.length} avvik
-  </div>
-  <table style="width:100%;border-collapse:collapse;font-size:14px;">${plannedRows}</table>
-  ${d.deviations.length ? `<h2 style="font-size:16px;margin:22px 0 8px;">Avvik</h2><ul style="padding-left:18px;margin:0;font-size:14px;">${deviationItems}</ul>` : ""}
+  return mailShell(`<div style="max-width:560px;margin:0 auto;font:400 15px/1.6 ${MAIL_FONT};color:${B.ink};">
+  <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;margin-bottom:22px;">
+    <tr><td style="width:34px;height:4px;background:${B.brand};font-size:0;line-height:0;">&nbsp;</td></tr>
+    <tr><td style="padding-top:9px;font:700 12px/1 ${MAIL_FONT};letter-spacing:0.14em;color:${B.brand};">SJEKK DET</td></tr>
+  </table>
+
+  <div style="font:700 25px/1.2 ${MAIL_FONT};letter-spacing:-0.02em;">${escapeHtml(companyName)}</div>
+  <div style="font:400 14px/1.5 ${MAIL_FONT};color:${B.muted};padding-top:5px;">${fmtDate(d.date)}</div>
+
+  <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;margin:18px 0 26px;"><tr>
+    <td style="padding:0 34px 0 0;vertical-align:top;">
+      <div style="font:400 11px/1.4 ${MAIL_FONT};color:${B.muted};">Lister</div>
+      <div style="font:700 26px/1.2 ${MAIL_FONT};padding-top:2px;color:${d.planned.length && doneCount === d.planned.length ? B.okText : d.planned.length ? B.warnText : B.ink};">${doneCount} / ${d.planned.length}</div>
+    </td>
+    <td style="padding:0 34px 0 0;vertical-align:top;">
+      <div style="font:400 11px/1.4 ${MAIL_FONT};color:${B.muted};">Innsendt</div>
+      <div style="font:700 26px/1.2 ${MAIL_FONT};padding-top:2px;color:${B.ink};">${d.submissions.length}</div>
+    </td>
+    <td style="padding:0 34px 0 0;vertical-align:top;">
+      <div style="font:400 11px/1.4 ${MAIL_FONT};color:${B.muted};">Avvik</div>
+      <div style="font:700 26px/1.2 ${MAIL_FONT};padding-top:2px;color:${d.deviations.length ? B.dangerText : B.ink};">${d.deviations.length}</div>
+    </td>
+  </tr></table>
+
+  <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse:collapse;border:1px solid ${B.line};border-radius:10px;">
+    <tr><td style="padding:11px 16px;background:${B.ground};font:700 13px/1.3 ${MAIL_FONT};border-bottom:1px solid ${B.line};">Planlagte lister</td></tr>
+    ${plannedRows}
+  </table>
+
+  ${d.deviations.length ? `<div style="font:700 16px/1.3 ${MAIL_FONT};margin:28px 0 0;">Avvik</div>${deviationItems}` : ""}
+
   ${
     d.openTotal
-      ? `<p style="margin-top:22px;padding:10px 12px;background:#fff7ed;border-radius:8px;font-size:14px;">
-           <strong>${d.openTotal} avvik er ikke fulgt opp.</strong> Registrer hva som ble gjort under Sjekk det → Avvik.</p>`
+      ? `<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse:collapse;margin-top:22px;background:${B.warnBg};border:1px solid ${B.warnLine};">
+           <tr><td style="padding:13px 16px;font:400 13.5px/1.5 ${MAIL_FONT};color:${B.ink};">
+             <strong style="color:${B.warnText};">${d.openTotal} avvik er ikke fulgt opp.</strong>
+             Registrer hva som ble gjort under Sjekk det &rarr; Avvik.
+           </td></tr></table>`
       : ""
   }
-  <p style="margin-top:22px;font-size:14px;"><a href="${app}/app/" style="color:#6d28d9;">Åpne Sjekk det</a></p>
-  <p style="margin-top:24px;font-size:12px;color:#a1a1aa;">Mottakere endres av en administrator under Sjekk det → Rapport.</p>
-</div></body></html>`;
+
+  <div style="margin-top:26px;"><a href="${app}/app/" style="display:inline-block;padding:11px 22px;background:${B.brand};color:#ffffff;font:700 14px/1 ${MAIL_FONT};text-decoration:none;border-radius:8px;">Åpne Sjekk det</a></div>
+
+  <div style="margin-top:28px;padding-top:16px;border-top:1px solid ${B.line};font:400 12px/1.6 ${MAIL_FONT};color:${B.muted};">
+    Rapport fra Rentlogg. Mottakere endres av en administrator under Sjekk det &rarr; Rapport.
+  </div>
+</div>`);
 }
 
 // Én oppsummering for ett firma. `force` = manuell «Send nå»: sendes selv om dagen var tom, så

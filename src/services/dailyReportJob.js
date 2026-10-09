@@ -2,6 +2,7 @@ import { db } from "../db.js";
 import { findRunForSiteDate } from "./schedule.js";
 import { getRunDetail } from "./runDetail.js";
 import { buildReportBody } from "./runReport.js";
+import { mailShell } from "../brand.js";
 import { sendEmail } from "./mailer.js";
 
 // Sends one digest email per site with a completed/in-progress visit on dateStr, to that site's
@@ -51,7 +52,7 @@ export async function sendDailyReports(dateStr, siteId, companyId, recipientsOve
 
     try {
       const body = await buildReportBody(getRunDetail(run.id));
-      const html = `<!doctype html><html lang="no"><head><meta charset="utf-8"></head><body style="margin:0;padding:24px;background:#ffffff;font-family:Arial,Helvetica,sans-serif;color:#1a1a1a;">${body}</body></html>`;
+      const html = mailShell(body);
       await sendEmail({ to: recipients, subject: `Renholdsrapport ${site.name} — ${dateStr}`, html });
       results.sent++;
     } catch (err) {

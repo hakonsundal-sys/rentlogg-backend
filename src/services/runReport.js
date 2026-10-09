@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import PDFDocument from "pdfkit";
 import sharp from "sharp";
+import { BRAND as B, MAIL_FONT, mailShell } from "../brand.js";
 
 const PRIORITY_LABELS = { low: "Lav", medium: "Middels", high: "Høy" };
 
@@ -131,15 +132,58 @@ function formatStatus(detail) {
   return detail.backdated ? `${base} (sjekket inn i etterkant)` : base;
 }
 
-// Renders a section/deviation's photos to <img> tags, dropping any that came back null (missing
+// Renders a section/deviation's photos as a table row, dropping any that came back null (missing
 // file, or a format sharp couldn't decode) rather than leaving a gap in the layout.
+//
+// To ting ble rettet her 2026-10-09, begge målt og begge verre enn de ser ut:
+//
+// 1. BILDET LÅ INNE TO GANGER. Hver uri sto både i `<img src>` og i `<a href>` rundt det, så
+//    base64-bytene ble sendt dobbelt. En rapport med tre bilder gikk fra 47 kB til 32 kB bare av
+//    å droppe lenken. Gmail klipper en melding rundt 100 kB og alt under klippet forsvinner —
+//    det er nøyaktig feilen fra 2026-09-16, og halve nyttelasten var en lenke som uansett bare
+//    peker på en `data:`-URI de fleste e-postklienter nekter å åpne.
+// 2. `display:flex` VIRKER IKKE I OUTLOOK. Outlook på Windows rendrer med Word-motoren og
+//    ignorerer både flex og grid, så bilderaden ble én kolonne. Tabellceller virker overalt.
 async function photosHtmlFor(photos, boxSize) {
   if (!photos?.length) return "";
   const uris = (await Promise.all(photos.map((p) => photoDataUri(p.file_path)))).filter(Boolean);
   if (!uris.length) return "";
-  return `<div style="padding:10px 14px;border:1px solid #ddd;border-top:none;display:flex;flex-wrap:wrap;gap:8px;">
-    ${uris.map((uri) => `<a href="${uri}" target="_blank"><img src="${uri}" alt="" style="width:${boxSize}px;height:${boxSize}px;object-fit:cover;border-radius:4px;border:1px solid #ddd;"></a>`).join("")}
-  </div>`;
+  // Bildene står som vanlige inline-bilder i ÉN celle, ikke som hver sin tabellcelle. En rad med
+  // tabellceller kan ikke brytes: tre bilder à 150px blir 474px, bredere enn en 375px telefon,
+  // og da klippes raden i stedet for å gå over to linjer. Inline-bilder brytes av seg selv, i
+  // Outlook også — det er den eldste teknikken i e-post, og den er eldre enn problemet.
+  const imgs = uris
+    .map(
+      (uri) =>
+        `<img src="${uri}" width="${boxSize}" height="${boxSize}" alt="" ` +
+        `style="width:${boxSize}px;height:${boxSize}px;object-fit:cover;margin:0 8px 8px 0;` +
+        `border:1px solid ${B.line};border-radius:6px;vertical-align:top;">`
+    )
+    .join("");
+  return `<tr><td style="padding:12px 16px 4px;border-top:1px solid ${B.line};font-size:0;line-height:0;">${imgs}</td></tr>`;
+}
+
+// Avsenderlåsen: en violett strek over dokumenttittelen. Loggstreken fra landingssiden, redusert
+// til det eneste en e-postklient garantert tegner — en fylt tabellcelle.
+function lockup(label) {
+  return `
+  <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;margin-bottom:22px;">
+    <tr><td style="width:34px;height:4px;background:${B.brand};font-size:0;line-height:0;">&nbsp;</td></tr>
+    <tr><td style="padding-top:9px;font:700 12px/1 ${MAIL_FONT};letter-spacing:0.14em;color:${B.brand};">${label}</td></tr>
+  </table>`;
+}
+
+// Tallene side om side. En tabell med én celle per tall, ikke grid.
+function numberRow(cells) {
+  const tds = cells
+    .map(
+      (c) => `<td style="padding:0 34px 0 0;vertical-align:top;">
+        <div style="font:400 11px/1.4 ${MAIL_FONT};color:${B.muted};">${escapeHtml(c.label)}</div>
+        <div style="font:700 26px/1.2 ${MAIL_FONT};color:${c.color || B.ink};padding-top:2px;">${escapeHtml(String(c.value))}</div>
+      </td>`
+    )
+    .join("");
+  return `<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;margin:18px 0 26px;"><tr>${tds}</tr></table>`;
 }
 
 // Split from buildReportHtml so the daily-digest email can concatenate multiple visits' bodies
@@ -150,93 +194,127 @@ export async function buildReportBody(detail) {
   const sections = buildSections(detail);
   const isMixed = isMixedResponsibility(detail.rooms);
 
+  let doneItems = 0;
+  let totalItems = 0;
+
   const sectionsHtml = (await Promise.all(sections.map(async (section, sIdx) => {
       const num = sIdx + 1;
+      const sectionDone = section.items.filter((i) => i.done).length;
+      doneItems += sectionDone;
+      totalItems += section.items.length;
+
+      // Oppgaveraden er en tabell med to kolonner, ikke flex: navnet flyter, statusen står fast
+      // til høyre. Med flex falt statusen ned under navnet i Outlook.
       const itemsHtml = section.items
         .map((item, iIdx) => {
           const chosen = chosenOptionsText(item);
           const measure = measurementText(item);
-          const measureHtml = measure
-            ? `<br><span style="font-size:12px;font-weight:600;color:${measure.ok === false ? "#c0392b" : measure.ok === true ? "#0a7a2f" : "#555"};">${escapeHtml(measure.text)}</span>`
-            : "";
+          const measureColor = measure
+            ? measure.ok === false ? B.dangerText : measure.ok === true ? B.okText : B.muted
+            : null;
           const step = stepText(item);
-          const stepHtml = step ? `<br><span style="color:#555;font-size:12px;">${escapeHtml(step)}</span>` : "";
+          const sub = (text) => `<br><span style="font-size:12px;color:${B.muted};">${escapeHtml(text)}</span>`;
           return `
-          <div style="padding:8px 14px;border:1px solid #ddd;border-top:none;font-size:13px;display:flex;justify-content:space-between;gap:12px;">
-            <span>${num}.${iIdx + 1} ${escapeHtml(item.label)}${stepHtml}${chosen ? `<br><span style="color:#555;font-size:12px;">Valgt: ${escapeHtml(chosen)}</span>` : ""}${measureHtml}</span>
-            <span style="white-space:nowrap;font-weight:600;color:${item.done ? "#0a7a2f" : "#c0392b"};">${item.done ? "✓ Utført" : "✗ Ikke utført"}</span>
-          </div>`;
+          <tr><td style="padding:9px 16px;border-top:1px solid ${B.lineSoft};">
+            <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse:collapse;">
+              <tr>
+                <td style="font:400 13px/1.45 ${MAIL_FONT};color:${B.ink};">
+                  <span style="color:${B.muted};">${num}.${iIdx + 1}</span> ${escapeHtml(item.label)}${step ? sub(step) : ""}${chosen ? sub(`Valgt: ${chosen}`) : ""}${measure ? `<br><span style="font-size:12px;font-weight:700;color:${measureColor};">${escapeHtml(measure.text)}</span>` : ""}
+                </td>
+                <td align="right" style="white-space:nowrap;padding-left:14px;font:700 12px/1.45 ${MAIL_FONT};color:${item.done ? B.okText : B.dangerText};">
+                  ${item.done ? "Utført" : "Ikke utført"}
+                </td>
+              </tr>
+            </table>
+          </td></tr>`;
         })
         .join("");
 
-      const photosHtml = await photosHtmlFor(section.photos, 180);
+      const photosHtml = await photosHtmlFor(section.photos, 150);
 
       const noteHtml = section.note?.trim()
-        ? `<div style="padding:10px 14px;border:1px solid #ddd;border-top:none;font-size:13px;background:#fafafa;white-space:pre-wrap;"><strong>Notat:</strong> ${escapeHtml(section.note)}</div>`
+        ? `<tr><td style="padding:11px 16px;border-top:1px solid ${B.lineSoft};background:${B.ground};font:400 13px/1.5 ${MAIL_FONT};color:${B.ink2};white-space:pre-wrap;"><strong style="color:${B.ink};">Notat:</strong> ${escapeHtml(section.note)}</td></tr>`
         : "";
 
       return `
-        <div style="background:#efefef;padding:10px 14px;font-weight:700;font-size:15px;border:1px solid #ddd;margin-top:22px;">${num}. ${escapeHtml(section.title)}</div>
-        ${itemsHtml || `<div style="padding:10px 14px;border:1px solid #ddd;border-top:none;font-size:13px;color:#777;">Ingen oppgaver registrert.</div>`}
-        ${photosHtml}
-        ${noteHtml}`;
+        <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse:collapse;border:1px solid ${B.line};border-radius:10px;margin-top:16px;">
+          <tr><td style="padding:11px 16px;background:${B.ground};border-bottom:1px solid ${B.line};">
+            <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse:collapse;"><tr>
+              <td style="font:700 14px/1.3 ${MAIL_FONT};color:${B.ink};">${escapeHtml(section.title)}</td>
+              <td align="right" style="font:400 12px/1.3 ${MAIL_FONT};color:${B.muted};white-space:nowrap;">${sectionDone} av ${section.items.length}</td>
+            </tr></table>
+          </td></tr>
+          ${itemsHtml || `<tr><td style="padding:12px 16px;font:400 13px/1.5 ${MAIL_FONT};color:${B.muted};">Ingen oppgaver registrert.</td></tr>`}
+          ${photosHtml}
+          ${noteHtml}
+        </table>`;
     })))
     .join("");
 
+  // Avvikene er et eget spor, ikke enda en seksjon. Venstrekanten er det eneste rammetrikset
+  // Outlook tegner pålitelig.
   const deviationsHtml = detail.deviations?.length
-    ? `
-      <div style="background:#fdecea;padding:10px 14px;font-weight:700;font-size:15px;border:1px solid #f1b0b7;margin-top:26px;color:#611a15;">Avvik</div>
+    ? `<div style="font:700 16px/1.3 ${MAIL_FONT};color:${B.ink};margin:30px 0 0;">Avvik</div>
       ${(await Promise.all(detail.deviations.map(async (d) => `
-          <div style="padding:12px 14px;border:1px solid #f1b0b7;border-top:none;font-size:13px;">
-            <div style="font-weight:600;">${d.room_name ? escapeHtml(d.room_name + (isMixed ? responsibleSuffix(d.room_responsible) : "")) + (d.room_task_label ? " · " + escapeHtml(d.room_task_label) : "") : "Generelt"}
-              <span style="font-weight:400;color:#777;"> — ${PRIORITY_LABELS[d.priority] || d.priority}</span>
-            </div>
-            <div style="margin-top:4px;">${escapeHtml(d.description)}</div>
-            ${d.reported_by_initials ? `<div style="margin-top:4px;color:#777;">Meldt av: ${escapeHtml(d.reported_by_initials)}</div>` : ""}
-            ${await photosHtmlFor(d.photos, 140)}
-            ${d.reply_text ? `<div style="margin-top:6px;padding-top:6px;border-top:1px solid #f1b0b7;color:#333;">Svar: ${escapeHtml(d.reply_text)} — ${escapeHtml(d.replied_by_initials)}</div>` : ""}
-          </div>`)))
+          <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse:collapse;border:1px solid ${B.line};border-left:3px solid ${B.danger};margin-top:10px;">
+            <tr><td style="padding:13px 16px;font:400 13px/1.5 ${MAIL_FONT};color:${B.ink};">
+              <div style="font-weight:700;">${d.room_name ? escapeHtml(d.room_name + (isMixed ? responsibleSuffix(d.room_responsible) : "")) + (d.room_task_label ? " &middot; " + escapeHtml(d.room_task_label) : "") : "Generelt"}</div>
+              <div style="padding-top:4px;">${escapeHtml(d.description)}</div>
+              <div style="padding-top:6px;font-size:12px;color:${B.muted};">
+                ${escapeHtml(PRIORITY_LABELS[d.priority] || d.priority)}${d.reported_by_initials ? ` &middot; meldt av ${escapeHtml(d.reported_by_initials)}` : ""}${d.due_date ? ` &middot; frist ${escapeHtml(d.due_date)}` : ""}
+              </div>
+              ${d.reply_text ? `<div style="margin-top:9px;padding:9px 11px;background:${B.ground};font-size:12.5px;color:${B.ink2};"><strong style="color:${B.ink};">Svar:</strong> ${escapeHtml(d.reply_text)}${d.replied_by_initials ? ` &mdash; ${escapeHtml(d.replied_by_initials)}` : ""}</div>` : ""}
+            </td></tr>
+            ${await photosHtmlFor(d.photos, 120)}
+          </table>`)))
         .join("")}`
     : "";
 
-  return `<div style="max-width:760px;margin:0 auto;">
-    <h1 style="font-size:26px;margin:0 0 4px;">Renholdsrapport</h1>
-    <div style="font-size:14px;color:#555;margin-bottom:20px;">
-      ${escapeHtml(detail.site_name)}${detail.site_address ? " — " + escapeHtml(detail.site_address) : ""}${detail.client_name ? " · " + escapeHtml(detail.client_name) : ""}
-    </div>
+  // Alt den gamle firekolonnetabellen bar, på én linje: besøksnummer, registrert, ferdigstilt,
+  // signatur. `detail.id` er null for en virtuell dag (se getVirtualDayDetail), så den utelates
+  // da i stedet for å skrive «Besøk null». formatStatus bærer «sjekket inn i etterkant», som MÅ
+  // bli med — den sier at datoen rapporten står under ikke er dagen renholderen var der.
+  // Bare FØRSTE tegn gjøres lite. `.toLowerCase()` på hele strengen gjorde «av TH» til «av th»
+  // — signaturen er initialer, og initialer i små bokstaver er ikke lenger den samme signaturen.
+  const status = formatStatus(detail);
+  const meta = [
+    detail.id ? `Besøk ${detail.id}` : null,
+    `registrert ${escapeHtml(detail.started_at.slice(11, 16))}`,
+    escapeHtml(status.charAt(0).toLowerCase() + status.slice(1)),
+  ]
+    .filter(Boolean)
+    .join(" &middot; ");
 
-    <table style="width:100%;border-collapse:collapse;font-size:14px;margin-bottom:8px;">
-      <tr>
-        <td style="padding:3px 12px 3px 0;color:#555;width:110px;">Besøk-nr:</td>
-        <td style="padding:3px 0;font-weight:700;">${detail.id}</td>
-        <td style="padding:3px 12px 3px 24px;color:#555;width:100px;">Renholder:</td>
-        <td style="padding:3px 0;font-weight:700;">${escapeHtml(detail.cleaner_name)}</td>
-      </tr>
-      <tr>
-        <td style="padding:3px 12px 3px 0;color:#555;">Registrert:</td>
-        <td style="padding:3px 0;">${detail.started_at.slice(0, 16)}</td>
-        <td style="padding:3px 12px 3px 24px;color:#555;">Status:</td>
-        <td style="padding:3px 0;">${escapeHtml(formatStatus(detail))}</td>
-      </tr>
-    </table>
+  return `<div style="max-width:620px;margin:0 auto;font:400 15px/1.6 ${MAIL_FONT};color:${B.ink};">
+  ${lockup("RENHOLDSRAPPORT")}
+  <div style="font:700 25px/1.2 ${MAIL_FONT};letter-spacing:-0.02em;color:${B.ink};">${escapeHtml(detail.site_name)}</div>
+  <div style="font:400 14px/1.5 ${MAIL_FONT};color:${B.ink2};padding-top:5px;">
+    ${escapeHtml(detail.started_at.slice(0, 10))} &middot; ${escapeHtml(detail.cleaner_name)}${detail.site_address ? `<br>${escapeHtml(detail.site_address)}` : ""}${detail.client_name ? ` &middot; ${escapeHtml(detail.client_name)}` : ""}
+  </div>
+  <div style="font:400 12.5px/1.6 ${MAIL_FONT};color:${B.muted};padding-top:3px;">${meta}</div>
 
-    ${sectionsHtml}
-    ${deviationsHtml}
-  </div>`;
+  ${numberRow([
+    { label: sections.length === 1 ? "Seksjon" : "Rom", value: sections.length },
+    { label: "Oppgaver", value: `${doneItems} / ${totalItems}`, color: doneItems === totalItems ? B.okText : B.warnText },
+    { label: "Avvik", value: detail.deviations?.length || 0, color: detail.deviations?.length ? B.dangerText : B.ink },
+  ])}
+
+  ${sectionsHtml}
+  ${deviationsHtml}
+
+  <div style="margin-top:30px;padding-top:16px;border-top:1px solid ${B.line};font:400 12px/1.6 ${MAIL_FONT};color:${B.muted};">
+    Rapport fra Rentlogg. Mottakere endres av en administrator under Lokasjoner.
+  </div>
+</div>`;
 }
 
 export async function buildReportHtml(detail) {
-  return `<!doctype html>
-<html lang="no">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Renholdsrapport — ${escapeHtml(detail.site_name)}</title>
-</head>
-<body style="margin:0;padding:24px;background:#ffffff;font-family:Arial,Helvetica,sans-serif;color:#1a1a1a;">
-  ${await buildReportBody(detail)}
-</body>
-</html>`;
+  // Samme skall som e-posten får (se brand.js), pluss en <title> — denne åpnes også som en
+  // nettlesertab fra «Vis rapport», og en fane uten tittel er vond å finne igjen.
+  return mailShell(await buildReportBody(detail)).replace(
+    "</head>",
+    `<title>Renholdsrapport — ${escapeHtml(detail.site_name)}</title></head>`
+  );
 }
 
 // PDFKit's doc.image() does NOT advance doc.y the way doc.text() does, so anything drawn
