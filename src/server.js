@@ -203,7 +203,7 @@ app.use("/time", requireAuth, requireRole("admin", "manager", "cleaner"), requir
 // Sjekklister: same gating at the mount. Not to be confused with /checklists above, which is the
 // old site-level checklist of the cleaning product.
 app.use("/simple-checklists", requireAuth, requireModule("checklist"), simpleChecklistsRouter);
-app.use("/samples", requireAuth, requireModule("hygiene"), samplesRouter);
+app.use("/samples", requireAuth, requireModule("sampling"), samplesRouter);
 
 // Without this, a rejected upload (most commonly a phone photo over the size limit — modern
 // camera HDR/high-res shots routinely exceed what a "reasonable" limit looks like on paper)

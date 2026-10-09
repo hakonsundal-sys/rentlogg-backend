@@ -55,6 +55,20 @@ export const MODULES = [
     defaultEnabled: false,
   },
   {
+    key: "sampling",
+    name: "Prøvetaking",
+    description:
+      "Mikrobiologiske prøverunder: uttak og avlesning som to signaturer, Totalkim, ATP, " +
+      "E-coli og listeria mot grenseverdiene på OKVs eget skjema.",
+    // Skilt ut fra «Hygiene og måling» 2026-10-09, fordi OKV Næringsmiddelservice vil ha
+    // prøvetakingen uten kontakttid og måleoppgaver. Det er to forskjellige jobber på to
+    // forskjellige tidspunkt: hygienetrinnene er renholderens arbeid mens hun står i rommet,
+    // prøvetakingen er teamlederens egen kontroll i etterkant, med et døgns inkubering imellom.
+    // At de deler fagfelt gjør dem ikke til samme kjøp — og en kunde som bare vil dokumentere
+    // svaberprøver skal slippe to valg til i oppgaveeditoren for å få det.
+    defaultEnabled: false,
+  },
+  {
     key: "checklist",
     // Navnet valgt av Håkon 2026-10-03.
     name: "Sjekk det – det er kjekt det",
@@ -70,6 +84,7 @@ export const MODULES = [
 ];
 
 export const MODULE_CHECKLIST = "checklist";
+export const MODULE_SAMPLING = "sampling";
 
 const MODULE_BY_KEY = new Map(MODULES.map((m) => [m.key, m]));
 
