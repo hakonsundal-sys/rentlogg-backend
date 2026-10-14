@@ -126,10 +126,17 @@ function buildSections(detail) {
 // rapporten som ikke er lov å miste.
 const BACKDATED_NOTE = "sjekket inn i etterkant";
 
-function formatStatus(detail) {
-  const base = detail.completed_at
+// Splittet fra formatStatus fordi e-posten vil ha bakdatert-merknaden som sin egen, fargede linje
+// i stedet for i en parentes — mens PDF-en skriver den på én linje som før. Samme grunntekst
+// begge steder, ingen kopi å holde i synk.
+function statusBase(detail) {
+  return detail.completed_at
     ? `Ferdigstilt ${detail.completed_at.slice(0, 16)}${detail.signed_initials ? ` av ${detail.signed_initials}` : ""}`
     : "Pågår";
+}
+
+function formatStatus(detail) {
+  const base = statusBase(detail);
   // The date this run is filed under is real (see checklists.js's backdated check-in), but the
   // check-in itself wasn't made that day — the report has to say so wherever it shows a date, not
   // just quietly pass it off as an ordinary same-day visit.
@@ -264,31 +271,61 @@ export async function buildReportBody(detail) {
         .join("")}`
     : "";
 
-  // Alt den gamle firekolonnetabellen bar, på én linje: besøksnummer, registrert, ferdigstilt,
-  // signatur. Bare klokkeslett — datoen står på linja over, og `formatStatus` sin fulle dato ble
-  // lest som to ulike opplysninger av den som fikk rapporten. `detail.id` er null for en virtuell
-  // dag (se getVirtualDayDetail), så den utelates da i stedet for å skrive «Besøk null».
-  const ferdig = detail.completed_at
-    ? `ferdigstilt ${escapeHtml(detail.completed_at.slice(11, 16))}${detail.signed_initials ? ` av ${escapeHtml(detail.signed_initials)}` : ""}`
-    : "pågår";
-  const meta = [
-    detail.id ? `Besøk ${detail.id}` : null,
-    `registrert ${escapeHtml(detail.started_at.slice(11, 16))}`,
-    ferdig,
-    // Rapporten står filtrert under en dato renholderen ikke var der. Den opplysningen skal ikke
-    // ligge pent inne i en setning — den får sin egen farge.
-    detail.backdated ? `<span style="color:${B.warnText};font-weight:700;">${BACKDATED_NOTE}</span>` : null,
-  ]
-    .filter(Boolean)
-    .join(" &middot; ");
+  // Den merkede firekolonnetabellen fra den opprinnelige rapporten, hentet tilbake. Jeg presset
+  // den først sammen til én grå linje med punktummer imellom — tettere, men hver opplysning mistet
+  // navnet sitt, og 12,5px grått er ikke noe man leser, det er noe man hopper over. Håkon pekte på
+  // originalen: «Besøk-nr:» ved siden av tallet, luft mellom radene. Den var bedre.
+  //
+  // `detail.id` er null for en virtuell dag (se getVirtualDayDetail) — da utelates hele raden i
+  // stedet for å skrive «Besøk-nr: null».
+  const metaFelt = [
+    detail.id ? ["Besøk-nr:", escapeHtml(String(detail.id))] : null,
+    ["Renholder:", escapeHtml(detail.cleaner_name)],
+    ["Registrert:", escapeHtml(detail.started_at.slice(0, 16))],
+    [
+      "Status:",
+      escapeHtml(statusBase(detail)) +
+        // Rapporten står filtrert under en dato renholderen ikke var der. Den opplysningen skal
+        // ikke ligge inne i en parentes — den får sin egen linje og sin egen farge.
+        (detail.backdated
+          ? `<br><span style="color:${B.warnText};font-weight:700;">${BACKDATED_NOTE.charAt(0).toUpperCase()}${BACKDATED_NOTE.slice(1)}</span>`
+          : ""),
+    ],
+  ].filter(Boolean);
+
+  // To felt per rad. Faller det siste alene, får det bare stå alene — en tom celle ved siden av
+  // er bedre enn en kunstig fylltekst.
+  const metaRader = [];
+  for (let i = 0; i < metaFelt.length; i += 2) metaRader.push(metaFelt.slice(i, i + 2));
+
+  const metaTabell = `
+  <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;margin-top:20px;">
+    ${metaRader
+      .map(
+        (rad) =>
+          `<tr>${rad
+            .map(
+              ([etikett, verdi], n) =>
+                `<td style="padding:8px 14px 8px 0;font:400 13.5px/1.5 ${MAIL_FONT};color:${B.muted};white-space:nowrap;vertical-align:top;">${etikett}</td>` +
+                `<td style="padding:8px ${n === 0 ? 30 : 0}px 8px 0;font:600 14px/1.5 ${MAIL_FONT};color:${B.ink};vertical-align:top;">${verdi}</td>`
+            )
+            .join("")}</tr>`
+      )
+      .join("")}
+  </table>`;
 
   return `<div style="max-width:620px;margin:0 auto;font:400 15px/1.6 ${MAIL_FONT};color:${B.ink};">
   ${mailLockup("RENHOLDSRAPPORT")}
   <div style="font:700 25px/1.2 ${MAIL_FONT};letter-spacing:-0.02em;color:${B.ink};">${escapeHtml(detail.site_name)}</div>
-  <div style="font:400 14px/1.5 ${MAIL_FONT};color:${B.ink2};padding-top:5px;">
-    ${escapeHtml(detail.started_at.slice(0, 10))} &middot; ${escapeHtml(detail.cleaner_name)}${detail.site_address ? `<br>${escapeHtml(detail.site_address)}` : ""}${detail.client_name ? ` &middot; ${escapeHtml(detail.client_name)}` : ""}
-  </div>
-  <div style="font:400 12.5px/1.6 ${MAIL_FONT};color:${B.muted};padding-top:3px;">${meta}</div>
+  ${
+    detail.site_address || detail.client_name
+      ? `<div style="font:400 14px/1.5 ${MAIL_FONT};color:${B.ink2};padding-top:6px;">${[detail.site_address, detail.client_name]
+          .filter(Boolean)
+          .map(escapeHtml)
+          .join(" &middot; ")}</div>`
+      : ""
+  }
+  ${metaTabell}
 
   ${numberRow([
     { label: sections.length === 1 ? "Seksjon" : "Rom", value: sections.length },
