@@ -49,6 +49,31 @@ export const BRAND = {
 // lastes ikke i Outlook — så fallback-stacken ER fonten her, ikke en sikkerhetsmargin.
 export const MAIL_FONT = "Arial, Helvetica, sans-serif";
 
+// Avsenderlåsen: en violett strek over dokumenttittelen.
+//
+// Streken er en RAMME på samme celle som teksten, ikke en egen rad med bakgrunnsfarge. Første
+// forsøk var `<td style="width:34px;height:4px;background:...">&nbsp;</td>` i raden over, og det
+// var feil på to måter som begge gikk rett i produksjon 2026-10-13:
+//
+//   1. Bredden var aldri 34px. Cella sto i SAMME kolonne som etiketten under, og en tabellkolonne
+//      er så bred som sin videste celle. «RENHOLDSRAPPORT» bestemte bredden; `width:34px` kunne
+//      ikke gjøre kolonnen smalere enn innholdet. Det så slik ut i forhåndsvisningen også — jeg
+//      kalte det en 34px-strek uten å måle at det var det.
+//   2. Høyden var aldri 4px. `font-size:0;line-height:0` + `&nbsp;` er et triks som forutsetter at
+//      klienten respekterer begge deler. Outlook gjør ikke det; der falt cella tilbake på arvet
+//      skriftstørrelse, og hårstreken ble en 50px violett kloss.
+//
+// En ramme har ingen av problemene: den tegnes av alle klienter, inkludert Word-motoren, og den
+// er nøyaktig så bred som teksten under — uten at noe må oppgis i piksler.
+export function mailLockup(label) {
+  return (
+    `<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;margin-bottom:22px;">` +
+    `<tr><td style="border-top:4px solid ${BRAND.brand};padding-top:9px;` +
+    `font:700 12px/1.3 ${MAIL_FONT};letter-spacing:0.14em;color:${BRAND.brand};">${label}</td></tr>` +
+    `</table>`
+  );
+}
+
 // Skallet rundt enhver e-postkropp vi sender. Ett sted, så de tre utsenderne ikke driver fra
 // hverandre igjen.
 export function mailShell(body, { lang = "no" } = {}) {

@@ -3,7 +3,7 @@ import { isModuleEnabled } from "../modules.js";
 import { yesterdayInOslo } from "./schedule.js";
 import { sendEmail } from "./mailer.js";
 import { isDueOn, scheduleMode, isLastDayOfMonth, monthStart } from "./checklistSchedule.js";
-import { BRAND as B, MAIL_FONT, mailShell } from "../brand.js";
+import { BRAND as B, MAIL_FONT, mailShell, mailLockup } from "../brand.js";
 
 // Sjekk det: daglig oppsummering på e-post til lederen. Svarer på de to spørsmålene en leder har
 // om morgenen — ble rutinene gjort i går, og er det noe som ikke er fulgt opp — uten at hun må
@@ -134,10 +134,7 @@ export function digestHtml(companyName, d) {
   const app = (process.env.PUBLIC_FRONTEND_URL || "https://www.rentlogg.no").replace(/\/$/, "");
 
   return mailShell(`<div style="max-width:560px;margin:0 auto;font:400 15px/1.6 ${MAIL_FONT};color:${B.ink};">
-  <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;margin-bottom:22px;">
-    <tr><td style="width:34px;height:4px;background:${B.brand};font-size:0;line-height:0;">&nbsp;</td></tr>
-    <tr><td style="padding-top:9px;font:700 12px/1 ${MAIL_FONT};letter-spacing:0.14em;color:${B.brand};">SJEKK DET</td></tr>
-  </table>
+  ${mailLockup("SJEKK DET")}
 
   <div style="font:700 25px/1.2 ${MAIL_FONT};letter-spacing:-0.02em;">${escapeHtml(companyName)}</div>
   <div style="font:400 14px/1.5 ${MAIL_FONT};color:${B.muted};padding-top:5px;">${fmtDate(d.date)}</div>

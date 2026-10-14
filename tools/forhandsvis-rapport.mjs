@@ -273,6 +273,16 @@ const vakter = [
   [!alt.includes("display:flex"), "ingen display:flex (Outlook ignorerer den)"],
   [!alt.includes("Besøk null"), "ingen «Besøk null» på virtuell dag"],
   [funnetGammel.length === 0, `ingen farger utenfor src/brand.js${funnetGammel.length ? ` — fant ${funnetGammel.join(", ")}` : ""}`],
+  // En hårstrek tegnet som en celle med bakgrunnsfarge, `font-size:0;line-height:0` og en `&nbsp;`
+  // inni ble en 50px violett kloss i Outlook, og gikk rett i produksjon 2026-10-13. Trikset
+  // forutsetter at klienten respekterer BÅDE font-size og line-height på en tom celle; Word-motoren
+  // gjør ingen av delene og faller tilbake på arvet skrift.
+  //
+  // Vakta ser etter en celle som ikke inneholder annet enn `&nbsp;` — altså en celle som bare er
+  // der for å tegne noe. Tegn streker med en RAMME i stedet; den tegnes av alle klienter, og den
+  // er automatisk like bred som innholdet. (`font-size:0` alene er greit der cella faktisk har
+  // innhold, f.eks. for å fjerne mellomrommet mellom inline-bilder.)
+  [!/>\s*&nbsp;\s*</.test(alt), "ingen celle som bare inneholder &nbsp; — tegn streker med border"],
 ];
 
 let feil = 0;

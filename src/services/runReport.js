@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import PDFDocument from "pdfkit";
 import sharp from "sharp";
-import { BRAND as B, MAIL_FONT, mailShell } from "../brand.js";
+import { BRAND as B, MAIL_FONT, mailShell, mailLockup } from "../brand.js";
 
 const PRIORITY_LABELS = { low: "Lav", medium: "Middels", high: "Høy" };
 
@@ -122,6 +122,10 @@ function buildSections(detail) {
   return [{ title: "Sjekkliste", items: detail.items, photos: detail.photos, note: detail.note }];
 }
 
+// Ett sted, fordi både PDF-en og e-posten må si det samme — og fordi det er den ene setningen i
+// rapporten som ikke er lov å miste.
+const BACKDATED_NOTE = "sjekket inn i etterkant";
+
 function formatStatus(detail) {
   const base = detail.completed_at
     ? `Ferdigstilt ${detail.completed_at.slice(0, 16)}${detail.signed_initials ? ` av ${detail.signed_initials}` : ""}`
@@ -129,7 +133,7 @@ function formatStatus(detail) {
   // The date this run is filed under is real (see checklists.js's backdated check-in), but the
   // check-in itself wasn't made that day — the report has to say so wherever it shows a date, not
   // just quietly pass it off as an ordinary same-day visit.
-  return detail.backdated ? `${base} (sjekket inn i etterkant)` : base;
+  return detail.backdated ? `${base} (${BACKDATED_NOTE})` : base;
 }
 
 // Renders a section/deviation's photos as a table row, dropping any that came back null (missing
@@ -161,16 +165,6 @@ async function photosHtmlFor(photos, boxSize) {
     )
     .join("");
   return `<tr><td style="padding:12px 16px 4px;border-top:1px solid ${B.line};font-size:0;line-height:0;">${imgs}</td></tr>`;
-}
-
-// Avsenderlåsen: en violett strek over dokumenttittelen. Loggstreken fra landingssiden, redusert
-// til det eneste en e-postklient garantert tegner — en fylt tabellcelle.
-function lockup(label) {
-  return `
-  <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;margin-bottom:22px;">
-    <tr><td style="width:34px;height:4px;background:${B.brand};font-size:0;line-height:0;">&nbsp;</td></tr>
-    <tr><td style="padding-top:9px;font:700 12px/1 ${MAIL_FONT};letter-spacing:0.14em;color:${B.brand};">${label}</td></tr>
-  </table>`;
 }
 
 // Tallene side om side. En tabell med én celle per tall, ikke grid.
@@ -271,22 +265,25 @@ export async function buildReportBody(detail) {
     : "";
 
   // Alt den gamle firekolonnetabellen bar, på én linje: besøksnummer, registrert, ferdigstilt,
-  // signatur. `detail.id` er null for en virtuell dag (se getVirtualDayDetail), så den utelates
-  // da i stedet for å skrive «Besøk null». formatStatus bærer «sjekket inn i etterkant», som MÅ
-  // bli med — den sier at datoen rapporten står under ikke er dagen renholderen var der.
-  // Bare FØRSTE tegn gjøres lite. `.toLowerCase()` på hele strengen gjorde «av TH» til «av th»
-  // — signaturen er initialer, og initialer i små bokstaver er ikke lenger den samme signaturen.
-  const status = formatStatus(detail);
+  // signatur. Bare klokkeslett — datoen står på linja over, og `formatStatus` sin fulle dato ble
+  // lest som to ulike opplysninger av den som fikk rapporten. `detail.id` er null for en virtuell
+  // dag (se getVirtualDayDetail), så den utelates da i stedet for å skrive «Besøk null».
+  const ferdig = detail.completed_at
+    ? `ferdigstilt ${escapeHtml(detail.completed_at.slice(11, 16))}${detail.signed_initials ? ` av ${escapeHtml(detail.signed_initials)}` : ""}`
+    : "pågår";
   const meta = [
     detail.id ? `Besøk ${detail.id}` : null,
     `registrert ${escapeHtml(detail.started_at.slice(11, 16))}`,
-    escapeHtml(status.charAt(0).toLowerCase() + status.slice(1)),
+    ferdig,
+    // Rapporten står filtrert under en dato renholderen ikke var der. Den opplysningen skal ikke
+    // ligge pent inne i en setning — den får sin egen farge.
+    detail.backdated ? `<span style="color:${B.warnText};font-weight:700;">${BACKDATED_NOTE}</span>` : null,
   ]
     .filter(Boolean)
     .join(" &middot; ");
 
   return `<div style="max-width:620px;margin:0 auto;font:400 15px/1.6 ${MAIL_FONT};color:${B.ink};">
-  ${lockup("RENHOLDSRAPPORT")}
+  ${mailLockup("RENHOLDSRAPPORT")}
   <div style="font:700 25px/1.2 ${MAIL_FONT};letter-spacing:-0.02em;color:${B.ink};">${escapeHtml(detail.site_name)}</div>
   <div style="font:400 14px/1.5 ${MAIL_FONT};color:${B.ink2};padding-top:5px;">
     ${escapeHtml(detail.started_at.slice(0, 10))} &middot; ${escapeHtml(detail.cleaner_name)}${detail.site_address ? `<br>${escapeHtml(detail.site_address)}` : ""}${detail.client_name ? ` &middot; ${escapeHtml(detail.client_name)}` : ""}
