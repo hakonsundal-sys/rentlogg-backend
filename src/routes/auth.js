@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { countPersonalPhotosForUser } from "../services/personalPhotos.js";
 import bcrypt from "bcryptjs";
 import multer from "multer";
 import path from "node:path";
@@ -464,6 +465,9 @@ authRouter.delete("/users/:id", requireAuth, requireRole("admin", "super_admin")
     // Sjekkliste-utfyllinger, også utkast: user_id er en fremmednøkkel, og et halvt utfylt skjema
     // er like mye noe den ansatte har gjort som et innsendt.
     sjekklister: db.prepare("SELECT COUNT(*) AS n FROM simple_checklist_submissions WHERE user_id = ?").get(req.params.id).n,
+    // «Mine bilder»: personlig dokumentasjon, og user_id er en fremmednøkkel. Samme regel som resten —
+    // slettes den ansatte, forsvinner bildene stille; derfor blokkerer de, og kontoen deaktiveres i stedet.
+    "personlige bilder": countPersonalPhotosForUser(req.params.id),
   };
   const withHistory = Object.entries(counts).filter(([, n]) => n > 0);
   if (withHistory.length > 0) {

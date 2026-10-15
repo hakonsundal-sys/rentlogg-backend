@@ -3,6 +3,7 @@ import path from "node:path";
 import { db } from "../db.js";
 import { requireAuthQueryOrHeader } from "../middleware/auth.js";
 import { isModuleEnabled } from "../modules.js";
+import "../services/personalPhotos.js"; // creates personal_photos before the lookup below can need it
 
 // Replaces the old `app.use("/uploads", express.static(uploadsDir))`, which served every
 // uploaded file — deviation/checklist/room photos, site documents, avatars — to anyone who knew
@@ -185,6 +186,21 @@ function serveByFilename(req, res, filename, legacy) {
       (checklistPhoto.submitted_at || checklistPhoto.user_id === req.user.id);
     if (!allowed) return refuse(res);
     sendStoredFile(res, null, checklistPhoto.file_path);
+    return true;
+  }
+
+  // "Mine bilder": a cleaner's own photos. The person they belong to, or an admin/manager in the same
+  // company — never a colleague and never a customer, whatever site the colleague or customer works for.
+  const byPersonal = matchOn("file_path", filename, legacy);
+  const personal = db
+    .prepare(`SELECT file_path, user_id, company_id FROM personal_photos WHERE ${byPersonal.sql}`)
+    .get(...byPersonal.args);
+
+  if (personal && path.basename(personal.file_path) === filename) {
+    const managesStaff = req.user.role === "admin" || req.user.role === "manager";
+    const allowed = personal.company_id === req.user.company_id && (personal.user_id === req.user.id || managesStaff);
+    if (!allowed) return refuse(res);
+    sendStoredFile(res, null, personal.file_path);
     return true;
   }
 
