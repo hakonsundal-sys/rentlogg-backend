@@ -598,7 +598,74 @@ ensureColumn("simple_checklists", "month_day", "month_day INTEGER");
 ensureColumn("simple_checklist_submissions", "client_key", "client_key TEXT");
 ensureColumn("simple_checklist_submissions", "completed_offline", "completed_offline INTEGER NOT NULL DEFAULT 0");
 ensureColumn("simple_checklist_submissions", "client_completed_at", "client_completed_at TEXT");
+
+// Hvem som utførte prøverunden: 'company' (OKV, som er alt som fantes før denne kolonnen) eller
+// 'customer' (kundens egen, uavhengige verifisering av arbeidet OKV har gjort — Sinkaberg tar
+// ATP-prøver på rom OKV vasker). Formålet er motsatt selv om formen er lik: OKVs runder
+// dokumenterer eget arbeid, kundens etterprøver det. Blandes de i én liste mister begge poenget,
+// og derfor filtrerer hver leserute på denne kolonnen i stedet for å vise alt til alle.
+//
+// Samme vokabular som rooms.responsible, med vilje: spørsmålet «hvem sin jobb er dette» har
+// allerede et svar i denne basen, og en ny akse ville vært enda en å holde styr på.
+// Standardverdien gjør hver eksisterende runde til OKVs, som de er — ingen etterfylling.
+// Ingen CHECK, som alle andre ensureColumn-felt her; valideres i ruta.
+ensureColumn("sample_rounds", "performed_by", "performed_by TEXT DEFAULT 'company'");
+
+// Avviket et prøveresultat utløste, koblet tilbake til punktet det kom fra. Uten denne bærer
+// avviket bare objektnavnet som tekst i room_task_label, og «hvilket punkt var det egentlig»
+// må gjettes ut fra navnelikhet — som er nøyaktig det room_run_items.room_checklist_item_id
+// finnes for å slippe et annet sted i basen.
+//
+// Dette er så nært «objektet» vi kommer i dag. Objekt er et eget nivå i prosjektplanens hierarki
+// (Rom → Objekt → Oppgave) som systemet ikke har ennå; får det en tabell senere, er det
+// sample_points.object som blir fremmednøkkelen, og avviket arver koblingen gjennom denne.
+//
+// Kan ikke bli hengende: et avvik oppstår bare ved avlesning, og en avlest runde kan ikke
+// slettes (se DELETE /samples/:id). Nullable fordi hvert avvik som ikke kom fra en prøve har
+// den tom.
+ensureColumn("deviations", "sample_point_id", "sample_point_id INTEGER REFERENCES sample_points(id)");
+
+// Grenseverdier per prøvepunkt. Fram til nå lå de som to konstanter i routes/samples.js, lest av
+// Hygicults totalkim-tabell på OKVs skjema BA002 — én skala for alle punkter på alle lokasjoner.
+// To ting gjorde det utilstrekkelig:
+//
+//   1. ATP ble lagret og aldri vurdert. Det fantes ingen grense for den i det hele tatt, så en
+//      ATP-måling kunne verken bli grønn eller utløse avvik. For en kunde som tar nettopp
+//      ATP-prøver var modulen dermed et lagringssted, ikke en kontroll.
+//   2. Et sluk og en skjærebenk har ikke samme akseptgrense. Én global skala tvinger den
+//      strengeste eller den slappeste på alle.
+//
+// Navnene speiler konstantene de overstyrer (TOTALKIM_BRA / TOTALKIM_MINDRE_BRA), så det er
+// synlig hva som er standardverdien når punktets egen står tom. Null = bruk konstanten for
+// totalkim, og for ATP = ingen vurdering (det finnes ingen bransjestandard å falle tilbake på).
+//
+// Kolonnene ligger på punktet, ikke i en innstilling — da er de frosset av seg selv: PATCH på et
+// punkt avvises så snart runden er avlest, så en grense kan ikke endres etter at resultatet er
+// signert. Samme prinsipp som room_run_items, som fryser sine grenseverdier inn i dagens besøk.
+//
+// Settes bare av admin/driftsleder. En kunde kan se dem, men ikke endre dem: grensen avgjør når
+// OKV får et avvik mot seg, og den som skal stryke bestemmer ikke strykgrensen.
+ensureColumn("sample_points", "totalkim_bra", "totalkim_bra REAL");
+ensureColumn("sample_points", "totalkim_mindre_bra", "totalkim_mindre_bra REAL");
+ensureColumn("sample_points", "atp_max", "atp_max REAL");
 db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_simple_checklist_submissions_client_key ON simple_checklist_submissions(company_id, client_key)");
+
+// Etterkontroll ble en egen modul 2026-10-15 (se modules.js). En ny modul står av som standard,
+// men denne funksjonen er allerede i bruk — så et firma som har etterkontrollert minst ett rom,
+// skal beholde flaten gjennom oppgraderingen i stedet for å miste den på deploy-dagen. Uten dette
+// ville arbeidslista til teamlederen blitt borte uten at noen hadde skrudd av noe.
+//
+// Bare for firmaer uten rad fra før: har en super_admin skrudd modulen av med vilje, skal den
+// forbli av. Kjører hver oppstart, men er en no-op etter første gang (UNIQUE + DO NOTHING).
+db.prepare(
+  `INSERT INTO company_modules (company_id, module_key, enabled)
+     SELECT DISTINCT s.company_id, 'etterkontroll', 1
+       FROM room_runs rr
+       JOIN rooms r ON r.id = rr.room_id
+       JOIN sites s ON s.id = r.site_id
+      WHERE rr.controlled_at IS NOT NULL AND s.company_id IS NOT NULL
+     ON CONFLICT(company_id, module_key) DO NOTHING`
+).run();
 
 // Lookup indexes for the hot read paths. Last, because several cover columns added by ensureColumn
 // above — see the note at the top of dbIndexes.js.
