@@ -22,9 +22,23 @@ function computeTrial(companyId) {
   return { daysLeft, siteCount, pricePerSite: PRICE_PER_SITE, monthlyTotal: siteCount * PRICE_PER_SITE };
 }
 
+// Optional ?department_id=N narrows every number and list to the locations of one department (avd.
+// Vest/Øst/Midt/Sør). Left out it is the whole company, as before. The trial/price block is about the
+// company's subscription, not a department, so it stays company-wide.
 dashboardRouter.get("/summary", requireAuth, requireRole("admin", "manager"), (req, res) => {
   const today = todayInOslo();
   const companyId = req.user.company_id;
+
+  let departmentId = null;
+  if (req.query.department_id !== undefined && req.query.department_id !== "") {
+    departmentId = Number(req.query.department_id);
+    const dept = Number.isInteger(departmentId) && departmentId > 0
+      ? db.prepare("SELECT id FROM departments WHERE id = ? AND company_id = ?").get(departmentId, companyId)
+      : null;
+    if (!dept) return res.status(400).json({ code: "invalid_department", error: "Ukjent avdeling." });
+  }
+  const deptSql = departmentId ? " AND s.department_id = ?" : "";
+  const deptParams = departmentId ? [departmentId] : [];
 
   // Runs are stored in UTC; fetch a window around today's UTC date, then filter to the exact
   // Oslo calendar day in JS (same approach as services/schedule.js).
@@ -33,9 +47,9 @@ dashboardRouter.get("/summary", requireAuth, requireRole("admin", "manager"), (r
       `SELECT r.*, s.name AS site_name, u.name AS cleaner_name FROM checklist_runs r
        JOIN sites s ON s.id = r.site_id
        JOIN users u ON u.id = r.cleaner_id
-       WHERE s.company_id = ? AND r.started_at >= date(?, '-1 day') AND r.started_at < date(?, '+2 day')`
+       WHERE s.company_id = ? AND r.started_at >= date(?, '-1 day') AND r.started_at < date(?, '+2 day')${deptSql}`
     )
-    .all(companyId, today, today);
+    .all(companyId, today, today, ...deptParams);
   const runsToday = candidateRuns.filter((r) => toOsloDateStr(r.started_at) === today);
 
   const totalRunsToday = runsToday.length;
@@ -45,10 +59,12 @@ dashboardRouter.get("/summary", requireAuth, requireRole("admin", "manager"), (r
   const openDeviationsCount = db
     .prepare(
       `SELECT COUNT(*) AS n FROM deviations d JOIN sites s ON s.id = d.site_id
-       WHERE d.status != 'resolved' AND s.company_id = ?`
+       WHERE d.status != 'resolved' AND s.company_id = ?${deptSql}`
     )
-    .get(companyId).n;
-  const activeSites = db.prepare("SELECT COUNT(*) AS n FROM sites WHERE company_id = ?").get(companyId).n;
+    .get(companyId, ...deptParams).n;
+  const activeSites = db
+    .prepare(`SELECT COUNT(*) AS n FROM sites s WHERE s.company_id = ?${deptSql}`)
+    .get(companyId, ...deptParams).n;
 
   const recentActivity = [...runsToday]
     .sort((a, b) => b.started_at.localeCompare(a.started_at))
@@ -68,6 +84,7 @@ dashboardRouter.get("/summary", requireAuth, requireRole("admin", "manager"), (r
     });
 
   const plannedToday = getSitesScheduledOn(today, companyId)
+    .filter((s) => !departmentId || s.department_id === departmentId)
     .filter((s) => s.scheduleStatus === "missing")
     .map((s) => ({
       siteId: s.id,
