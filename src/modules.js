@@ -69,6 +69,27 @@ export const MODULES = [
     defaultEnabled: false,
   },
   {
+    key: "etterkontroll",
+    name: "Etterkontroll",
+    description:
+      "Teamlederens egen kontroll av utført renhold: arbeidsliste over rom som venter, hvert " +
+      "punkt vurdert som godkjent, mangel eller kritisk avvik, og egen signatur på kontrollen.",
+    // Egen modul fra 2026-10-15. Hvorfor dette ikke bare er kjerne, når produktet heter
+    // «Dokumentert etterkontroll»: renholderen etterkontrollerer alltid sitt eget arbeid — det
+    // er en del av å gjøre jobben ferdig, og det er dét taglinen beskriver. Den står.
+    //
+    // Modulen selger noe annet: at en ANNEN person går over arbeidet etterpå, vurderer punkt for
+    // punkt og setter navnet sitt under. Det forutsetter en teamleder som faktisk gjør runden.
+    // Et firma uten den rollen får i dag et menypunkt som aldri blir brukt, og en arbeidsliste
+    // som bare vokser.
+    //
+    // Som for hygiene styrer modulen hva som kan UTFØRES, ikke hva som allerede er dokumentert:
+    // en kontroll som ligger på et besøk vises videre i besøksvisning, tidslinje og
+    // revisjonsrapport selv om modulen skrus av. Dokumentasjon som forsvinner fordi et abonnement
+    // ble endret, er ikke dokumentasjon.
+    defaultEnabled: false,
+  },
+  {
     key: "checklist",
     // Navnet valgt av Håkon 2026-10-03.
     name: "Sjekk det – det er kjekt det",
@@ -85,6 +106,7 @@ export const MODULES = [
 
 export const MODULE_CHECKLIST = "checklist";
 export const MODULE_SAMPLING = "sampling";
+export const MODULE_ETTERKONTROLL = "etterkontroll";
 
 const MODULE_BY_KEY = new Map(MODULES.map((m) => [m.key, m]));
 

@@ -3,11 +3,11 @@ import multer from "multer";
 import path from "node:path";
 import Anthropic from "@anthropic-ai/sdk";
 import { db } from "../db.js";
-import { requireAuth, requireRole } from "../middleware/auth.js";
+import { requireAuth, requireRole, requireModule } from "../middleware/auth.js";
 import { translationLimiter, pdfImportLimiter } from "../middleware/rateLimits.js";
 import { todayInOslo } from "../services/schedule.js";
 import { getRoomsForSite, findOrCreateTodayRoomRun, findOrCreateRoomRunForDate, findRoomRunForDate, getMonthlyItemsForSite, getRoomGridForSiteMonth, getRoomRunItems, ensureRunItemOptions, measurementVerdict, parseMeasurement, contactSatisfied, contactRemainingSeconds, measurementRangeLabel, deleteRoomRecords } from "../services/rooms.js";
-import { isModuleEnabled } from "../modules.js";
+import { isModuleEnabled, MODULE_ETTERKONTROLL } from "../modules.js";
 import { safeOriginalName, compressUploadedPhoto, imageFileFilter, removeUploadedFile, photoKindFrom, UploadRejectedError } from "../utils/uploads.js";
 import { logQualityEvent } from "../services/qualityLog.js";
 import { weekdayFrom, assigneeFrom, INVALID_ASSIGNEE } from "../utils/schedules.js";
@@ -1466,7 +1466,7 @@ roomsRouter.patch("/runs/:runId/items/:itemId/approve", requireAuth, requireRole
 // Vinduet er dager tilbake i tid, ikke «i dag», fordi en teamleder tar igjen etterslep etter en
 // helg eller et sykefravær. Standard 14 dager; eldre enn det er ikke lenger daglig etterkontroll
 // og hører hjemme i historikken i stedet.
-roomsRouter.get("/awaiting-control", requireAuth, requireRole("admin", "manager"), (req, res) => {
+roomsRouter.get("/awaiting-control", requireAuth, requireRole("admin", "manager"), requireModule(MODULE_ETTERKONTROLL), (req, res) => {
   const days = Math.min(Math.max(Number(req.query.days) || 14, 1), 90);
 
   const rows = db
@@ -1535,7 +1535,7 @@ function cleanerIsDone(roomRun) {
   return !!(roomRun.completed_at || roomRun.ready_for_approval_at);
 }
 
-roomsRouter.patch("/runs/:runId/items/:itemId/control", requireAuth, requireRole("admin", "manager"), (req, res) => {
+roomsRouter.patch("/runs/:runId/items/:itemId/control", requireAuth, requireRole("admin", "manager"), requireModule(MODULE_ETTERKONTROLL), (req, res) => {
   const { roomRun, status, code, error } = getRoomRunScoped(req.params.runId, req.user);
   if (error) return res.status(status).json({ code, error });
   if (!cleanerIsDone(roomRun)) {
@@ -1573,7 +1573,7 @@ roomsRouter.patch("/runs/:runId/items/:itemId/control", requireAuth, requireRole
 // Signaturen på at hele rommet er etterkontrollert. Punktene bærer vurderingene; denne bærer at
 // noen står for at kontrollen faktisk er gjennomført — og den loggføres, fordi det er dette
 // steget produktet er oppkalt etter og det en revisor vil be om å få se.
-roomsRouter.post("/runs/:runId/control", requireAuth, requireRole("admin", "manager"), (req, res) => {
+roomsRouter.post("/runs/:runId/control", requireAuth, requireRole("admin", "manager"), requireModule(MODULE_ETTERKONTROLL), (req, res) => {
   const { roomRun, status, code, error } = getRoomRunScoped(req.params.runId, req.user);
   if (error) return res.status(status).json({ code, error });
   if (!cleanerIsDone(roomRun)) {
